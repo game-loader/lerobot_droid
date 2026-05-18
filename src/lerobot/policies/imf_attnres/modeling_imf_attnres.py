@@ -260,6 +260,22 @@ class IMFAttnResModel(nn.Module):
     def _jvp_tangents(v: Tensor, r: Tensor, t: Tensor):
         return v.detach(), torch.zeros_like(r), torch.ones_like(t)
 
+    def _sample_logit_normal(self, batch_size: int, device: torch.device, dtype: torch.dtype) -> Tensor:
+        normal = torch.randn(batch_size, device=device, dtype=dtype)
+        return torch.sigmoid(normal * self.config.p_std + self.config.p_mean)
+
+    def _sample_tr(self, batch_size: int, device: torch.device, dtype: torch.dtype) -> tuple[Tensor, Tensor]:
+        t = self._sample_logit_normal(batch_size, device, dtype)
+        r = self._sample_logit_normal(batch_size, device, dtype)
+
+        data_size = int(batch_size * self.config.data_proportion)
+        fm_mask = torch.arange(batch_size, device=device) < data_size
+        r = torch.where(fm_mask, t, r)
+
+        t_final = torch.maximum(t, r)
+        r_final = torch.minimum(t, r)
+        return t_final, r_final
+
     def fn(self, z: Tensor, r: Tensor, t: Tensor, cond: Tensor | None = None) -> Tensor:
         return self.head(z, r, t, cond=cond)
 
@@ -392,9 +408,7 @@ class IMFAttnResModel(nn.Module):
 
         x = actions
         e = torch.randn_like(x)
-        t = torch.rand(batch_size, device=x.device, dtype=x.dtype)
-        r = torch.rand(batch_size, device=x.device, dtype=x.dtype)
-        t, r = torch.maximum(t, r), torch.minimum(t, r)
+        t, r = self._sample_tr(batch_size, device=x.device, dtype=x.dtype)
 
         t_broadcast = self._broadcast_batch_time(t, x)
         z_t = (1 - t_broadcast) * x + t_broadcast * e

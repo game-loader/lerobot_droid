@@ -52,9 +52,12 @@ class IMFAttnResConfig(PreTrainedConfig):
     attn_res_eps: float = 1e-6
     attn_res_rope_theta: float = 10000.0
 
-    # Inference / optimization.
+    # Inference / loss computation / optimization.
     num_inference_steps: int = 1
     do_mask_loss_for_padding: bool = True
+    p_mean: float = -0.4
+    p_std: float = 1.0
+    data_proportion: float = 0.5
     compile_model: bool = False
     compile_mode: str = "reduce-overhead"
     optimizer_lr: float = 1e-4
@@ -82,6 +85,10 @@ class IMFAttnResConfig(PreTrainedConfig):
             )
         if self.num_inference_steps < 1:
             raise ValueError(f"num_inference_steps must be >= 1, got {self.num_inference_steps}.")
+        if self.p_std <= 0:
+            raise ValueError(f"p_std must be > 0, got {self.p_std}.")
+        if not (0.0 <= self.data_proportion <= 1.0):
+            raise ValueError(f"data_proportion must be in [0, 1], got {self.data_proportion}.")
         if not self.vision_backbone.startswith("resnet"):
             raise ValueError(f"vision_backbone must be a torchvision ResNet name, got {self.vision_backbone}.")
         if self.n_head < 1:
