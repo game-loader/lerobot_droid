@@ -49,6 +49,7 @@ from .diffusion.configuration_diffusion import DiffusionConfig
 from .eo1.configuration_eo1 import EO1Config
 from .gaussian_actor.configuration_gaussian_actor import GaussianActorConfig
 from .groot.configuration_groot import GrootConfig
+from .imf_attnres.configuration_imf_attnres import IMFAttnResConfig
 from .multi_task_dit.configuration_multi_task_dit import MultiTaskDiTConfig
 from .pi0.configuration_pi0 import PI0Config
 from .pi05.configuration_pi05 import PI05Config
@@ -151,6 +152,10 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
         from .eo1.modeling_eo1 import EO1Policy
 
         return EO1Policy
+    elif name == "imf-attnres":
+        from .imf_attnres.modeling_imf_attnres import IMFAttnResPolicy
+
+        return IMFAttnResPolicy
     else:
         try:
             return _get_policy_cls_from_policy_name(name=name)
@@ -203,6 +208,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return WallXConfig(**kwargs)
     elif policy_type == "eo1":
         return EO1Config(**kwargs)
+    elif policy_type == "imf-attnres":
+        return IMFAttnResConfig(**kwargs)
     else:
         try:
             config_cls = PreTrainedConfig.get_choice_class(policy_type)
@@ -414,6 +421,14 @@ def make_pre_post_processors(
             dataset_stats=kwargs.get("dataset_stats"),
         )
 
+    elif isinstance(policy_cfg, IMFAttnResConfig):
+        from .imf_attnres.processor_imf_attnres import make_imf_attnres_pre_post_processors
+
+        processors = make_imf_attnres_pre_post_processors(
+            config=policy_cfg,
+            dataset_stats=kwargs.get("dataset_stats"),
+        )
+
     else:
         try:
             processors = _make_processors_from_policy_config(
@@ -611,7 +626,7 @@ def _make_processors_from_policy_config(
     """
 
     policy_type = config.type
-    function_name = f"make_{policy_type}_pre_post_processors"
+    function_name = f"make_{policy_type.replace('-', '_')}_pre_post_processors"
     module_path = config.__class__.__module__.replace(
         "configuration_", "processor_"
     )  # e.g., configuration_diffusion -> processor_diffusion

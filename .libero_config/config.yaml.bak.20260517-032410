@@ -1,0 +1,4 @@
+assets: /home/droid/.libero/assets
+bddl_files: /tmp/lerobot-imf-attnres/.venv/lib/python3.12/site-packages/libero/libero/bddl_files
+datasets: /tmp/lerobot-imf-attnres/.venv/lib/python3.12/site-packages/libero/libero/../datasets
+init_states: /tmp/lerobot-imf-attnres/.venv/lib/python3.12/site-packages/libero/libero/init_files
