@@ -137,11 +137,13 @@ class AttnResOperator(nn.Module):
         super().__init__()
         self.pseudo_query = nn.Parameter(torch.zeros(d_model))
         self.key_norm = RMSNormNoWeight(eps=eps)
+        self.last_depth_attention_weights: Tensor | None = None
 
     def forward(self, sources: Tensor) -> Tensor:
         keys = self.key_norm(sources)
         logits = torch.einsum('d,nbtd->nbt', self.pseudo_query, keys)
         weights = F.softmax(logits, dim=0)
+        self.last_depth_attention_weights = weights.detach()
         return torch.einsum('nbt,nbtd->btd', weights, sources)
 
 

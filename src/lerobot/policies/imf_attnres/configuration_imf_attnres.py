@@ -58,6 +58,10 @@ class IMFAttnResConfig(PreTrainedConfig):
     p_mean: float = -0.4
     p_std: float = 1.0
     data_proportion: float = 0.5
+    loss_type: str = "pseudo_huber"
+    pseudo_huber_delta: float = 1.0
+    enable_imf_diagnostics: bool = False
+    imf_diagnostics_spike_loss_threshold: float = 0.2
     compile_model: bool = False
     compile_mode: str = "reduce-overhead"
     optimizer_lr: float = 1e-4
@@ -89,6 +93,18 @@ class IMFAttnResConfig(PreTrainedConfig):
             raise ValueError(f"p_std must be > 0, got {self.p_std}.")
         if not (0.0 <= self.data_proportion <= 1.0):
             raise ValueError(f"data_proportion must be in [0, 1], got {self.data_proportion}.")
+        if self.loss_type not in {"pseudo_huber", "mse"}:
+            raise ValueError(
+                "loss_type must be one of {'pseudo_huber', 'mse'}, got "
+                f"{self.loss_type!r}."
+            )
+        if self.pseudo_huber_delta <= 0:
+            raise ValueError(f"pseudo_huber_delta must be > 0, got {self.pseudo_huber_delta}.")
+        if self.imf_diagnostics_spike_loss_threshold < 0:
+            raise ValueError(
+                "imf_diagnostics_spike_loss_threshold must be >= 0, got "
+                f"{self.imf_diagnostics_spike_loss_threshold}."
+            )
         if not self.vision_backbone.startswith("resnet"):
             raise ValueError(f"vision_backbone must be a torchvision ResNet name, got {self.vision_backbone}.")
         if self.n_head < 1:

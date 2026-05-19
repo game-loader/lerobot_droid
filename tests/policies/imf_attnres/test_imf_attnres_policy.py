@@ -9,6 +9,7 @@ without providing any production implementation. They should fail until
 
 import inspect
 import os
+from contextlib import nullcontext
 from unittest.mock import patch
 
 import numpy as np
@@ -27,7 +28,10 @@ from lerobot.policies.factory import (
 )
 from lerobot.policies.imf_attnres.modeling_imf_attnres import IMFAttnResModel
 from lerobot.policies.pretrained import PreTrainedPolicy
+from lerobot.scripts import lerobot_train as lerobot_train_script
+from lerobot.scripts.lerobot_train import update_policy
 from lerobot.utils.constants import ACTION, OBS_IMAGES, OBS_STATE
+from lerobot.utils.logging_utils import AverageMeter, MetricsTracker
 
 POLICY_NAME = "imf-attnres"
 STATE_DIM = 8
@@ -180,6 +184,14 @@ def test_imf_attnres_default_tr_sampling_config_matches_pmf_logit_normal_default
     assert config.p_std == 1.0
     assert config.data_proportion == 0.5
 
+
+def test_imf_attnres_default_training_loss_is_pseudo_huber():
+    """IMF-AttnRes should train with pseudo-Huber loss by default."""
+    config = make_policy_config(POLICY_NAME, push_to_hub=False)
+
+    assert config.loss_type == "pseudo_huber"
+    assert config.pseudo_huber_delta == 1.0
+
 def test_imf_attnres_factory_returns_registered_config_and_policy_class():
     """Factory helpers should expose the new IMF-AttnRes config and policy classes."""
     policy_cls = get_policy_class(POLICY_NAME)
@@ -264,6 +276,198 @@ def test_imf_attnres_forward_returns_scalar_loss():
     assert loss.shape == ()
     assert loss.requires_grad
     assert output_dict is None or isinstance(output_dict, dict)
+
+
+def test_imf_attnres_pseudo_huber_loss_matches_formula():
+    """Pseudo-Huber loss should use delta^2 * (sqrt(1 + (error / delta)^2) - 1)."""
+    config = make_tiny_imf_attnres_config()
+    config.pseudo_huber_delta = 0.5
+    model = IMFAttnResModel(config)
+    error = torch.tensor([-1.0, 0.0, 0.25, 2.0])
+
+    loss = model._velocity_loss_from_error(error)
+
+    expected = config.pseudo_huber_delta**2 * (
+        torch.sqrt(1 + (error / config.pseudo_huber_delta) ** 2) - 1
+    )
+    torch.testing.assert_close(loss, expected)
+
+
+def test_imf_attnres_mse_loss_can_be_selected_for_ablation():
+    """MSE should remain selectable for direct ablations against the previous objective."""
+    config = make_tiny_imf_attnres_config()
+    config.loss_type = "mse"
+    model = IMFAttnResModel(config)
+    error = torch.tensor([-1.0, 0.0, 0.25, 2.0])
+
+    loss = model._velocity_loss_from_error(error)
+
+    torch.testing.assert_close(loss, error.square())
+
+
+def test_imf_attnres_forward_returns_wandb_diagnostics():
+    """Training forward should expose scalar diagnostics for WandB variance debugging."""
+    policy_cls = get_policy_class(POLICY_NAME)
+    config = make_tiny_imf_attnres_config()
+    config.enable_imf_diagnostics = True
+    policy = policy_cls(config)
+    policy.train()
+
+    loss, output_dict = policy.forward(make_libero_like_batch())
+
+    assert loss.shape == ()
+    assert isinstance(output_dict, dict)
+    expected_keys = {
+        "imf_diagnostics/spike_threshold",
+        "imf_diagnostics/spike/is_spike",
+        "imf_diagnostics/all/target_norm_mean",
+        "imf_diagnostics/all/u_norm_mean",
+        "imf_diagnostics/all/du_dt_norm_mean",
+        "imf_diagnostics/all/delta_du_dt_norm_mean",
+        "imf_diagnostics/all/delta_mean",
+        "imf_diagnostics/all/t_mean",
+        "imf_diagnostics/all/r_mean",
+        "imf_diagnostics/spike/target_norm_count",
+        "imf_diagnostics/non_spike/target_norm_count",
+        "imf_diagnostics/attnres/depth_attention_entropy_mean",
+        "imf_diagnostics/attnres/depth_attention_max_weight_mean",
+    }
+    assert expected_keys.issubset(output_dict)
+    assert output_dict["imf_diagnostics/spike_threshold"] == config.imf_diagnostics_spike_loss_threshold
+    assert output_dict["imf_diagnostics/spike/is_spike"] == float(loss.detach().item() > 0.2)
+    bucket_count = (
+        output_dict["imf_diagnostics/spike/target_norm_count"]
+        + output_dict["imf_diagnostics/non_spike/target_norm_count"]
+    )
+    assert bucket_count == 2.0
+    for key, value in output_dict.items():
+        assert isinstance(value, float), key
+        assert np.isfinite(value), key
+
+
+def test_imf_attnres_diagnostics_are_disabled_by_default():
+    """IMF diagnostics should be explicit opt-in to avoid noisy per-step WandB logs."""
+    policy_cls = get_policy_class(POLICY_NAME)
+    config = make_tiny_imf_attnres_config()
+    policy = policy_cls(config)
+    policy.train()
+
+    loss, output_dict = policy.forward(make_libero_like_batch())
+
+    assert loss.shape == ()
+    assert output_dict is None
+
+
+def test_imf_attnres_diagnostics_spike_threshold_is_configurable():
+    """The spike/non-spike split should use the policy config threshold."""
+    policy_cls = get_policy_class(POLICY_NAME)
+    config = make_tiny_imf_attnres_config()
+    config.enable_imf_diagnostics = True
+    config.imf_diagnostics_spike_loss_threshold = 1_000_000.0
+    policy = policy_cls(config)
+    policy.train()
+
+    _, output_dict = policy.forward(make_libero_like_batch())
+
+    assert isinstance(output_dict, dict)
+    assert output_dict["imf_diagnostics/spike_threshold"] == 1_000_000.0
+    assert output_dict["imf_diagnostics/spike/is_spike"] == 0.0
+    assert output_dict["imf_diagnostics/spike/target_norm_count"] == 0.0
+    assert output_dict["imf_diagnostics/non_spike/target_norm_count"] == 2.0
+
+
+class _TinyAccelerator:
+    num_processes = 1
+
+    def autocast(self):
+        return nullcontext()
+
+    def backward(self, loss):
+        loss.backward()
+
+    def clip_grad_norm_(self, parameters, max_norm):
+        return torch.nn.utils.clip_grad_norm_(parameters, max_norm)
+
+    def unwrap_model(self, model, keep_fp32_wrapper=True):
+        return model
+
+
+def _make_train_metrics() -> MetricsTracker:
+    return MetricsTracker(
+        batch_size=2,
+        num_frames=4,
+        num_episodes=1,
+        metrics={
+            "loss": AverageMeter("loss", ":.3f"),
+            "grad_norm": AverageMeter("grdn", ":.3f"),
+            "lr": AverageMeter("lr", ":0.1e"),
+            "update_s": AverageMeter("updt_s", ":.3f"),
+        },
+        accelerator=_TinyAccelerator(),
+    )
+
+
+def test_imf_attnres_update_policy_logs_gradient_norm_buckets():
+    """Training update should log total, AttnRes, and main-DiT gradient norms."""
+    policy_cls = get_policy_class(POLICY_NAME)
+    config = make_tiny_imf_attnres_config()
+    config.enable_imf_diagnostics = True
+    policy = policy_cls(config)
+    policy.train()
+    optimizer = torch.optim.Adam(policy.get_optim_params(), lr=1e-4)
+
+    _, output_dict = update_policy(
+        _make_train_metrics(),
+        policy,
+        make_libero_like_batch(),
+        optimizer,
+        grad_clip_norm=10.0,
+        accelerator=_TinyAccelerator(),
+    )
+
+    assert isinstance(output_dict, dict)
+    for key in ("grad_norm/total", "grad_norm/attnres", "grad_norm/main_dit"):
+        assert key in output_dict
+        assert isinstance(output_dict[key], float)
+        assert np.isfinite(output_dict[key])
+        assert output_dict[key] >= 0.0
+
+
+def test_imf_attnres_update_policy_omits_gradient_norm_buckets_when_diagnostics_disabled():
+    """Gradient diagnostics should be disabled unless the policy opts in."""
+    policy_cls = get_policy_class(POLICY_NAME)
+    config = make_tiny_imf_attnres_config()
+    policy = policy_cls(config)
+    policy.train()
+    optimizer = torch.optim.Adam(policy.get_optim_params(), lr=1e-4)
+
+    _, output_dict = update_policy(
+        _make_train_metrics(),
+        policy,
+        make_libero_like_batch(),
+        optimizer,
+        grad_clip_norm=10.0,
+        accelerator=_TinyAccelerator(),
+    )
+
+    assert output_dict == {}
+
+
+def test_lerobot_train_splits_imf_diagnostics_for_every_step_wandb_logging():
+    """IMF and gradient diagnostics should be identifiable for every-step WandB logging."""
+    every_step, regular = lerobot_train_script._split_every_step_wandb_diagnostics(
+        {
+            "imf_diagnostics/all/target_norm_mean": 1.0,
+            "grad_norm/attnres": 2.0,
+            "sample_weight_mean_weight": 3.0,
+        }
+    )
+
+    assert every_step == {
+        "imf_diagnostics/all/target_norm_mean": 1.0,
+        "grad_norm/attnres": 2.0,
+    }
+    assert regular == {"sample_weight_mean_weight": 3.0}
 
 
 def test_imf_attnres_predict_action_chunk_and_select_action_shapes():

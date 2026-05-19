@@ -5,7 +5,6 @@ from contextlib import nullcontext
 
 import einops
 import torch
-import torch.nn.functional as F  # noqa: N812
 import torchvision
 from torch import Tensor, nn
 
@@ -172,7 +171,8 @@ class IMFAttnResPolicy(PreTrainedPolicy):
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, None]:
         batch = self._stack_images(batch)
-        return self.model.compute_loss(batch), None
+        loss, diagnostics = self.model.compute_loss(batch)
+        return loss, diagnostics or None
 
 
 class IMFAttnResModel(nn.Module):
@@ -313,6 +313,107 @@ class IMFAttnResModel(nn.Module):
         delta = self._broadcast_batch_time(t - r, u)
         return u + delta * du_dt.detach()
 
+    def _velocity_loss_from_error(self, error: Tensor) -> Tensor:
+        if self.config.loss_type == "mse":
+            return error.square()
+        if self.config.loss_type != "pseudo_huber":
+            raise ValueError(f"Unsupported IMF-AttnRes loss_type: {self.config.loss_type!r}.")
+        delta = float(self.config.pseudo_huber_delta)
+        return delta**2 * (torch.sqrt(1 + (error / delta).square()) - 1)
+
+    @staticmethod
+    def _vector_norm_per_sample(value: Tensor) -> Tensor:
+        return value.detach().float().flatten(start_dim=1).norm(dim=1)
+
+    @staticmethod
+    def _scalar_per_sample(value: Tensor) -> Tensor:
+        return value.detach().float().reshape(value.shape[0], -1).mean(dim=1)
+
+    @staticmethod
+    def _safe_std(value: Tensor) -> Tensor:
+        if value.numel() <= 1:
+            return torch.zeros((), device=value.device, dtype=value.dtype)
+        return value.std(unbiased=False)
+
+    @classmethod
+    def _add_bucket_stats(
+        cls,
+        diagnostics: dict[str, float],
+        prefix: str,
+        name: str,
+        values: Tensor,
+    ) -> None:
+        values = values.detach().float()
+        diagnostics[f"{prefix}/{name}_count"] = float(values.numel())
+        if values.numel() == 0:
+            return
+        diagnostics[f"{prefix}/{name}_mean"] = float(values.mean().item())
+        diagnostics[f"{prefix}/{name}_std"] = float(cls._safe_std(values).item())
+        diagnostics[f"{prefix}/{name}_max"] = float(values.max().item())
+
+    def _attnres_depth_attention_diagnostics(self) -> dict[str, float]:
+        weights = []
+        backbone = getattr(self.head, "attnres_backbone", None)
+        if backbone is None:
+            return {}
+        for layer in backbone.layers:
+            layer_weights = getattr(layer.attn_res, "last_depth_attention_weights", None)
+            if layer_weights is not None:
+                weights.append(layer_weights.float())
+        if not weights:
+            return {}
+
+        entropy_values = []
+        max_weight_values = []
+        for layer_weights in weights:
+            safe_weights = layer_weights.clamp_min(torch.finfo(torch.float32).tiny)
+            entropy_values.append((-(safe_weights * safe_weights.log()).sum(dim=0)).flatten())
+            max_weight_values.append(layer_weights.max(dim=0).values.flatten())
+        entropy = torch.cat(entropy_values)
+        max_weight = torch.cat(max_weight_values)
+        diagnostics: dict[str, float] = {}
+        self._add_bucket_stats(diagnostics, "imf_diagnostics/attnres", "depth_attention_entropy", entropy)
+        self._add_bucket_stats(diagnostics, "imf_diagnostics/attnres", "depth_attention_max_weight", max_weight)
+        return diagnostics
+
+    def _imf_training_diagnostics(
+        self,
+        *,
+        loss: Tensor,
+        target: Tensor,
+        u: Tensor,
+        du_dt: Tensor,
+        delta_du_dt: Tensor,
+        t: Tensor,
+        r: Tensor,
+    ) -> dict[str, float]:
+        spike_loss_threshold = float(self.config.imf_diagnostics_spike_loss_threshold)
+        is_spike = bool(loss.detach().float().item() > spike_loss_threshold)
+        spike_mask = torch.full((target.shape[0],), is_spike, device=target.device, dtype=torch.bool)
+        non_spike_mask = ~spike_mask
+
+        values = {
+            "target_norm": self._vector_norm_per_sample(target),
+            "u_norm": self._vector_norm_per_sample(u),
+            "du_dt_norm": self._vector_norm_per_sample(du_dt),
+            "delta_du_dt_norm": self._vector_norm_per_sample(delta_du_dt),
+            "delta": self._scalar_per_sample(t - r),
+            "t": self._scalar_per_sample(t),
+            "r": self._scalar_per_sample(r),
+        }
+
+        diagnostics: dict[str, float] = {
+            "imf_diagnostics/spike_threshold": spike_loss_threshold,
+            "imf_diagnostics/spike/is_spike": float(is_spike),
+            "imf_diagnostics/loss": float(loss.detach().float().item()),
+        }
+        for name, tensor in values.items():
+            self._add_bucket_stats(diagnostics, "imf_diagnostics/all", name, tensor)
+            self._add_bucket_stats(diagnostics, "imf_diagnostics/spike", name, tensor[spike_mask])
+            self._add_bucket_stats(diagnostics, "imf_diagnostics/non_spike", name, tensor[non_spike_mask])
+        diagnostics.update(self._attnres_depth_attention_diagnostics())
+        return diagnostics
+
     def _sample_one_step(
         self,
         z_t: Tensor,
@@ -397,7 +498,7 @@ class IMFAttnResModel(nn.Module):
         end = start + self.config.n_action_steps
         return action[:, start:end]
 
-    def compute_loss(self, batch: dict[str, Tensor]) -> Tensor:
+    def compute_loss(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict[str, float]]:
         assert set(batch).issuperset({OBS_STATE, ACTION})
         assert OBS_IMAGES in batch or OBS_ENV_STATE in batch
         actions = batch[ACTION]
@@ -415,12 +516,28 @@ class IMFAttnResModel(nn.Module):
 
         v = self.fn(z_t, t, t, cond=cond)
         u, du_dt = self._compute_u_and_du_dt(z_t, r, t, cond=cond, v=v)
-        compound_velocity = self._compound_velocity(u, du_dt, r, t)
+        delta = self._broadcast_batch_time(t - r, du_dt)
+        delta_du_dt = delta * du_dt.detach()
+        compound_velocity = u + delta_du_dt
         target = e - x
 
-        loss = F.mse_loss(compound_velocity, target, reduction="none")
+        loss = self._velocity_loss_from_error(compound_velocity - target)
         if self.config.do_mask_loss_for_padding and "action_is_pad" in batch:
             mask = (~batch["action_is_pad"]).unsqueeze(-1).to(loss.dtype)
             valid_count = mask.sum() * loss.shape[-1]
-            return (loss * mask).sum() / valid_count.clamp_min(1.0)
-        return loss.mean()
+            scalar_loss = (loss * mask).sum() / valid_count.clamp_min(1.0)
+        else:
+            scalar_loss = loss.mean()
+
+        diagnostics = {}
+        if self.config.enable_imf_diagnostics:
+            diagnostics = self._imf_training_diagnostics(
+                loss=scalar_loss,
+                target=target,
+                u=u,
+                du_dt=du_dt,
+                delta_du_dt=delta_du_dt,
+                t=t,
+                r=r,
+            )
+        return scalar_loss, diagnostics

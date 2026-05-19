@@ -62,6 +62,48 @@ from lerobot.utils.utils import (
 from .lerobot_eval import eval_policy_all
 
 
+def _grad_l2_norm(parameters) -> float:
+    squared_norm = 0.0
+    for parameter in parameters:
+        if parameter.grad is None:
+            continue
+        grad = parameter.grad.detach().float()
+        squared_norm += float(torch.sum(grad * grad).item())
+    return squared_norm**0.5
+
+
+def _gradient_norm_diagnostics(policy: PreTrainedPolicy) -> dict[str, float]:
+    named_parameters = list(policy.named_parameters())
+    attnres_parameters = [
+        parameter
+        for name, parameter in named_parameters
+        if "attnres_backbone" in name or "attn_res" in name
+    ]
+    main_dit_parameters = [
+        parameter
+        for name, parameter in named_parameters
+        if name.startswith("model.head.") and "attnres_backbone" not in name and "attn_res" not in name
+    ]
+    return {
+        "grad_norm/total": _grad_l2_norm(parameter for _, parameter in named_parameters),
+        "grad_norm/attnres": _grad_l2_norm(attnres_parameters),
+        "grad_norm/main_dit": _grad_l2_norm(main_dit_parameters),
+    }
+
+
+def _split_every_step_wandb_diagnostics(output_dict: dict | None) -> tuple[dict, dict]:
+    if not output_dict:
+        return {}, {}
+    every_step = {}
+    regular = {}
+    for key, value in output_dict.items():
+        if key.startswith("imf_diagnostics/") or key.startswith("grad_norm/"):
+            every_step[key] = value
+        else:
+            regular[key] = value
+    return every_step, regular
+
+
 def update_policy(
     train_metrics: MetricsTracker,
     policy: PreTrainedPolicy,
@@ -130,6 +172,15 @@ def update_policy(
 
     # Use accelerator's backward method
     accelerator.backward(loss)
+
+    if output_dict is None:
+        output_dict = {}
+    unwrapped_policy = accelerator.unwrap_model(policy, keep_fp32_wrapper=True)
+    if (
+        getattr(unwrapped_policy, "name", None) == "imf-attnres"
+        and getattr(unwrapped_policy.config, "enable_imf_diagnostics", False)
+    ):
+        output_dict.update(_gradient_norm_diagnostics(unwrapped_policy))
 
     # Clip gradients if specified
     if grad_clip_norm > 0:
@@ -488,14 +539,21 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
             logging.info(train_tracker)
             if wandb_logger:
                 wandb_log_dict = train_tracker.to_dict()
-                if output_dict:
-                    wandb_log_dict.update(output_dict)
+                every_step_output_dict, regular_output_dict = _split_every_step_wandb_diagnostics(output_dict)
+                if every_step_output_dict:
+                    wandb_log_dict.update(every_step_output_dict)
+                if regular_output_dict:
+                    wandb_log_dict.update(regular_output_dict)
                 # Log sample weighting statistics if enabled
                 if sample_weighter is not None:
                     weighter_stats = sample_weighter.get_stats()
                     wandb_log_dict.update({f"sample_weighting/{k}": v for k, v in weighter_stats.items()})
                 wandb_logger.log_dict(wandb_log_dict, step)
             train_tracker.reset_averages()
+        elif wandb_logger and is_main_process:
+            every_step_output_dict, _ = _split_every_step_wandb_diagnostics(output_dict)
+            if every_step_output_dict:
+                wandb_logger.log_dict(every_step_output_dict, step)
 
         if cfg.save_checkpoint and is_saving_step:
             if is_main_process:
