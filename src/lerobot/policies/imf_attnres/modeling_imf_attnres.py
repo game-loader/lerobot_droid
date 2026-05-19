@@ -322,6 +322,44 @@ class IMFAttnResModel(nn.Module):
         return delta**2 * (torch.sqrt(1 + (error / delta).square()) - 1)
 
     @staticmethod
+    def _dct_matrix(size: int, device: torch.device, dtype: torch.dtype) -> Tensor:
+        positions = torch.arange(size, device=device, dtype=dtype)
+        freqs = torch.arange(size, device=device, dtype=dtype).unsqueeze(1)
+        basis = torch.cos(torch.pi / size * (positions + 0.5) * freqs)
+        basis[0] *= (1.0 / size) ** 0.5
+        if size > 1:
+            basis[1:] *= (2.0 / size) ** 0.5
+        return basis
+
+    def _encode_action_latent(self, actions: Tensor) -> Tensor:
+        if self.config.action_latent_mode == "identity":
+            return actions
+        if self.config.action_latent_mode != "dct":
+            raise ValueError(f"Unsupported action_latent_mode: {self.config.action_latent_mode!r}.")
+        dct = self._dct_matrix(actions.shape[1], actions.device, actions.dtype)
+        return torch.einsum("kh,bhd->bkd", dct, actions)
+
+    def _decode_action_latent(self, latents: Tensor) -> Tensor:
+        if self.config.action_latent_mode == "identity":
+            return latents
+        if self.config.action_latent_mode != "dct":
+            raise ValueError(f"Unsupported action_latent_mode: {self.config.action_latent_mode!r}.")
+        dct = self._dct_matrix(latents.shape[1], latents.device, latents.dtype)
+        return torch.einsum("kh,bkd->bhd", dct, latents)
+
+    def _action_latent_loss_weights(self, device: torch.device, dtype: torch.dtype) -> Tensor:
+        if self.config.action_latent_mode != "dct":
+            return torch.ones(1, self.config.horizon, 1, device=device, dtype=dtype)
+        if self.config.horizon == 1:
+            normalized_freq = torch.zeros(1, device=device, dtype=dtype)
+        else:
+            normalized_freq = torch.linspace(0.0, 1.0, self.config.horizon, device=device, dtype=dtype)
+        weights = 1.0 + float(self.config.dct_loss_high_freq_weight) * normalized_freq.pow(
+            float(self.config.dct_loss_freq_power)
+        )
+        return weights.view(1, self.config.horizon, 1)
+
+    @staticmethod
     def _vector_norm_per_sample(value: Tensor) -> Tensor:
         return value.detach().float().flatten(start_dim=1).norm(dim=1)
 
@@ -478,7 +516,7 @@ class IMFAttnResModel(nn.Module):
         cond = self._prepare_conditioning(batch)
         device = get_device_from_parameters(self)
         dtype = get_dtype_from_parameters(self)
-        action = noise if noise is not None else torch.randn(
+        action_latent = noise if noise is not None else torch.randn(
             (batch_size, self.config.horizon, self.config.action_feature.shape[0]),
             device=device,
             dtype=dtype,
@@ -493,7 +531,8 @@ class IMFAttnResModel(nn.Module):
         for step_index in range(self.config.num_inference_steps):
             t = torch.full((batch_size,), float(time_grid[step_index].item()), device=cond.device, dtype=cond.dtype)
             r = torch.full((batch_size,), float(time_grid[step_index + 1].item()), device=cond.device, dtype=cond.dtype)
-            action = self._sample_one_step(action, r=r, t=t, cond=cond)
+            action_latent = self._sample_one_step(action_latent, r=r, t=t, cond=cond)
+        action = self._decode_action_latent(action_latent)
         start = self.config.n_obs_steps - 1
         end = start + self.config.n_action_steps
         return action[:, start:end]
@@ -507,7 +546,7 @@ class IMFAttnResModel(nn.Module):
         assert batch[OBS_STATE].shape[1] == self.config.n_obs_steps
         cond = self._prepare_conditioning(batch)
 
-        x = actions
+        x = self._encode_action_latent(actions)
         e = torch.randn_like(x)
         t, r = self._sample_tr(batch_size, device=x.device, dtype=x.dtype)
 
@@ -522,6 +561,7 @@ class IMFAttnResModel(nn.Module):
         target = e - x
 
         loss = self._velocity_loss_from_error(compound_velocity - target)
+        loss = loss * self._action_latent_loss_weights(device=loss.device, dtype=loss.dtype)
         if self.config.do_mask_loss_for_padding and "action_is_pad" in batch:
             mask = (~batch["action_is_pad"]).unsqueeze(-1).to(loss.dtype)
             valid_count = mask.sum() * loss.shape[-1]

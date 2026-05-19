@@ -60,6 +60,9 @@ class IMFAttnResConfig(PreTrainedConfig):
     data_proportion: float = 0.5
     loss_type: str = "pseudo_huber"
     pseudo_huber_delta: float = 1.0
+    action_latent_mode: str = "dct"
+    dct_loss_high_freq_weight: float = 1.0
+    dct_loss_freq_power: float = 2.0
     enable_imf_diagnostics: bool = False
     imf_diagnostics_spike_loss_threshold: float = 0.2
     compile_model: bool = False
@@ -100,6 +103,17 @@ class IMFAttnResConfig(PreTrainedConfig):
             )
         if self.pseudo_huber_delta <= 0:
             raise ValueError(f"pseudo_huber_delta must be > 0, got {self.pseudo_huber_delta}.")
+        if self.action_latent_mode not in {"dct", "identity"}:
+            raise ValueError(
+                "action_latent_mode must be one of {'dct', 'identity'}, got "
+                f"{self.action_latent_mode!r}."
+            )
+        if self.dct_loss_high_freq_weight < 0:
+            raise ValueError(
+                f"dct_loss_high_freq_weight must be >= 0, got {self.dct_loss_high_freq_weight}."
+            )
+        if self.dct_loss_freq_power <= 0:
+            raise ValueError(f"dct_loss_freq_power must be > 0, got {self.dct_loss_freq_power}.")
         if self.imf_diagnostics_spike_loss_threshold < 0:
             raise ValueError(
                 "imf_diagnostics_spike_loss_threshold must be >= 0, got "

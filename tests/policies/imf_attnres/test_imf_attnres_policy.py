@@ -192,6 +192,16 @@ def test_imf_attnres_default_training_loss_is_pseudo_huber():
     assert config.loss_type == "pseudo_huber"
     assert config.pseudo_huber_delta == 1.0
 
+
+def test_imf_attnres_default_action_latent_uses_dct_with_high_frequency_loss_weighting():
+    """DCT action latent and high-frequency weighted loss should be enabled by default."""
+    config = make_policy_config(POLICY_NAME, push_to_hub=False)
+
+    assert config.action_latent_mode == "dct"
+    assert config.dct_loss_high_freq_weight == 1.0
+    assert config.dct_loss_freq_power == 2.0
+
+
 def test_imf_attnres_factory_returns_registered_config_and_policy_class():
     """Factory helpers should expose the new IMF-AttnRes config and policy classes."""
     policy_cls = get_policy_class(POLICY_NAME)
@@ -303,6 +313,89 @@ def test_imf_attnres_mse_loss_can_be_selected_for_ablation():
     loss = model._velocity_loss_from_error(error)
 
     torch.testing.assert_close(loss, error.square())
+
+
+def test_imf_attnres_dct_action_latent_roundtrip_recovers_actions():
+    """Orthonormal DCT followed by IDCT along the horizon should recover actions."""
+    config = make_tiny_imf_attnres_config()
+    model = IMFAttnResModel(config)
+    actions = torch.randn(2, config.horizon, ACTION_DIM)
+
+    latents = model._encode_action_latent(actions)
+    reconstructed = model._decode_action_latent(latents)
+
+    torch.testing.assert_close(reconstructed, actions, rtol=1e-5, atol=1e-5)
+
+
+def test_imf_attnres_identity_action_latent_is_noop():
+    """Identity latent mode should preserve the previous action-space path for ablations."""
+    config = make_tiny_imf_attnres_config()
+    config.action_latent_mode = "identity"
+    model = IMFAttnResModel(config)
+    actions = torch.randn(2, config.horizon, ACTION_DIM)
+
+    latents = model._encode_action_latent(actions)
+    reconstructed = model._decode_action_latent(latents)
+
+    torch.testing.assert_close(latents, actions)
+    torch.testing.assert_close(reconstructed, actions)
+
+
+def test_imf_attnres_dct_frequency_loss_weights_increase_for_high_frequencies():
+    """DCT loss weights should be lowest at DC and highest at the last frequency bin."""
+    config = make_tiny_imf_attnres_config()
+    config.dct_loss_high_freq_weight = 3.0
+    config.dct_loss_freq_power = 2.0
+    model = IMFAttnResModel(config)
+
+    weights = model._action_latent_loss_weights(
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+
+    expected = torch.tensor([1.0, 1.0 + 3.0 / 9.0, 1.0 + 12.0 / 9.0, 4.0])
+    assert weights.shape == (1, config.horizon, 1)
+    torch.testing.assert_close(weights.flatten(), expected)
+
+
+def test_imf_attnres_identity_latent_loss_weights_are_uniform():
+    """Non-DCT latent mode should not apply frequency-dependent weights."""
+    config = make_tiny_imf_attnres_config()
+    config.action_latent_mode = "identity"
+    config.dct_loss_high_freq_weight = 3.0
+    model = IMFAttnResModel(config)
+
+    weights = model._action_latent_loss_weights(
+        device=torch.device("cpu"),
+        dtype=torch.float32,
+    )
+
+    torch.testing.assert_close(weights, torch.ones(1, config.horizon, 1))
+
+
+def test_imf_attnres_generate_actions_decodes_dct_latent_before_slicing(monkeypatch):
+    """Inference should sample in DCT latent space and IDCT back to actions before returning the chunk."""
+    config = make_tiny_imf_attnres_config()
+    model = IMFAttnResModel(config)
+    batch = make_libero_like_batch()
+    latent = torch.randn(2, config.horizon, ACTION_DIM)
+    calls = {"decode": 0}
+
+    monkeypatch.setattr(model, "_prepare_conditioning", lambda batch: torch.randn(2, 2, model.cond_dim))
+    monkeypatch.setattr(model, "_sample_one_step", lambda z_t, r, t, cond: latent)
+    original_decode = model._decode_action_latent
+
+    def decode_spy(value):
+        calls["decode"] += 1
+        return original_decode(value)
+
+    monkeypatch.setattr(model, "_decode_action_latent", decode_spy)
+
+    actions = model.generate_actions(batch, noise=torch.zeros_like(latent))
+
+    expected = original_decode(latent)[:, config.n_obs_steps - 1 : config.n_obs_steps - 1 + config.n_action_steps]
+    assert calls["decode"] == 1
+    torch.testing.assert_close(actions, expected)
 
 
 def test_imf_attnres_forward_returns_wandb_diagnostics():
