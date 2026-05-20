@@ -9,7 +9,10 @@ from lerobot.policies.factory import make_policy_config, make_pre_post_processor
 from lerobot.processor import (
     AddBatchDimensionProcessorStep,
     DeviceProcessorStep,
+    EnvTransition,
+    NewLineTaskProcessorStep,
     NormalizerProcessorStep,
+    ProcessorStep,
     RenameObservationsProcessorStep,
     TransitionKey,
     UnnormalizerProcessorStep,
@@ -115,3 +118,56 @@ def test_imf_attnres_processor_handles_libero_like_multicamera_observation():
     postprocessed_action = postprocessor(policy_action)
     assert postprocessed_action.shape == (1, ACTION_DIM)
     assert postprocessed_action.device.type == "cpu"
+
+
+def test_make_imf_attnres_processor_with_smolvlm_vl_encoder(monkeypatch):
+    """SmolVLM-enabled IMF-AttnRes should tokenize task text using the SmolVLA-style flow."""
+
+    class DummyTokenizerProcessorStep(ProcessorStep):
+        def __init__(self, tokenizer_name, padding, padding_side, max_length, truncation):
+            self.tokenizer_name = tokenizer_name
+            self.padding = padding
+            self.padding_side = padding_side
+            self.max_length = max_length
+            self.truncation = truncation
+
+        def __call__(self, transition: EnvTransition) -> EnvTransition:
+            return transition
+
+        def transform_features(self, features):
+            return features
+
+    import lerobot.policies.imf_attnres.processor_imf_attnres as processor_imf_attnres
+
+    monkeypatch.setattr(processor_imf_attnres, "TokenizerProcessorStep", DummyTokenizerProcessorStep)
+
+    config = make_tiny_imf_attnres_config()
+    config.use_smolvlm_vl_encoder = True
+    config.vlm_model_name = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct"
+    config.vlm_pad_language_to = "max_length"
+    config.vlm_tokenizer_padding_side = "right"
+    config.vlm_tokenizer_max_length = 48
+    config.vlm_tokenizer_truncation = True
+    stats = make_dataset_stats()
+
+    preprocessor, postprocessor = make_pre_post_processors(config, dataset_stats=stats)
+
+    assert preprocessor.name == "policy_preprocessor"
+    assert postprocessor.name == "policy_postprocessor"
+
+    assert len(preprocessor.steps) == 6
+    assert isinstance(preprocessor.steps[0], RenameObservationsProcessorStep)
+    assert isinstance(preprocessor.steps[1], AddBatchDimensionProcessorStep)
+    assert isinstance(preprocessor.steps[2], NewLineTaskProcessorStep)
+    assert isinstance(preprocessor.steps[3], DummyTokenizerProcessorStep)
+    assert preprocessor.steps[3].tokenizer_name == config.vlm_model_name
+    assert preprocessor.steps[3].padding == config.vlm_pad_language_to
+    assert preprocessor.steps[3].padding_side == config.vlm_tokenizer_padding_side
+    assert preprocessor.steps[3].max_length == config.vlm_tokenizer_max_length
+    assert preprocessor.steps[3].truncation == config.vlm_tokenizer_truncation
+    assert isinstance(preprocessor.steps[4], DeviceProcessorStep)
+    assert isinstance(preprocessor.steps[5], NormalizerProcessorStep)
+
+    assert len(postprocessor.steps) == 2
+    assert isinstance(postprocessor.steps[0], UnnormalizerProcessorStep)
+    assert isinstance(postprocessor.steps[1], DeviceProcessorStep)

@@ -372,6 +372,10 @@ class IMFTransformer1D(ModuleAttrMixin):
         t: torch.Tensor | float | int,
         cond: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        dtype = self.input_emb.weight.dtype
+        sample = sample.to(dtype=dtype)
+        if cond is not None:
+            cond = cond.to(dtype=dtype)
         r = self._prepare_time_input(r, sample)
         t = self._prepare_time_input(t, sample)
 

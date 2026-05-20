@@ -16,7 +16,15 @@ from lerobot.policies.utils import (
     get_output_shape,
     populate_queues,
 )
-from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
+from lerobot.utils.constants import (
+    ACTION,
+    OBS_ENV_STATE,
+    OBS_IMAGES,
+    OBS_LANGUAGE_ATTENTION_MASK,
+    OBS_LANGUAGE_TOKENS,
+    OBS_STATE,
+)
+from lerobot.utils.import_utils import require_package
 
 from .configuration_imf_attnres import IMFAttnResConfig
 from .imf_transformer1d import IMFTransformer1D
@@ -97,6 +105,233 @@ class IMFAttnResRgbEncoder(nn.Module):
         return self.relu(self.out(x))
 
 
+def _resolve_vlm_torch_dtype(dtype_name: str | None) -> torch.dtype | str | None:
+    """Map config-friendly dtype names to values accepted by transformers."""
+    if dtype_name is None or dtype_name == "auto":
+        return dtype_name
+    dtype = getattr(torch, dtype_name, None)
+    if dtype is None:
+        raise ValueError(f"Unsupported torch dtype for SmolVLM encoder: {dtype_name!r}.")
+    return dtype
+
+
+def _get_smolvlm_core_model(vlm: nn.Module) -> nn.Module:
+    """Return the inner SmolVLM model containing vision/text/connector modules."""
+    if hasattr(vlm, "model"):
+        return vlm.model
+    if all(hasattr(vlm, attr) for attr in ("vision_model", "connector", "text_model")):
+        return vlm
+    raise AttributeError("Could not locate SmolVLM core model with vision_model, connector, and text_model.")
+
+
+class IMFAttnResSmolVLMVLEncoder(nn.Module):
+    """SmolVLM visual-language prefix encoder for IMF-AttnRes conditioning.
+
+    The module reuses SmolVLM's vision encoder, connector, and language token
+    embeddings, then appends one trainable projected robot-state token. It does
+    not instantiate or use SmolVLA's action expert.
+    """
+
+    def __init__(self, config: IMFAttnResConfig):
+        super().__init__()
+        require_package("transformers", extra="smolvla")
+        from transformers import AutoConfig, AutoModelForImageTextToText, SmolVLMForConditionalGeneration
+
+        self.model_name = getattr(config, "vlm_model_name", "HuggingFaceTB/SmolVLM2-500M-Video-Instruct")
+        self.freeze_vlm_encoder = getattr(config, "freeze_vlm_encoder", True)
+        self.load_vlm_weights = getattr(config, "load_vlm_weights", True)
+        self.tokenizer_max_length = int(getattr(config, "vlm_tokenizer_max_length", 48))
+        self.padding_side = getattr(config, "vlm_tokenizer_padding_side", "right")
+        self.truncate_language = getattr(config, "vlm_tokenizer_truncation", True)
+        self.vlm_resize_shape = getattr(config, "vlm_resize_shape", (512, 512))
+        self.num_images = len(getattr(config, "image_features", {}))
+
+        if self.load_vlm_weights:
+            from_pretrained_kwargs = {"low_cpu_mem_usage": True}
+            resolved_dtype = _resolve_vlm_torch_dtype(getattr(config, "vlm_encoder_torch_dtype", "bfloat16"))
+            if resolved_dtype is not None:
+                from_pretrained_kwargs["torch_dtype"] = resolved_dtype
+            self.vlm = AutoModelForImageTextToText.from_pretrained(self.model_name, **from_pretrained_kwargs)
+        else:
+            hf_config = AutoConfig.from_pretrained(self.model_name)
+            self.vlm = SmolVLMForConditionalGeneration(config=hf_config)
+
+        self.vlm_model = _get_smolvlm_core_model(self.vlm)
+        self.vision_model = self.vlm_model.vision_model
+        self.connector = self.vlm_model.connector
+        self.text_embeddings = self.vlm_model.text_model.get_input_embeddings()
+
+        text_config = getattr(getattr(self.vlm, "config", None), "text_config", None)
+        self.feature_dim = getattr(text_config, "hidden_size", None)
+        if self.feature_dim is None:
+            self.feature_dim = getattr(getattr(self.vlm_model.text_model, "config", None), "hidden_size", None)
+        if self.feature_dim is None and hasattr(self.text_embeddings, "embedding_dim"):
+            self.feature_dim = self.text_embeddings.embedding_dim
+        if self.feature_dim is None:
+            fallback_hidden_size = getattr(config, "vlm_hidden_size", None)
+            if fallback_hidden_size is None:
+                raise ValueError("Could not infer SmolVLM text hidden size for IMF-AttnRes conditioning.")
+            self.feature_dim = int(fallback_hidden_size)
+        self.feature_dim = int(self.feature_dim)
+
+        self.pad_token_id = getattr(text_config, "pad_token_id", None)
+        if self.pad_token_id is None:
+            self.pad_token_id = getattr(getattr(self.vlm, "config", None), "pad_token_id", 0)
+        if self.pad_token_id is None:
+            self.pad_token_id = 0
+
+        self.tokens_per_image = self._infer_tokens_per_image()
+        self.tokens_per_step = self.num_images * self.tokens_per_image + self.tokenizer_max_length + 1
+
+        state_dim = config.robot_state_feature.shape[0]
+        env_dim = config.env_state_feature.shape[0] if config.env_state_feature else 0
+        self.state_env_dim = state_dim + env_dim
+        self.state_projection = nn.Linear(self.state_env_dim, self.feature_dim)
+
+        if self.freeze_vlm_encoder:
+            for param in self.vlm.parameters():
+                param.requires_grad = False
+            self.vlm.eval()
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.freeze_vlm_encoder:
+            self.vlm.eval()
+        return self
+
+    def _infer_tokens_per_image(self) -> int:
+        vlm_config = getattr(self.vlm, "config", None)
+        vision_config = getattr(vlm_config, "vision_config", None)
+        patch_size = getattr(vision_config, "patch_size", None)
+        scale_factor = getattr(vlm_config, "scale_factor", None)
+        if self.vlm_resize_shape is not None and patch_size is not None and scale_factor is not None:
+            resize_width, resize_height = self.vlm_resize_shape
+            return int(((resize_width // patch_size) * (resize_height // patch_size)) / (scale_factor**2))
+
+        image_seq_len = getattr(self.vlm_model, "image_seq_len", None)
+        if image_seq_len is not None:
+            return int(image_seq_len)
+
+        image_size = getattr(vision_config, "image_size", None)
+        if image_size is not None and patch_size is not None and scale_factor is not None:
+            return int(((image_size // patch_size) ** 2) / (scale_factor**2))
+
+        resize_width, resize_height = self.vlm_resize_shape
+        patch_size = 16 if patch_size is None else patch_size
+        scale_factor = 4 if scale_factor is None else scale_factor
+        return int(((resize_width // patch_size) * (resize_height // patch_size)) / (scale_factor**2))
+
+    def _pad_or_truncate_language(self, tokens: Tensor, masks: Tensor) -> tuple[Tensor, Tensor]:
+        sequence_length = tokens.shape[1]
+        if sequence_length > self.tokenizer_max_length:
+            if not self.truncate_language:
+                raise ValueError(
+                    "SmolVLM language tokens are longer than vlm_tokenizer_max_length and truncation is disabled. "
+                    f"Got {sequence_length=} and {self.tokenizer_max_length=}."
+                )
+            tokens = tokens[:, : self.tokenizer_max_length]
+            masks = masks[:, : self.tokenizer_max_length]
+        elif sequence_length < self.tokenizer_max_length:
+            pad_length = self.tokenizer_max_length - sequence_length
+            token_padding = torch.full(
+                (tokens.shape[0], pad_length),
+                int(self.pad_token_id),
+                dtype=tokens.dtype,
+                device=tokens.device,
+            )
+            mask_padding = torch.zeros(
+                (masks.shape[0], pad_length),
+                dtype=masks.dtype,
+                device=masks.device,
+            )
+            if self.padding_side == "left":
+                tokens = torch.cat([token_padding, tokens], dim=1)
+                masks = torch.cat([mask_padding, masks], dim=1)
+            elif self.padding_side == "right":
+                tokens = torch.cat([tokens, token_padding], dim=1)
+                masks = torch.cat([masks, mask_padding], dim=1)
+            else:
+                raise ValueError(f"Unsupported SmolVLM tokenizer padding side: {self.padding_side!r}.")
+        return tokens, masks
+
+    def _preprocess_images(self, images: Tensor) -> Tensor:
+        if images.ndim != 5:
+            raise ValueError(f"SmolVLM images must have shape (B, N, C, H, W). Got {tuple(images.shape)}.")
+        flat_images = einops.rearrange(images, "b n c h w -> (b n) c h w")
+        if self.vlm_resize_shape is not None:
+            from lerobot.policies.smolvla.modeling_smolvla import resize_with_pad
+
+            flat_images = resize_with_pad(flat_images, *self.vlm_resize_shape, pad_value=0)
+        return flat_images * 2.0 - 1.0
+
+    def _embed_images(self, images: Tensor) -> Tensor:
+        flat_batch = images.shape[0]
+        if self.num_images == 0:
+            return images.new_zeros((flat_batch, 0, self.feature_dim))
+
+        pixel_values = self._preprocess_images(images)
+        vision_dtype = getattr(self.vision_model, "dtype", pixel_values.dtype)
+        image_hidden_states = self.vision_model(
+            pixel_values=pixel_values.to(dtype=vision_dtype),
+            patch_attention_mask=None,
+        ).last_hidden_state
+        image_hidden_states = self.connector(image_hidden_states)
+        return einops.rearrange(
+            image_hidden_states,
+            "(b n) t d -> b (n t) d",
+            b=flat_batch,
+            n=self.num_images,
+        )
+
+    def _embed_language_tokens(self, tokens: Tensor, masks: Tensor) -> Tensor:
+        tokens, masks = self._pad_or_truncate_language(tokens, masks)
+        lang_embeddings = self.text_embeddings(tokens)
+        return lang_embeddings * masks.to(device=lang_embeddings.device, dtype=lang_embeddings.dtype).unsqueeze(-1)
+
+    def forward(
+        self,
+        images: Tensor,
+        state: Tensor,
+        lang_tokens: Tensor,
+        lang_masks: Tensor,
+        env_state: Tensor | None = None,
+    ) -> Tensor:
+        device = self.state_projection.weight.device
+        images = images.to(device=device)
+        state = state.to(device=device, dtype=self.state_projection.weight.dtype)
+        lang_tokens = lang_tokens.to(device=device, dtype=torch.long)
+        lang_masks = lang_masks.to(device=device, dtype=torch.bool)
+        if env_state is not None:
+            env_state = env_state.to(device=device, dtype=self.state_projection.weight.dtype)
+
+        vlm_context = torch.no_grad() if self.freeze_vlm_encoder else nullcontext()
+        with vlm_context:
+            image_tokens = self._embed_images(images)
+            language_tokens = self._embed_language_tokens(lang_tokens, lang_masks)
+
+        state_parts = [state]
+        if self.state_env_dim > state.shape[-1]:
+            if env_state is None:
+                raise ValueError("SmolVLM state projection expects env_state, but none was provided.")
+            state_parts.append(env_state)
+        state_token_input = torch.cat(state_parts, dim=-1)
+        state_token = self.state_projection(state_token_input).unsqueeze(1)
+        prefix_tokens = torch.cat(
+            [
+                image_tokens.to(dtype=state_token.dtype),
+                language_tokens.to(dtype=state_token.dtype),
+                state_token,
+            ],
+            dim=1,
+        )
+        if prefix_tokens.shape[1] != self.tokens_per_step:
+            raise ValueError(
+                "SmolVLM VL encoder produced an unexpected number of condition tokens. "
+                f"Got {prefix_tokens.shape[1]}, expected {self.tokens_per_step}."
+            )
+        return prefix_tokens
+
+
 class IMFAttnResPolicy(PreTrainedPolicy):
     """LeRobot-native IMF-AttnRes policy."""
 
@@ -125,6 +360,9 @@ class IMFAttnResPolicy(PreTrainedPolicy):
             self._queues[OBS_IMAGES] = deque(maxlen=self.config.n_obs_steps)
         if self.config.env_state_feature:
             self._queues[OBS_ENV_STATE] = deque(maxlen=self.config.n_obs_steps)
+        if getattr(self.config, "use_smolvlm_vl_encoder", False):
+            self._queues[OBS_LANGUAGE_TOKENS] = deque(maxlen=self.config.n_obs_steps)
+            self._queues[OBS_LANGUAGE_ATTENTION_MASK] = deque(maxlen=self.config.n_obs_steps)
 
     def _stack_images(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
         if not self.config.image_features:
@@ -183,9 +421,15 @@ class IMFAttnResModel(nn.Module):
         state_dim = config.robot_state_feature.shape[0]
         cond_dim_per_step = state_dim
         self.rgb_encoder = None
+        self.vl_encoder = None
         self.condition_tokens_per_step = 1
 
-        if config.image_features:
+        if getattr(config, "use_smolvlm_vl_encoder", False):
+            self.vl_encoder = IMFAttnResSmolVLMVLEncoder(config)
+            self.cond_dim = self.vl_encoder.feature_dim
+            self.condition_tokens_per_step = self.vl_encoder.tokens_per_step
+            cond_dim_per_step = self.cond_dim
+        elif config.image_features:
             num_images = len(config.image_features)
             if config.use_separate_rgb_encoder_per_camera:
                 encoders = [IMFAttnResRgbEncoder(config) for _ in range(num_images)]
@@ -201,7 +445,7 @@ class IMFAttnResModel(nn.Module):
             else:
                 cond_dim_per_step += image_cond_dim * num_images
 
-        if config.env_state_feature:
+        if not getattr(config, "use_smolvlm_vl_encoder", False) and config.env_state_feature:
             cond_dim_per_step += config.env_state_feature.shape[0]
 
         self.cond_dim = cond_dim_per_step
@@ -491,7 +735,103 @@ class IMFAttnResModel(nn.Module):
             return einops.rearrange(img_features, "(b s n) d -> b s n d", b=batch_size, s=n_obs_steps)
         return einops.rearrange(img_features, "(b s n) ... -> b s (n ...)", b=batch_size, s=n_obs_steps)
 
+    def _prepare_smolvlm_language(
+        self,
+        batch: dict[str, Tensor],
+        batch_size: int,
+        n_obs_steps: int,
+    ) -> tuple[Tensor, Tensor]:
+        missing_keys = {
+            key
+            for key in (OBS_LANGUAGE_TOKENS, OBS_LANGUAGE_ATTENTION_MASK)
+            if key not in batch or batch[key] is None
+        }
+        if missing_keys:
+            raise ValueError(
+                "SmolVLM VL encoder requires language tokens and attention mask. "
+                f"Missing tokenized task inputs: {sorted(missing_keys)}."
+            )
+
+        lang_tokens = batch[OBS_LANGUAGE_TOKENS]
+        lang_masks = batch[OBS_LANGUAGE_ATTENTION_MASK]
+        if lang_tokens.shape != lang_masks.shape:
+            raise ValueError(
+                "SmolVLM language tokens and attention mask must have matching shapes. "
+                f"Got tokens {tuple(lang_tokens.shape)} and mask {tuple(lang_masks.shape)}."
+            )
+
+        def flatten_or_repeat(value: Tensor, name: str) -> Tensor:
+            if value.ndim == 2:
+                if value.shape[0] != batch_size:
+                    raise ValueError(
+                        f"{name} batch dimension must match observation batch size. "
+                        f"Got {value.shape[0]=}, {batch_size=}."
+                    )
+                return value.repeat_interleave(n_obs_steps, dim=0)
+            if value.ndim == 3:
+                if value.shape[0] != batch_size or value.shape[1] != n_obs_steps:
+                    raise ValueError(
+                        f"{name} batch/time dimensions must match observations. "
+                        f"Got {tuple(value.shape[:2])}, expected ({batch_size}, {n_obs_steps})."
+                    )
+                return value.reshape(batch_size * n_obs_steps, value.shape[-1])
+            raise ValueError(
+                f"{name} must have shape (B, L) or (B, n_obs_steps, L). Got {tuple(value.shape)}."
+            )
+
+        return (
+            flatten_or_repeat(lang_tokens, "language tokens"),
+            flatten_or_repeat(lang_masks, "language attention mask"),
+        )
+
+    def _prepare_smolvlm_conditioning(self, batch: dict[str, Tensor]) -> Tensor:
+        if self.vl_encoder is None:
+            raise RuntimeError("SmolVLM VL encoder path requested, but no VL encoder was created.")
+        if OBS_IMAGES not in batch:
+            raise ValueError("SmolVLM VL encoder requires stacked observation images in the batch.")
+
+        state = batch[OBS_STATE]
+        batch_size, n_obs_steps = state.shape[:2]
+        images = batch[OBS_IMAGES]
+        if images.ndim != 6:
+            raise ValueError(
+                f"`{OBS_IMAGES}` must have shape (B, n_obs_steps, N, C, H, W). Got {tuple(images.shape)}."
+            )
+        if images.shape[0] != batch_size or images.shape[1] != n_obs_steps:
+            raise ValueError(
+                "SmolVLM image batch/time dimensions must match observation state. "
+                f"Got images {tuple(images.shape[:2])}, state {tuple(state.shape[:2])}."
+            )
+
+        flat_images = einops.rearrange(images, "b s n c h w -> (b s) n c h w")
+        flat_state = einops.rearrange(state, "b s d -> (b s) d")
+        env_state = None
+        if self.config.env_state_feature:
+            if OBS_ENV_STATE not in batch:
+                raise ValueError("SmolVLM VL encoder expects env_state because config.env_state_feature is set.")
+            env = batch[OBS_ENV_STATE]
+            if env.shape[:2] != (batch_size, n_obs_steps):
+                raise ValueError(
+                    "SmolVLM env_state batch/time dimensions must match observation state. "
+                    f"Got env_state {tuple(env.shape[:2])}, state {tuple(state.shape[:2])}."
+                )
+            env_state = einops.rearrange(env, "b s d -> (b s) d")
+
+        lang_tokens, lang_masks = self._prepare_smolvlm_language(batch, batch_size, n_obs_steps)
+        step_tokens = self.vl_encoder(flat_images, flat_state, lang_tokens, lang_masks, env_state=env_state)
+        cond = einops.rearrange(
+            step_tokens,
+            "(b s) t d -> b (s t) d",
+            b=batch_size,
+            s=n_obs_steps,
+        )
+        head_dtype = get_dtype_from_parameters(self.head)
+        return cond.to(dtype=head_dtype)
+
     def _prepare_conditioning(self, batch: dict[str, Tensor]) -> Tensor:
+        if getattr(self.config, "use_smolvlm_vl_encoder", False):
+            return self._prepare_smolvlm_conditioning(batch)
+
         state = batch[OBS_STATE]
         cond_parts = [state]
         image_features = self._encode_images(batch)
@@ -514,8 +854,8 @@ class IMFAttnResModel(nn.Module):
         batch_size, n_obs_steps = batch[OBS_STATE].shape[:2]
         assert n_obs_steps == self.config.n_obs_steps
         cond = self._prepare_conditioning(batch)
-        device = get_device_from_parameters(self)
-        dtype = get_dtype_from_parameters(self)
+        device = get_device_from_parameters(self.head)
+        dtype = get_dtype_from_parameters(self.head)
         action_latent = noise if noise is not None else torch.randn(
             (batch_size, self.config.horizon, self.config.action_feature.shape[0]),
             device=device,
@@ -525,12 +865,12 @@ class IMFAttnResModel(nn.Module):
             1.0,
             0.0,
             steps=self.config.num_inference_steps + 1,
-            device=cond.device,
-            dtype=cond.dtype,
+            device=device,
+            dtype=dtype,
         )
         for step_index in range(self.config.num_inference_steps):
-            t = torch.full((batch_size,), float(time_grid[step_index].item()), device=cond.device, dtype=cond.dtype)
-            r = torch.full((batch_size,), float(time_grid[step_index + 1].item()), device=cond.device, dtype=cond.dtype)
+            t = torch.full((batch_size,), float(time_grid[step_index].item()), device=device, dtype=dtype)
+            r = torch.full((batch_size,), float(time_grid[step_index + 1].item()), device=device, dtype=dtype)
             action_latent = self._sample_one_step(action_latent, r=r, t=t, cond=cond)
         action = self._decode_action_latent(action_latent)
         start = self.config.n_obs_steps - 1

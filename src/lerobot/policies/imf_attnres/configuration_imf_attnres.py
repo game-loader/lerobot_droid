@@ -36,6 +36,21 @@ class IMFAttnResConfig(PreTrainedConfig):
     use_separate_rgb_encoder_per_camera: bool = True
     output_tokens_per_camera: bool = False
 
+    # Optional SmolVLM visual-language encoder path. Disabled by default so the
+    # existing ResNet RGB encoder remains the standard behavior.
+    use_smolvlm_vl_encoder: bool = False
+    vlm_model_name: str = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct"
+    load_vlm_weights: bool = True
+    freeze_vlm_encoder: bool = True
+    vlm_encoder_torch_dtype: str | None = "bfloat16"
+    vlm_tokenizer_max_length: int = 48
+    vlm_pad_language_to: str = "longest"
+    vlm_tokenizer_padding_side: str = "right"
+    vlm_tokenizer_truncation: bool = True
+    vlm_resize_shape: tuple[int, int] = (512, 512)
+    vlm_hidden_size: int | None = None
+    vlm_tokens_per_step: int | None = None
+
     # IMF-AttnRes transformer head.
     n_layer: int = 12
     n_head: int = 8
@@ -119,8 +134,20 @@ class IMFAttnResConfig(PreTrainedConfig):
                 "imf_diagnostics_spike_loss_threshold must be >= 0, got "
                 f"{self.imf_diagnostics_spike_loss_threshold}."
             )
-        if not self.vision_backbone.startswith("resnet"):
+        if not self.use_smolvlm_vl_encoder and not self.vision_backbone.startswith("resnet"):
             raise ValueError(f"vision_backbone must be a torchvision ResNet name, got {self.vision_backbone}.")
+        if self.vlm_tokenizer_max_length <= 0:
+            raise ValueError(
+                f"vlm_tokenizer_max_length must be a positive integer. Got {self.vlm_tokenizer_max_length}."
+            )
+        if not (
+            isinstance(self.vlm_resize_shape, tuple)
+            and len(self.vlm_resize_shape) == 2
+            and all(isinstance(d, int) and d > 0 for d in self.vlm_resize_shape)
+        ):
+            raise ValueError(
+                f"vlm_resize_shape must be a pair of positive integers. Got {self.vlm_resize_shape}."
+            )
         if self.n_head < 1:
             raise ValueError(f"n_head must be >= 1, got {self.n_head}.")
         if self.n_kv_head < 1:

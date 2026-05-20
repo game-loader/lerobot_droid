@@ -79,6 +79,18 @@ class DiffusionConfig(PreTrainedConfig):
         use_film_scale_modulation: FiLM (https://huggingface.co/papers/1709.07871) is used for the Unet conditioning.
             Bias modulation is used be default, while this parameter indicates whether to also use scale
             modulation.
+        use_smolvlm_language_conditioning: Whether to encode the task description with the SmolVLM2 text
+            encoder and append the resulting vector to the U-Net global conditioning. The U-Net already uses
+            FiLM modulation for global conditioning, so enabling this makes language an additional FiLM
+            condition.
+        language_model_name: Hugging Face model id used for the SmolVLM-compatible text encoder and tokenizer.
+        language_projection_dim: Dimension of the projected language condition appended per observation step.
+        language_tokenizer_max_length: Maximum number of language tokens produced by the processor.
+        language_pad_to: Padding strategy passed to the tokenizer.
+        freeze_language_encoder: Whether to freeze the SmolVLM text encoder. The projection head remains
+            trainable.
+        load_language_encoder_weights: Whether to load pretrained SmolVLM weights. Set to False for tests or
+            training from scratch.
         noise_scheduler_type: Name of the noise scheduler to use. Supported options: ["DDPM", "DDIM"].
         num_train_timesteps: Number of diffusion steps for the forward diffusion schedule.
         beta_schedule: Name of the diffusion beta schedule as per DDPMScheduler from Hugging Face diffusers.
@@ -132,6 +144,19 @@ class DiffusionConfig(PreTrainedConfig):
     n_groups: int = 8
     diffusion_step_embed_dim: int = 128
     use_film_scale_modulation: bool = True
+
+    # Optional language conditioning through the same U-Net FiLM path as the other global observations.
+    use_smolvlm_language_conditioning: bool = False
+    language_model_name: str = "HuggingFaceTB/SmolVLM2-500M-Video-Instruct"
+    language_projection_dim: int = 128
+    language_tokenizer_max_length: int = 48
+    language_pad_to: str = "longest"
+    language_tokenizer_padding_side: str = "right"
+    language_tokenizer_truncation: bool = True
+    freeze_language_encoder: bool = True
+    load_language_encoder_weights: bool = True
+    language_encoder_torch_dtype: str | None = "bfloat16"
+
     # Noise scheduler.
     noise_scheduler_type: str = "DDPM"
     num_train_timesteps: int = 100
@@ -199,6 +224,33 @@ class DiffusionConfig(PreTrainedConfig):
                 self.crop_shape = None
         if self.crop_shape is not None and (self.crop_shape[0] <= 0 or self.crop_shape[1] <= 0):
             raise ValueError(f"`crop_shape` must have positive dimensions. Got {self.crop_shape}.")
+
+        if self.use_smolvlm_language_conditioning:
+            if self.language_projection_dim <= 0:
+                raise ValueError(
+                    f"`language_projection_dim` must be positive. Got {self.language_projection_dim}."
+                )
+            if self.language_tokenizer_max_length <= 0:
+                raise ValueError(
+                    "`language_tokenizer_max_length` must be positive. "
+                    f"Got {self.language_tokenizer_max_length}."
+                )
+            if self.language_pad_to not in {"longest", "max_length", "do_not_pad"}:
+                raise ValueError(
+                    "`language_pad_to` must be one of {'longest', 'max_length', 'do_not_pad'}. "
+                    f"Got {self.language_pad_to}."
+                )
+            if self.language_tokenizer_padding_side not in {"left", "right"}:
+                raise ValueError(
+                    "`language_tokenizer_padding_side` must be one of {'left', 'right'}. "
+                    f"Got {self.language_tokenizer_padding_side}."
+                )
+            supported_language_dtypes = {None, "auto", "float32", "float16", "bfloat16"}
+            if self.language_encoder_torch_dtype not in supported_language_dtypes:
+                raise ValueError(
+                    f"`language_encoder_torch_dtype` must be one of {supported_language_dtypes}. "
+                    f"Got {self.language_encoder_torch_dtype}."
+                )
 
         # Check that the horizon size and U-Net downsampling is compatible.
         # U-Net downsamples by 2 with each stage.

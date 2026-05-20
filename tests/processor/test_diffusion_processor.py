@@ -27,12 +27,14 @@ from lerobot.processor import (
     AddBatchDimensionProcessorStep,
     DataProcessorPipeline,
     DeviceProcessorStep,
+    NewLineTaskProcessorStep,
     NormalizerProcessorStep,
     RenameObservationsProcessorStep,
     TransitionKey,
     UnnormalizerProcessorStep,
 )
 from lerobot.processor.converters import create_transition, transition_to_batch
+from lerobot.processor.pipeline import ProcessorStep
 from lerobot.utils.constants import ACTION, OBS_IMAGE, OBS_STATE
 
 
@@ -86,6 +88,47 @@ def test_make_diffusion_processor_basic():
     assert len(postprocessor.steps) == 2
     assert isinstance(postprocessor.steps[0], UnnormalizerProcessorStep)
     assert isinstance(postprocessor.steps[1], DeviceProcessorStep)
+
+
+def test_make_diffusion_processor_with_smolvlm_language_conditioning(monkeypatch):
+    """Language-enabled diffusion should tokenize task text before moving tensors to the device."""
+
+    class DummyTokenizerProcessorStep(ProcessorStep):
+        def __init__(self, tokenizer_name, padding, padding_side, max_length, truncation):
+            self.tokenizer_name = tokenizer_name
+            self.padding = padding
+            self.padding_side = padding_side
+            self.max_length = max_length
+            self.truncation = truncation
+
+        def __call__(self, transition):
+            return transition
+
+        def transform_features(self, features):
+            return features
+
+    import lerobot.policies.diffusion.processor_diffusion as processor_diffusion
+
+    monkeypatch.setattr(processor_diffusion, "TokenizerProcessorStep", DummyTokenizerProcessorStep)
+
+    config = create_default_config()
+    config.use_smolvlm_language_conditioning = True
+    stats = create_default_stats()
+
+    preprocessor, _ = make_diffusion_pre_post_processors(config, stats)
+
+    assert len(preprocessor.steps) == 6
+    assert isinstance(preprocessor.steps[0], RenameObservationsProcessorStep)
+    assert isinstance(preprocessor.steps[1], AddBatchDimensionProcessorStep)
+    assert isinstance(preprocessor.steps[2], NewLineTaskProcessorStep)
+    assert isinstance(preprocessor.steps[3], DummyTokenizerProcessorStep)
+    assert preprocessor.steps[3].tokenizer_name == config.language_model_name
+    assert preprocessor.steps[3].padding == config.language_pad_to
+    assert preprocessor.steps[3].padding_side == config.language_tokenizer_padding_side
+    assert preprocessor.steps[3].max_length == config.language_tokenizer_max_length
+    assert preprocessor.steps[3].truncation == config.language_tokenizer_truncation
+    assert isinstance(preprocessor.steps[4], DeviceProcessorStep)
+    assert isinstance(preprocessor.steps[5], NormalizerProcessorStep)
 
 
 def test_diffusion_processor_with_images():

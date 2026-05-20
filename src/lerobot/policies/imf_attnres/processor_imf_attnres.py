@@ -7,10 +7,12 @@ import torch
 from lerobot.processor import (
     AddBatchDimensionProcessorStep,
     DeviceProcessorStep,
+    NewLineTaskProcessorStep,
     NormalizerProcessorStep,
     PolicyAction,
     PolicyProcessorPipeline,
     RenameObservationsProcessorStep,
+    TokenizerProcessorStep,
     UnnormalizerProcessorStep,
     policy_action_to_transition,
     transition_to_policy_action,
@@ -30,6 +32,19 @@ def make_imf_attnres_pre_post_processors(
     input_steps = [
         RenameObservationsProcessorStep(rename_map={}),
         AddBatchDimensionProcessorStep(),
+    ]
+    if config.use_smolvlm_vl_encoder:
+        input_steps += [
+            NewLineTaskProcessorStep(),
+            TokenizerProcessorStep(
+                tokenizer_name=config.vlm_model_name,
+                padding=config.vlm_pad_language_to,
+                padding_side=config.vlm_tokenizer_padding_side,
+                max_length=config.vlm_tokenizer_max_length,
+                truncation=config.vlm_tokenizer_truncation,
+            ),
+        ]
+    input_steps += [
         DeviceProcessorStep(device=config.device),
         NormalizerProcessorStep(
             features={**config.input_features, **config.output_features},

@@ -23,6 +23,7 @@ TODO(alexander-soare):
 import math
 from collections import deque
 from collections.abc import Callable
+from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 import einops
@@ -32,8 +33,15 @@ import torch.nn.functional as F  # noqa: N812
 import torchvision
 from torch import Tensor, nn
 
-from lerobot.utils.constants import ACTION, OBS_ENV_STATE, OBS_IMAGES, OBS_STATE
-from lerobot.utils.import_utils import _diffusers_available, require_package
+from lerobot.utils.constants import (
+    ACTION,
+    OBS_ENV_STATE,
+    OBS_IMAGES,
+    OBS_LANGUAGE_ATTENTION_MASK,
+    OBS_LANGUAGE_TOKENS,
+    OBS_STATE,
+)
+from lerobot.utils.import_utils import _diffusers_available, _transformers_available, require_package
 
 if TYPE_CHECKING or _diffusers_available:
     from diffusers.schedulers.scheduling_ddim import DDIMScheduler
@@ -41,6 +49,13 @@ if TYPE_CHECKING or _diffusers_available:
 else:
     DDIMScheduler = None
     DDPMScheduler = None
+
+if TYPE_CHECKING or _transformers_available:
+    from transformers import AutoConfig, AutoModelForImageTextToText, SmolVLMForConditionalGeneration
+else:
+    AutoConfig = None
+    AutoModelForImageTextToText = None
+    SmolVLMForConditionalGeneration = None
 
 from ..pretrained import PreTrainedPolicy
 from ..utils import (
@@ -98,6 +113,9 @@ class DiffusionPolicy(PreTrainedPolicy):
             self._queues[OBS_IMAGES] = deque(maxlen=self.config.n_obs_steps)
         if self.config.env_state_feature:
             self._queues[OBS_ENV_STATE] = deque(maxlen=self.config.n_obs_steps)
+        if self.config.use_smolvlm_language_conditioning:
+            self._queues[OBS_LANGUAGE_TOKENS] = deque(maxlen=self.config.n_obs_steps)
+            self._queues[OBS_LANGUAGE_ATTENTION_MASK] = deque(maxlen=self.config.n_obs_steps)
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
@@ -175,6 +193,93 @@ def _make_noise_scheduler(name: str, **kwargs: dict):
         raise ValueError(f"Unsupported noise scheduler type {name}")
 
 
+def _resolve_torch_dtype(dtype_name: str | None) -> torch.dtype | str | None:
+    """Map config-friendly dtype names to values accepted by transformers."""
+    if dtype_name is None or dtype_name == "auto":
+        return dtype_name
+    dtype = getattr(torch, dtype_name, None)
+    if dtype is None:
+        raise ValueError(f"Unsupported torch dtype for language encoder: {dtype_name}")
+    return dtype
+
+
+def _get_smolvlm_text_model(vlm: nn.Module) -> nn.Module:
+    """Return the SmolVLM text model from the Hugging Face image-text model wrapper."""
+    if hasattr(vlm, "model") and hasattr(vlm.model, "text_model"):
+        return vlm.model.text_model
+    if hasattr(vlm, "text_model"):
+        return vlm.text_model
+    if hasattr(vlm, "get_text_model"):
+        return vlm.get_text_model()
+    raise AttributeError("Could not locate a `text_model` inside the loaded SmolVLM model.")
+
+
+class SmolVLMTextConditioner(nn.Module):
+    """Frozen SmolVLM text encoder plus trainable projection for diffusion U-Net conditioning."""
+
+    def __init__(
+        self,
+        model_name: str,
+        projection_dim: int,
+        *,
+        freeze_language_encoder: bool = True,
+        load_language_encoder_weights: bool = True,
+        torch_dtype: str | None = "bfloat16",
+    ):
+        super().__init__()
+        require_package("transformers", extra="transformers-dep")
+
+        if load_language_encoder_weights:
+            from_pretrained_kwargs = {"low_cpu_mem_usage": True}
+            resolved_dtype = _resolve_torch_dtype(torch_dtype)
+            if resolved_dtype is not None:
+                from_pretrained_kwargs["torch_dtype"] = resolved_dtype
+            vlm = AutoModelForImageTextToText.from_pretrained(model_name, **from_pretrained_kwargs)
+            self.text_model = _get_smolvlm_text_model(vlm)
+        else:
+            config = AutoConfig.from_pretrained(model_name)
+            text_config = getattr(config, "text_config", None)
+            if text_config is None:
+                raise ValueError(f"Model config for {model_name!r} does not define `text_config`.")
+            self.text_model = SmolVLMForConditionalGeneration(config=config).model.text_model
+
+        self.freeze_language_encoder = freeze_language_encoder
+        if self.freeze_language_encoder:
+            for param in self.text_model.parameters():
+                param.requires_grad = False
+            self.text_model.eval()
+
+        text_embed_dim = getattr(getattr(self.text_model, "config", None), "hidden_size", None)
+        if text_embed_dim is None:
+            raise ValueError("Could not infer SmolVLM text hidden size from the loaded text model.")
+        self.projection = nn.Linear(text_embed_dim, projection_dim)
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.freeze_language_encoder:
+            self.text_model.eval()
+        return self
+
+    def forward(self, input_ids: Tensor, attention_mask: Tensor) -> Tensor:
+        device = self.projection.weight.device
+        input_ids = input_ids.to(device=device, dtype=torch.long)
+        attention_mask = attention_mask.to(device=device)
+
+        context = torch.no_grad() if self.freeze_language_encoder else nullcontext()
+        with context:
+            outputs = self.text_model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                output_hidden_states=False,
+                return_dict=True,
+            )
+            hidden_states = outputs.last_hidden_state if hasattr(outputs, "last_hidden_state") else outputs[0]
+
+        mask = attention_mask.to(device=hidden_states.device, dtype=hidden_states.dtype).unsqueeze(-1)
+        pooled = (hidden_states * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1)
+        return self.projection(pooled.to(dtype=self.projection.weight.dtype))
+
+
 class DiffusionModel(nn.Module):
     def __init__(self, config: DiffusionConfig):
         super().__init__()
@@ -193,6 +298,17 @@ class DiffusionModel(nn.Module):
                 global_cond_dim += self.rgb_encoder.feature_dim * num_images
         if self.config.env_state_feature:
             global_cond_dim += self.config.env_state_feature.shape[0]
+        if self.config.use_smolvlm_language_conditioning:
+            self.language_encoder = SmolVLMTextConditioner(
+                model_name=self.config.language_model_name,
+                projection_dim=self.config.language_projection_dim,
+                freeze_language_encoder=self.config.freeze_language_encoder,
+                load_language_encoder_weights=self.config.load_language_encoder_weights,
+                torch_dtype=self.config.language_encoder_torch_dtype,
+            )
+            global_cond_dim += self.config.language_projection_dim
+        else:
+            self.language_encoder = None
 
         self.unet = DiffusionConditionalUnet1d(config, global_cond_dim=global_cond_dim * config.n_obs_steps)
 
@@ -225,8 +341,8 @@ class DiffusionModel(nn.Module):
         generator: torch.Generator | None = None,
         noise: Tensor | None = None,
     ) -> Tensor:
-        device = get_device_from_parameters(self)
-        dtype = get_dtype_from_parameters(self)
+        device = get_device_from_parameters(self.unet)
+        dtype = get_dtype_from_parameters(self.unet)
 
         # Sample prior.
         sample = (
@@ -289,8 +405,59 @@ class DiffusionModel(nn.Module):
         if self.config.env_state_feature:
             global_cond_feats.append(batch[OBS_ENV_STATE])
 
+        if self.config.use_smolvlm_language_conditioning:
+            language_cond = self._prepare_language_conditioning(batch, batch_size, n_obs_steps)
+            global_cond_feats.append(language_cond)
+
         # Concatenate features then flatten to (B, global_cond_dim).
         return torch.cat(global_cond_feats, dim=-1).flatten(start_dim=1)
+
+    def _prepare_language_conditioning(
+        self, batch: dict[str, Tensor], batch_size: int, n_obs_steps: int
+    ) -> Tensor:
+        """Encode tokenized task text and repeat it over observation steps for U-Net FiLM conditioning."""
+        if self.language_encoder is None:
+            raise RuntimeError("Language conditioning requested, but no language encoder was created.")
+        missing_keys = {
+            key
+            for key in (OBS_LANGUAGE_TOKENS, OBS_LANGUAGE_ATTENTION_MASK)
+            if key not in batch or batch[key] is None
+        }
+        if missing_keys:
+            raise ValueError(
+                "Diffusion language conditioning is enabled, but tokenized task inputs are missing: "
+                f"{sorted(missing_keys)}. Make sure the diffusion preprocessor receives complementary "
+                "data with a 'task' string so it can create language tokens."
+            )
+
+        input_ids = batch[OBS_LANGUAGE_TOKENS]
+        attention_mask = batch[OBS_LANGUAGE_ATTENTION_MASK]
+
+        # During rollout the language tensors are queued like other observations, yielding
+        # (B, n_obs_steps, sequence_length). The task should be constant across the queue, so use the latest.
+        if input_ids.ndim == 3:
+            input_ids = input_ids[:, -1]
+        elif input_ids.ndim != 2:
+            raise ValueError(
+                f"`{OBS_LANGUAGE_TOKENS}` must have shape (B, L) or (B, n_obs_steps, L). "
+                f"Got {tuple(input_ids.shape)}."
+            )
+        if attention_mask.ndim == 3:
+            attention_mask = attention_mask[:, -1]
+        elif attention_mask.ndim != 2:
+            raise ValueError(
+                f"`{OBS_LANGUAGE_ATTENTION_MASK}` must have shape (B, L) or (B, n_obs_steps, L). "
+                f"Got {tuple(attention_mask.shape)}."
+            )
+
+        if input_ids.shape[0] != batch_size or attention_mask.shape[0] != batch_size:
+            raise ValueError(
+                "Language token batch dimension must match observation batch size. "
+                f"Got {input_ids.shape[0]=}, {attention_mask.shape[0]=}, {batch_size=}."
+            )
+
+        language_features = self.language_encoder(input_ids=input_ids, attention_mask=attention_mask)
+        return language_features.unsqueeze(1).expand(-1, n_obs_steps, -1)
 
     def generate_actions(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
         """

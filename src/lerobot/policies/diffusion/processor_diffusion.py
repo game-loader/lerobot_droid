@@ -21,10 +21,12 @@ import torch
 from lerobot.processor import (
     AddBatchDimensionProcessorStep,
     DeviceProcessorStep,
+    NewLineTaskProcessorStep,
     NormalizerProcessorStep,
     PolicyAction,
     PolicyProcessorPipeline,
     RenameObservationsProcessorStep,
+    TokenizerProcessorStep,
     UnnormalizerProcessorStep,
     policy_action_to_transition,
     transition_to_policy_action,
@@ -67,6 +69,19 @@ def make_diffusion_pre_post_processors(
     input_steps = [
         RenameObservationsProcessorStep(rename_map={}),
         AddBatchDimensionProcessorStep(),
+    ]
+    if config.use_smolvlm_language_conditioning:
+        input_steps += [
+            NewLineTaskProcessorStep(),
+            TokenizerProcessorStep(
+                tokenizer_name=config.language_model_name,
+                padding=config.language_pad_to,
+                padding_side=config.language_tokenizer_padding_side,
+                max_length=config.language_tokenizer_max_length,
+                truncation=config.language_tokenizer_truncation,
+            ),
+        ]
+    input_steps += [
         DeviceProcessorStep(device=config.device),
         NormalizerProcessorStep(
             features={**config.input_features, **config.output_features},
