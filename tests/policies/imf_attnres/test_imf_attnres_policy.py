@@ -315,6 +315,257 @@ def test_imf_attnres_mse_loss_can_be_selected_for_ablation():
     torch.testing.assert_close(loss, error.square())
 
 
+def test_imf_attnres_semigroup_consistency_is_disabled_by_default():
+    """Semigroup consistency should be opt-in so existing IMF-AttnRes runs are unchanged."""
+    config = make_tiny_imf_attnres_config()
+    model = IMFAttnResModel(config)
+
+    assert config.enable_semigroup_consistency is False
+    assert config.semigroup_teacher_ema_decay == pytest.approx(0.995)
+    assert model._semigroup_loss_weight(current_step=100_000) == 0.0
+
+
+def test_imf_attnres_semigroup_teacher_ema_decay_must_be_in_half_open_unit_interval():
+    """The teacher EMA decay should reject invalid values early in config validation."""
+    from lerobot.policies.imf_attnres.configuration_imf_attnres import IMFAttnResConfig
+
+    with pytest.raises(ValueError, match="semigroup_teacher_ema_decay"):
+        IMFAttnResConfig(semigroup_teacher_ema_decay=-0.1, push_to_hub=False)
+    with pytest.raises(ValueError, match="semigroup_teacher_ema_decay"):
+        IMFAttnResConfig(semigroup_teacher_ema_decay=1.0, push_to_hub=False)
+
+
+def test_imf_attnres_semigroup_loss_weight_linearly_warms_up_after_start_step():
+    """The consistency coefficient should stay zero until start_step and then warm up linearly."""
+    config = make_tiny_imf_attnres_config()
+    config.enable_semigroup_consistency = True
+    config.semigroup_loss_weight = 0.05
+    config.semigroup_start_step = 100
+    config.semigroup_warmup_steps = 200
+    model = IMFAttnResModel(config)
+
+    assert model._semigroup_loss_weight(current_step=None) == 0.0
+    assert model._semigroup_loss_weight(current_step=99) == 0.0
+    assert model._semigroup_loss_weight(current_step=100) == 0.0
+    assert model._semigroup_loss_weight(current_step=200) == pytest.approx(0.025)
+    assert model._semigroup_loss_weight(current_step=300) == pytest.approx(0.05)
+    assert model._semigroup_loss_weight(current_step=1_000) == pytest.approx(0.05)
+
+
+def test_imf_attnres_semigroup_time_sampler_returns_ordered_distinct_times():
+    """Semigroup consistency samples ordered r<s<t triples."""
+    config = make_tiny_imf_attnres_config()
+    config.semigroup_min_time_delta = 0.05
+    model = IMFAttnResModel(config)
+
+    r, s, t = model._sample_semigroup_times(batch_size=32, device=torch.device("cpu"), dtype=torch.float32)
+
+    assert r.shape == s.shape == t.shape == (32,)
+    assert torch.all(r >= 0.0)
+    assert torch.all(t <= 1.0)
+    assert torch.all(s - r >= config.semigroup_min_time_delta)
+    assert torch.all(t - s >= config.semigroup_min_time_delta)
+
+
+def test_imf_attnres_semigroup_loss_matches_direct_vs_composed_flow_map():
+    """L_semi should compare Phi_{r,t}(x_t) with Phi_{r,s}(Phi_{s,t}(x_t))."""
+    config = make_tiny_imf_attnres_config()
+    config.loss_type = "mse"
+    model = IMFAttnResModel(config)
+    cond = torch.zeros(2, config.n_obs_steps, model.cond_dim)
+    x_t = torch.tensor([[[1.0]], [[2.0]]]).expand(2, config.horizon, ACTION_DIM).clone()
+    r = torch.tensor([0.0, 0.2])
+    s = torch.tensor([0.25, 0.5])
+    t = torch.tensor([1.0, 0.9])
+    calls = []
+
+    def fake_fn(z, r_value, t_value, cond=None):
+        calls.append((z.clone(), r_value.clone(), t_value.clone()))
+        return (r_value + 2.0 * t_value).view(-1, 1, 1).expand_as(z)
+
+    model.fn = fake_fn
+    model._semigroup_teacher_fn = fake_fn
+
+    loss = model._semigroup_consistency_loss(x_t, cond=cond, r=r, s=s, t=t)
+
+    u_direct = (r + 2.0 * t).view(-1, 1, 1).expand_as(x_t)
+    direct = x_t - (t - r).view(-1, 1, 1) * u_direct
+    u_st = (s + 2.0 * t).view(-1, 1, 1).expand_as(x_t)
+    mid = x_t - (t - s).view(-1, 1, 1) * u_st
+    u_rs = (r + 2.0 * s).view(-1, 1, 1).expand_as(x_t)
+    composed = mid - (s - r).view(-1, 1, 1) * u_rs
+    expected = (direct - composed).square().mean()
+
+    assert len(calls) == 3
+    torch.testing.assert_close(loss, expected)
+
+
+def test_imf_attnres_semigroup_consistency_uses_one_student_call_and_no_grad_teacher_calls():
+    """L_semi should be one-sided: student direct branch differentiable, composed teacher no-grad."""
+    config = make_tiny_imf_attnres_config()
+    config.loss_type = "mse"
+    model = IMFAttnResModel(config)
+    cond = torch.zeros(2, config.n_obs_steps, model.cond_dim)
+    x_t = torch.randn(2, config.horizon, ACTION_DIM, requires_grad=True)
+    r = torch.tensor([0.0, 0.2])
+    s = torch.tensor([0.25, 0.5])
+    t = torch.tensor([1.0, 0.9])
+    student_weight = torch.nn.Parameter(torch.tensor(0.5))
+    call_records = []
+
+    def fake_fn(z, r_value, t_value, cond=None):
+        call_records.append(
+            {
+                "grad_enabled": torch.is_grad_enabled(),
+                "z_requires_grad": z.requires_grad,
+                "z_is_input": z is x_t,
+                "r": r_value.detach().clone(),
+                "t": t_value.detach().clone(),
+            }
+        )
+        return z * student_weight + (r_value + t_value).view(-1, 1, 1)
+
+    model.fn = fake_fn
+    model._semigroup_teacher_fn = fake_fn
+
+    loss = model._semigroup_consistency_loss(x_t, cond=cond, r=r, s=s, t=t)
+
+    assert loss.requires_grad
+    loss.backward()
+    assert student_weight.grad is not None
+    assert torch.isfinite(student_weight.grad)
+    assert x_t.grad is not None
+    assert torch.isfinite(x_t.grad).all()
+    assert len(call_records) == 3
+    assert [record["grad_enabled"] for record in call_records] == [True, False, False]
+    assert [record["z_requires_grad"] for record in call_records] == [True, False, False]
+    assert call_records[0]["z_is_input"] is True
+    assert call_records[1]["z_is_input"] is False
+    assert call_records[2]["z_is_input"] is False
+    torch.testing.assert_close(call_records[0]["r"], r)
+    torch.testing.assert_close(call_records[0]["t"], t)
+    torch.testing.assert_close(call_records[1]["r"], s)
+    torch.testing.assert_close(call_records[1]["t"], t)
+    torch.testing.assert_close(call_records[2]["r"], r)
+    torch.testing.assert_close(call_records[2]["t"], s)
+
+
+def test_imf_attnres_semigroup_teacher_target_is_detached_from_midpoint_gradients():
+    """The composed semigroup target should stop gradients through the teacher-created midpoint."""
+    config = make_tiny_imf_attnres_config()
+    config.loss_type = "mse"
+    model = IMFAttnResModel(config)
+    cond = torch.zeros(2, config.n_obs_steps, model.cond_dim)
+    x_t = torch.randn(2, config.horizon, ACTION_DIM, requires_grad=True)
+    r = torch.tensor([0.0, 0.2])
+    s = torch.tensor([0.25, 0.5])
+    t = torch.tensor([1.0, 0.9])
+    teacher_midpoints = []
+
+    def fake_fn(z, r_value, t_value, cond=None):
+        if torch.equal(r_value, s) and torch.equal(t_value, t):
+            teacher_midpoints.append(z)
+        if torch.equal(r_value, r) and torch.equal(t_value, s):
+            assert not z.requires_grad, "teacher-composed midpoint must be detached before second teacher call"
+        return z + (r_value + 2.0 * t_value).view(-1, 1, 1)
+
+    model.fn = fake_fn
+    model._semigroup_teacher_fn = fake_fn
+
+    loss = model._semigroup_consistency_loss(x_t, cond=cond, r=r, s=s, t=t)
+
+    assert len(teacher_midpoints) == 1
+    assert not teacher_midpoints[0].requires_grad
+    assert loss.requires_grad
+
+
+def test_imf_attnres_semigroup_teacher_head_is_frozen_and_ema_updated():
+    """The no-grad semigroup teacher should be frozen and updated by EMA after optimizer steps."""
+    policy_cls = get_policy_class(POLICY_NAME)
+    config = make_tiny_imf_attnres_config()
+    config.enable_semigroup_consistency = True
+    config.semigroup_teacher_ema_decay = 0.5
+    policy = policy_cls(config)
+
+    online_parameter = next(policy.model.head.parameters())
+    teacher_parameter = next(policy.model.semigroup_teacher_head.parameters())
+    initial_teacher = teacher_parameter.detach().clone()
+
+    assert all(not parameter.requires_grad for parameter in policy.model.semigroup_teacher_head.parameters())
+    assert teacher_parameter.requires_grad is False
+    torch.testing.assert_close(initial_teacher, online_parameter.detach())
+
+    with torch.no_grad():
+        online_parameter.add_(2.0)
+    policy.update()
+
+    expected_teacher = initial_teacher * 0.5 + online_parameter.detach() * 0.5
+    torch.testing.assert_close(teacher_parameter, expected_teacher)
+    assert policy.model.semigroup_teacher_head.training is False
+
+
+def test_imf_attnres_semigroup_teacher_head_is_not_allocated_when_disabled():
+    """Default runs should not pay for an unused semigroup teacher head."""
+    config = make_tiny_imf_attnres_config()
+    policy_cls = get_policy_class(POLICY_NAME)
+    policy = policy_cls(config)
+
+    assert policy.model.semigroup_teacher_head is None
+    assert len(list(policy.get_optim_params())) == len(list(policy.model.parameters()))
+
+
+def test_imf_attnres_loads_old_checkpoints_by_syncing_missing_semigroup_teacher():
+    """Old checkpoints without teacher weights should initialize the teacher from the online head."""
+    config = make_tiny_imf_attnres_config()
+    config.enable_semigroup_consistency = True
+    source_model = IMFAttnResModel(config)
+    old_state_dict = {
+        key: value.clone()
+        for key, value in source_model.state_dict().items()
+        if not key.startswith("semigroup_teacher_head.")
+    }
+
+    target_model = IMFAttnResModel(config)
+    target_model.load_state_dict(old_state_dict, strict=False)
+
+    for online_parameter, teacher_parameter in zip(
+        target_model.head.parameters(),
+        target_model.semigroup_teacher_head.parameters(),
+        strict=True,
+    ):
+        torch.testing.assert_close(teacher_parameter, online_parameter)
+        assert teacher_parameter.requires_grad is False
+
+
+def test_imf_attnres_forward_adds_weighted_semigroup_loss_and_logs_components(monkeypatch):
+    """When enabled, total loss should include lambda * L_semi and report the active lambda."""
+    policy_cls = get_policy_class(POLICY_NAME)
+    config = make_tiny_imf_attnres_config()
+    config.enable_semigroup_consistency = True
+    config.semigroup_loss_weight = 0.05
+    policy = policy_cls(config)
+    policy.train()
+
+    monkeypatch.setattr(
+        policy.model,
+        "_semigroup_loss_weight",
+        lambda current_step: 0.05,
+    )
+    monkeypatch.setattr(
+        policy.model,
+        "_semigroup_consistency_loss",
+        lambda x_t, cond, r=None, s=None, t=None: x_t.new_tensor(2.0),
+    )
+
+    loss, output_dict = policy.forward(make_libero_like_batch(), current_step=123)
+
+    assert loss.shape == ()
+    assert isinstance(output_dict, dict)
+    assert output_dict["imf_diagnostics/semigroup/loss"] == pytest.approx(2.0)
+    assert output_dict["imf_diagnostics/semigroup/weight"] == pytest.approx(0.05)
+    assert output_dict["imf_diagnostics/semigroup/weighted_loss"] == pytest.approx(0.1)
+
+
 def test_imf_attnres_dct_action_latent_roundtrip_recovers_actions():
     """Orthonormal DCT followed by IDCT along the horizon should recover actions."""
     config = make_tiny_imf_attnres_config()

@@ -61,10 +61,19 @@ class IMFAttnResConfig(PreTrainedConfig):
     time_as_cond: bool = True
     obs_as_cond: bool = True
     n_cond_layers: int = 0
+    # Transformer backbone architecture for the action head:
+    #   "attnres_full"    — AttnRes with full multi-head attention + RoPE (default, best performing)
+    #   "attnres_diff"    — AttnRes with differential attention (subtracts two attention heads for noise cancellation)
+    #   "diff_transformer" — Standalone Differential Transformer backbone (separate implementation from AttnRes)
+    #   "vanilla"         — Standard nn.TransformerEncoder/Decoder (no RoPE, uses learned positional embeddings)
     backbone_type: str = "attnres_full"
+    # Number of key-value heads for GQA (grouped-query attention). Must divide n_head evenly.
     n_kv_head: int = 8
+    # FFN hidden-dim multiplier relative to n_emb (hidden = n_emb * ffn_mult, rounded to nearest multiple of 256).
     attn_res_ffn_mult: float = 2.667
+    # Epsilon for RMSNorm layers in AttnRes/DiffTransformer backbones.
     attn_res_eps: float = 1e-6
+    # Base frequency for Rotary Position Embeddings (RoPE).
     attn_res_rope_theta: float = 10000.0
 
     # Inference / loss computation / optimization.
@@ -75,10 +84,31 @@ class IMFAttnResConfig(PreTrainedConfig):
     data_proportion: float = 0.5
     loss_type: str = "pseudo_huber"
     pseudo_huber_delta: float = 1.0
+    # Action latent representation before denoising:
+    #   "dct"      — Apply Discrete Cosine Transform to action sequences, denoising in frequency domain.
+    #                Encourages smooth trajectories by weighting high-frequency components more in the loss.
+    #   "identity" — Denoise raw action sequences directly (no transform).
     action_latent_mode: str = "dct"
+    # DCT loss: extra weight on high-frequency coefficients. Higher values penalize jittery actions more.
     dct_loss_high_freq_weight: float = 1.0
+    # DCT loss: exponent for frequency-dependent weighting curve. weight_k = 1 + high_freq_weight * (k/K)^power.
     dct_loss_freq_power: float = 2.0
+    # Semigroup consistency regularization: enforces that composing two flow steps equals a single direct step
+    # (i.e., flow(r→t) ≈ flow(r→s) ∘ flow(s→t)), improving temporal coherence of the learned flow field.
+    enable_semigroup_consistency: bool = False
+    # Target weight for the semigroup consistency loss term (added to the main velocity loss).
+    semigroup_loss_weight: float = 0.0
+    # Training step at which semigroup loss begins (allows the model to learn basic flow first).
+    semigroup_start_step: int = 0
+    # Number of steps to linearly ramp semigroup_loss_weight from 0 to target after start_step.
+    semigroup_warmup_steps: int = 0
+    # Minimum time gap between sampled r, s, t points. Prevents degenerate near-zero intervals.
+    semigroup_min_time_delta: float = 1e-3
+    # EMA decay used for the no-grad teacher action head in semigroup consistency.
+    semigroup_teacher_ema_decay: float = 0.995
+    # Log detailed per-step diagnostics (velocity norms, loss buckets, gradient stats) to the logger.
     enable_imf_diagnostics: bool = False
+    # Loss threshold above which a training step is flagged as a "spike" in diagnostics.
     imf_diagnostics_spike_loss_threshold: float = 0.2
     compile_model: bool = False
     compile_mode: str = "reduce-overhead"
@@ -129,6 +159,28 @@ class IMFAttnResConfig(PreTrainedConfig):
             )
         if self.dct_loss_freq_power <= 0:
             raise ValueError(f"dct_loss_freq_power must be > 0, got {self.dct_loss_freq_power}.")
+        if self.semigroup_loss_weight < 0:
+            raise ValueError(
+                f"semigroup_loss_weight must be >= 0, got {self.semigroup_loss_weight}."
+            )
+        if self.semigroup_start_step < 0:
+            raise ValueError(
+                f"semigroup_start_step must be >= 0, got {self.semigroup_start_step}."
+            )
+        if self.semigroup_warmup_steps < 0:
+            raise ValueError(
+                f"semigroup_warmup_steps must be >= 0, got {self.semigroup_warmup_steps}."
+            )
+        if not (0.0 <= self.semigroup_min_time_delta < 1 / 3):
+            raise ValueError(
+                "semigroup_min_time_delta must satisfy 0 <= value < 1/3, got "
+                f"{self.semigroup_min_time_delta}."
+            )
+        if not (0.0 <= self.semigroup_teacher_ema_decay < 1.0):
+            raise ValueError(
+                "semigroup_teacher_ema_decay must satisfy 0 <= value < 1, got "
+                f"{self.semigroup_teacher_ema_decay}."
+            )
         if self.imf_diagnostics_spike_loss_threshold < 0:
             raise ValueError(
                 "imf_diagnostics_spike_loss_threshold must be >= 0, got "
@@ -158,9 +210,17 @@ class IMFAttnResConfig(PreTrainedConfig):
             raise ValueError(
                 f"n_head={self.n_head} must be divisible by n_kv_head={self.n_kv_head}."
             )
-        if self.backbone_type == "attnres_full" and (self.n_emb // self.n_head) % 2 != 0:
+        if self.backbone_type not in {"attnres_full", "attnres_diff", "vanilla", "diff_transformer"}:
             raise ValueError(
-                "attnres_full uses RoPE, which requires an even per-head dimension. "
+                "backbone_type must be one of "
+                f"{'attnres_full', 'attnres_diff', 'vanilla', 'diff_transformer'}, "
+                f"got {self.backbone_type!r}."
+            )
+        if self.backbone_type in {"attnres_full", "attnres_diff", "diff_transformer"} and (
+            self.n_emb // self.n_head
+        ) % 2 != 0:
+            raise ValueError(
+                f"{self.backbone_type} uses RoPE, which requires an even per-head dimension. "
                 f"Got n_emb={self.n_emb}, n_head={self.n_head}, "
                 f"head_dim={self.n_emb // self.n_head}."
             )

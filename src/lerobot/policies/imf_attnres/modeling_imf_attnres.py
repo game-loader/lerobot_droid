@@ -2,6 +2,7 @@
 
 from collections import deque
 from contextlib import nullcontext
+from copy import deepcopy
 
 import einops
 import torch
@@ -349,7 +350,13 @@ class IMFAttnResPolicy(PreTrainedPolicy):
         self.reset()
 
     def get_optim_params(self):
-        return self.model.parameters()
+        if self.model.semigroup_teacher_head is None:
+            return self.model.parameters()
+        return (parameter for parameter in self.model.parameters() if parameter.requires_grad)
+
+    @torch.no_grad()
+    def update(self):
+        self.model.update_semigroup_teacher()
 
     def reset(self):
         self._queues = {
@@ -407,9 +414,9 @@ class IMFAttnResPolicy(PreTrainedPolicy):
             self._queues[ACTION].extend(actions.transpose(0, 1))
         return self._queues[ACTION].popleft()
 
-    def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, None]:
+    def forward(self, batch: dict[str, Tensor], current_step: int | None = None) -> tuple[Tensor, None]:
         batch = self._stack_images(batch)
-        loss, diagnostics = self.model.compute_loss(batch)
+        loss, diagnostics = self.model.compute_loss(batch, current_step=current_step)
         return loss, diagnostics or None
 
 
@@ -470,6 +477,60 @@ class IMFAttnResModel(nn.Module):
             attn_res_eps=config.attn_res_eps,
             attn_res_rope_theta=config.attn_res_rope_theta,
         )
+        self.semigroup_teacher_head = None
+        if config.enable_semigroup_consistency:
+            self._reset_semigroup_teacher()
+
+    @staticmethod
+    def _raw_module(module: nn.Module) -> nn.Module:
+        return getattr(module, "_orig_mod", module)
+
+    def _reset_semigroup_teacher(self) -> None:
+        if self.semigroup_teacher_head is None:
+            self.semigroup_teacher_head = deepcopy(self._raw_module(self.head))
+        self.semigroup_teacher_head.load_state_dict(self._raw_module(self.head).state_dict())
+        for parameter in self.semigroup_teacher_head.parameters():
+            parameter.requires_grad_(False)
+        self.semigroup_teacher_head.eval()
+
+    def load_state_dict(self, state_dict, strict: bool = True, assign: bool = False):
+        teacher_prefix = "semigroup_teacher_head."
+        has_teacher_state = any(key.startswith(teacher_prefix) for key in state_dict)
+        if has_teacher_state and self.semigroup_teacher_head is None:
+            self._reset_semigroup_teacher()
+        result = super().load_state_dict(state_dict, strict=strict, assign=assign)
+        if self.config.enable_semigroup_consistency and not has_teacher_state:
+            self._reset_semigroup_teacher()
+        return result
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.semigroup_teacher_head is not None:
+            self.semigroup_teacher_head.eval()
+        return self
+
+    @torch.no_grad()
+    def update_semigroup_teacher(self) -> None:
+        if not self.config.enable_semigroup_consistency:
+            return
+        decay = float(self.config.semigroup_teacher_ema_decay)
+        online_head = self._raw_module(self.head)
+        teacher_head = self._raw_module(self.semigroup_teacher_head)
+
+        for teacher_parameter, online_parameter in zip(
+            teacher_head.parameters(),
+            online_head.parameters(),
+            strict=True,
+        ):
+            teacher_parameter.mul_(decay).add_(
+                online_parameter.detach().to(device=teacher_parameter.device, dtype=teacher_parameter.dtype),
+                alpha=1.0 - decay,
+            )
+        for teacher_buffer, online_buffer in zip(teacher_head.buffers(), online_head.buffers(), strict=True):
+            teacher_buffer.copy_(
+                online_buffer.detach().to(device=teacher_buffer.device, dtype=teacher_buffer.dtype)
+            )
+        self.semigroup_teacher_head.eval()
 
     @staticmethod
     def _broadcast_batch_time(value: Tensor, reference: Tensor) -> Tensor:
@@ -520,8 +581,35 @@ class IMFAttnResModel(nn.Module):
         r_final = torch.minimum(t, r)
         return t_final, r_final
 
+    def _sample_semigroup_times(
+        self,
+        batch_size: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        min_delta = float(self.config.semigroup_min_time_delta)
+        base = torch.rand(batch_size, 3, device=device, dtype=dtype)
+        weights = torch.nn.functional.softmax(base, dim=-1)
+        remaining = 1.0 - 3.0 * min_delta
+        segment_lengths = min_delta + remaining * weights
+        r = segment_lengths[:, 0] - min_delta
+        s = r + segment_lengths[:, 1]
+        t = s + segment_lengths[:, 2]
+        return r, s, t
+
     def fn(self, z: Tensor, r: Tensor, t: Tensor, cond: Tensor | None = None) -> Tensor:
         return self.head(z, r, t, cond=cond)
+
+    def _semigroup_teacher_fn(
+        self,
+        z: Tensor,
+        r: Tensor,
+        t: Tensor,
+        cond: Tensor | None = None,
+    ) -> Tensor:
+        if self.semigroup_teacher_head is None:
+            raise RuntimeError("Semigroup teacher head is not initialized.")
+        return self.semigroup_teacher_head(z, r, t, cond=cond)
 
     def _compute_u_and_du_dt(
         self,
@@ -564,6 +652,71 @@ class IMFAttnResModel(nn.Module):
             raise ValueError(f"Unsupported IMF-AttnRes loss_type: {self.config.loss_type!r}.")
         delta = float(self.config.pseudo_huber_delta)
         return delta**2 * (torch.sqrt(1 + (error / delta).square()) - 1)
+
+    def _flow_map(
+        self,
+        z_t: Tensor,
+        r: Tensor,
+        t: Tensor,
+        cond: Tensor,
+        *,
+        fn=None,
+    ) -> Tensor:
+        if fn is None:
+            fn = self.fn
+        u = fn(z_t, r, t, cond=cond)
+        delta = self._broadcast_batch_time(t - r, z_t)
+        return z_t - delta * u
+
+    def _semigroup_loss_weight(self, current_step: int | None) -> float:
+        if not self.config.enable_semigroup_consistency:
+            return 0.0
+        target_weight = float(self.config.semigroup_loss_weight)
+        if target_weight <= 0.0:
+            return 0.0
+        if current_step is None:
+            return 0.0
+        start_step = int(self.config.semigroup_start_step)
+        if current_step <= start_step:
+            return 0.0
+        warmup_steps = int(self.config.semigroup_warmup_steps)
+        if warmup_steps <= 0:
+            return target_weight
+        progress = min(max((current_step - start_step) / warmup_steps, 0.0), 1.0)
+        return target_weight * progress
+
+    def _semigroup_consistency_loss(
+        self,
+        x_t: Tensor,
+        cond: Tensor,
+        r: Tensor | None = None,
+        s: Tensor | None = None,
+        t: Tensor | None = None,
+    ) -> Tensor:
+        if r is None or s is None or t is None:
+            r, s, t = self._sample_semigroup_times(x_t.shape[0], device=x_t.device, dtype=x_t.dtype)
+        if self.semigroup_teacher_head is None:
+            self._reset_semigroup_teacher()
+        semigroup_cond = cond.detach()
+        direct = self._flow_map(x_t, r=r, t=t, cond=semigroup_cond)
+        with torch.no_grad():
+            teacher_x_t = x_t.detach()
+            teacher_cond = semigroup_cond.detach()
+            mid = self._flow_map(
+                teacher_x_t,
+                r=s,
+                t=t,
+                cond=teacher_cond,
+                fn=self._semigroup_teacher_fn,
+            )
+            composed = self._flow_map(
+                mid.detach(),
+                r=r,
+                t=s,
+                cond=teacher_cond,
+                fn=self._semigroup_teacher_fn,
+            )
+        return self._velocity_loss_from_error(direct - composed.detach()).mean()
 
     @staticmethod
     def _dct_matrix(size: int, device: torch.device, dtype: torch.dtype) -> Tensor:
@@ -708,9 +861,7 @@ class IMFAttnResModel(nn.Module):
             t = torch.ones(batch_size, device=z_t.device, dtype=z_t.dtype)
         if r is None:
             r = torch.zeros(batch_size, device=z_t.device, dtype=z_t.dtype)
-        u = self.fn(z_t, r, t, cond=cond)
-        delta = self._broadcast_batch_time(t - r, z_t)
-        return z_t - delta * u
+        return self._flow_map(z_t, r=r, t=t, cond=cond)
 
     def _encode_images(self, batch: dict[str, Tensor]) -> Tensor | None:
         if not self.config.image_features:
@@ -877,7 +1028,11 @@ class IMFAttnResModel(nn.Module):
         end = start + self.config.n_action_steps
         return action[:, start:end]
 
-    def compute_loss(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict[str, float]]:
+    def compute_loss(
+        self,
+        batch: dict[str, Tensor],
+        current_step: int | None = None,
+    ) -> tuple[Tensor, dict[str, float]]:
         assert set(batch).issuperset({OBS_STATE, ACTION})
         assert OBS_IMAGES in batch or OBS_ENV_STATE in batch
         actions = batch[ACTION]
@@ -910,14 +1065,30 @@ class IMFAttnResModel(nn.Module):
             scalar_loss = loss.mean()
 
         diagnostics = {}
+        semigroup_weight = self._semigroup_loss_weight(current_step)
+        if semigroup_weight > 0.0:
+            semigroup_loss = self._semigroup_consistency_loss(z_t, cond=cond)
+            weighted_semigroup_loss = semigroup_loss * semigroup_loss.new_tensor(semigroup_weight)
+            scalar_loss = scalar_loss + weighted_semigroup_loss
+            diagnostics.update(
+                {
+                    "imf_diagnostics/semigroup/loss": float(semigroup_loss.detach().float().item()),
+                    "imf_diagnostics/semigroup/weight": float(semigroup_weight),
+                    "imf_diagnostics/semigroup/weighted_loss": float(
+                        weighted_semigroup_loss.detach().float().item()
+                    ),
+                }
+            )
         if self.config.enable_imf_diagnostics:
-            diagnostics = self._imf_training_diagnostics(
-                loss=scalar_loss,
-                target=target,
-                u=u,
-                du_dt=du_dt,
-                delta_du_dt=delta_du_dt,
-                t=t,
-                r=r,
+            diagnostics.update(
+                self._imf_training_diagnostics(
+                    loss=scalar_loss,
+                    target=target,
+                    u=u,
+                    du_dt=du_dt,
+                    delta_du_dt=delta_du_dt,
+                    t=t,
+                    r=r,
+                )
             )
         return scalar_loss, diagnostics
