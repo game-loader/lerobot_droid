@@ -145,6 +145,8 @@ class IMFAttnResSmolVLMVLEncoder(nn.Module):
         self.padding_side = getattr(config, "vlm_tokenizer_padding_side", "right")
         self.truncate_language = getattr(config, "vlm_tokenizer_truncation", True)
         self.vlm_resize_shape = getattr(config, "vlm_resize_shape", (512, 512))
+        self.text_encoder_mode = getattr(config, "vlm_text_encoder_mode", "embedding")
+        self.text_num_layers = int(getattr(config, "vlm_text_num_layers", 16))
         self.num_images = len(getattr(config, "image_features", {}))
 
         if self.load_vlm_weights:
@@ -160,7 +162,9 @@ class IMFAttnResSmolVLMVLEncoder(nn.Module):
         self.vlm_model = _get_smolvlm_core_model(self.vlm)
         self.vision_model = self.vlm_model.vision_model
         self.connector = self.vlm_model.connector
-        self.text_embeddings = self.vlm_model.text_model.get_input_embeddings()
+        self.text_model = self.vlm_model.text_model
+        self.text_embeddings = self.text_model.get_input_embeddings()
+        self._trim_unused_text_modules()
 
         text_config = getattr(getattr(self.vlm, "config", None), "text_config", None)
         self.feature_dim = getattr(text_config, "hidden_size", None)
@@ -193,6 +197,41 @@ class IMFAttnResSmolVLMVLEncoder(nn.Module):
             for param in self.vlm.parameters():
                 param.requires_grad = False
             self.vlm.eval()
+
+    def _trim_unused_text_modules(self) -> None:
+        """Keep only the SmolVLM text modules needed by the configured text path."""
+        if hasattr(self.vlm, "lm_head"):
+            self.vlm.lm_head = nn.Identity()
+
+        layers = getattr(self.text_model, "layers", None)
+        if layers is None:
+            if self.text_encoder_mode == "transformer":
+                raise ValueError("SmolVLM text transformer mode requires text_model.layers.")
+            return
+
+        if self.text_encoder_mode == "embedding":
+            self.text_model.layers = nn.ModuleList()
+            return
+
+        if self.text_encoder_mode != "transformer":
+            raise ValueError(
+                "vlm_text_encoder_mode must be one of {'embedding', 'transformer'}, got "
+                f"{self.text_encoder_mode!r}."
+            )
+        if self.text_num_layers < 1:
+            raise ValueError(
+                "vlm_text_num_layers must be >= 1 when vlm_text_encoder_mode='transformer'. "
+                f"Got {self.text_num_layers}."
+            )
+        if self.text_num_layers > len(layers):
+            raise ValueError(
+                "vlm_text_num_layers cannot exceed the loaded SmolVLM text layer count. "
+                f"Got {self.text_num_layers}, but model has {len(layers)} layers."
+            )
+        self.text_model.layers = layers[: self.text_num_layers]
+        text_model_config = getattr(self.text_model, "config", None)
+        if text_model_config is not None and hasattr(text_model_config, "num_hidden_layers"):
+            text_model_config.num_hidden_layers = self.text_num_layers
 
     def train(self, mode: bool = True):
         super().train(mode)
@@ -287,6 +326,24 @@ class IMFAttnResSmolVLMVLEncoder(nn.Module):
     def _embed_language_tokens(self, tokens: Tensor, masks: Tensor) -> Tensor:
         tokens, masks = self._pad_or_truncate_language(tokens, masks)
         lang_embeddings = self.text_embeddings(tokens)
+        if self.text_encoder_mode == "transformer":
+            device = lang_embeddings.device
+            position_ids = torch.arange(
+                lang_embeddings.shape[1],
+                device=device,
+                dtype=torch.long,
+            ).unsqueeze(0)
+            text_outputs = self.text_model(
+                inputs_embeds=lang_embeddings,
+                attention_mask=masks.to(device=device),
+                position_ids=position_ids,
+                use_cache=False,
+            )
+            lang_embeddings = (
+                text_outputs.last_hidden_state
+                if hasattr(text_outputs, "last_hidden_state")
+                else text_outputs[0]
+            )
         return lang_embeddings * masks.to(device=lang_embeddings.device, dtype=lang_embeddings.dtype).unsqueeze(-1)
 
     def forward(

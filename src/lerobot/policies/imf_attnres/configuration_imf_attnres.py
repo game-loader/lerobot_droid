@@ -48,6 +48,12 @@ class IMFAttnResConfig(PreTrainedConfig):
     vlm_tokenizer_padding_side: str = "right"
     vlm_tokenizer_truncation: bool = True
     vlm_resize_shape: tuple[int, int] = (512, 512)
+    # Text conditioning for the SmolVLM path:
+    #   "embedding"    — current memory-light path: use token embeddings only.
+    #   "transformer"  — run language embeddings through the first vlm_text_num_layers
+    #                    SmolVLM text transformer layers, like SmolVLA's truncated VLM.
+    vlm_text_encoder_mode: str = "embedding"
+    vlm_text_num_layers: int = 16
     vlm_hidden_size: int | None = None
     vlm_tokens_per_step: int | None = None
 
@@ -191,6 +197,20 @@ class IMFAttnResConfig(PreTrainedConfig):
         if self.vlm_tokenizer_max_length <= 0:
             raise ValueError(
                 f"vlm_tokenizer_max_length must be a positive integer. Got {self.vlm_tokenizer_max_length}."
+            )
+        if self.vlm_text_encoder_mode not in {"embedding", "transformer"}:
+            raise ValueError(
+                "vlm_text_encoder_mode must be one of {'embedding', 'transformer'}, got "
+                f"{self.vlm_text_encoder_mode!r}."
+            )
+        if self.vlm_text_num_layers < 0:
+            raise ValueError(
+                f"vlm_text_num_layers must be non-negative. Got {self.vlm_text_num_layers}."
+            )
+        if self.vlm_text_encoder_mode == "transformer" and self.vlm_text_num_layers < 1:
+            raise ValueError(
+                "vlm_text_num_layers must be >= 1 when vlm_text_encoder_mode='transformer'. "
+                f"Got {self.vlm_text_num_layers}."
             )
         if not (
             isinstance(self.vlm_resize_shape, tuple)

@@ -8,7 +8,11 @@ from torch import nn
 
 from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
 from lerobot.policies.factory import make_policy_config
-from lerobot.policies.imf_attnres.modeling_imf_attnres import IMFAttnResModel, IMFAttnResPolicy
+from lerobot.policies.imf_attnres.modeling_imf_attnres import (
+    IMFAttnResModel,
+    IMFAttnResPolicy,
+    IMFAttnResSmolVLMVLEncoder,
+)
 from lerobot.utils.constants import (
     ACTION,
     OBS_IMAGES,
@@ -137,6 +141,8 @@ def test_default_imf_attnres_keeps_resnet_path():
     config = make_tiny_config()
 
     assert config.use_smolvlm_vl_encoder is False
+    assert config.vlm_text_encoder_mode == "embedding"
+    assert config.vlm_text_num_layers == 16
 
     model = IMFAttnResModel(config)
 
@@ -207,3 +213,183 @@ def test_smolvlm_vl_policy_forward_returns_finite_scalar_loss(monkeypatch):
     assert loss.shape == ()
     assert torch.isfinite(loss)
     assert diagnostics is None
+
+
+class _FakeTextConfig:
+    hidden_size = 6
+    pad_token_id = 0
+
+    def __init__(self, num_hidden_layers: int = 4):
+        self.num_hidden_layers = num_hidden_layers
+
+
+class _FakeVisionConfig:
+    patch_size = 4
+    image_size = 8
+
+
+class _FakeSmolVLMConfig:
+    pad_token_id = 0
+    scale_factor = 1
+    vision_config = _FakeVisionConfig()
+
+    def __init__(self, num_hidden_layers: int = 4):
+        self.text_config = _FakeTextConfig(num_hidden_layers=num_hidden_layers)
+
+
+class _FakeTokenEmbedding(nn.Module):
+    embedding_dim = 6
+
+    def forward(self, tokens):
+        return tokens.to(dtype=torch.float32).unsqueeze(-1).expand(*tokens.shape, self.embedding_dim)
+
+
+class _FakeTextLayer(nn.Module):
+    def __init__(self, layer_index: int):
+        super().__init__()
+        self.layer_index = layer_index
+        self.calls = 0
+
+    def forward(self, hidden_states):
+        self.calls += 1
+        return hidden_states + float(self.layer_index + 1)
+
+
+class _FakeTextModel(nn.Module):
+    def __init__(self, num_hidden_layers: int):
+        super().__init__()
+        self.config = _FakeTextConfig(num_hidden_layers=num_hidden_layers)
+        self.embedding = _FakeTokenEmbedding()
+        self.layers = nn.ModuleList([_FakeTextLayer(index) for index in range(num_hidden_layers)])
+        self.forward_calls = 0
+
+    def get_input_embeddings(self):
+        return self.embedding
+
+    def forward(self, *, inputs_embeds, attention_mask=None, use_cache=False, **kwargs):
+        self.forward_calls += 1
+        hidden_states = inputs_embeds
+        for layer in self.layers:
+            hidden_states = layer(hidden_states)
+        return type("FakeTextOutput", (), {"last_hidden_state": hidden_states})()
+
+
+class _FakeVisionModel(nn.Module):
+    dtype = torch.float32
+
+    def forward(self, *, pixel_values, patch_attention_mask=None):
+        batch_size = pixel_values.shape[0]
+        hidden_states = torch.zeros(batch_size, 4, 6, dtype=pixel_values.dtype, device=pixel_values.device)
+        return type("FakeVisionOutput", (), {"last_hidden_state": hidden_states})()
+
+
+class _FakeConnector(nn.Module):
+    def forward(self, hidden_states):
+        return hidden_states
+
+
+class _FakeSmolVLMCore(nn.Module):
+    def __init__(self, num_hidden_layers: int):
+        super().__init__()
+        self.vision_model = _FakeVisionModel()
+        self.connector = _FakeConnector()
+        self.text_model = _FakeTextModel(num_hidden_layers)
+
+
+class _FakeSmolVLMForConditionalGeneration(nn.Module):
+    def __init__(self, config=None):
+        super().__init__()
+        self.config = config or _FakeSmolVLMConfig()
+        self.model = _FakeSmolVLMCore(self.config.text_config.num_hidden_layers)
+        self.lm_head = nn.Linear(self.config.text_config.hidden_size, 10, bias=False)
+
+
+def _install_fake_transformers(monkeypatch):
+    import transformers
+
+    created_models = []
+
+    def fake_config_from_pretrained(model_name):
+        return _FakeSmolVLMConfig(num_hidden_layers=4)
+
+    def fake_from_pretrained(model_name, **kwargs):
+        model = _FakeSmolVLMForConditionalGeneration(config=kwargs.get("config"))
+        created_models.append(model)
+        return model
+
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", fake_config_from_pretrained)
+    monkeypatch.setattr(transformers.AutoModelForImageTextToText, "from_pretrained", fake_from_pretrained)
+    monkeypatch.setattr(
+        transformers,
+        "SmolVLMForConditionalGeneration",
+        _FakeSmolVLMForConditionalGeneration,
+    )
+    return created_models
+
+
+def _make_direct_vl_encoder_inputs(config, *, batch_size: int = 1):
+    return {
+        "images": torch.rand(batch_size, len(IMAGE_KEYS), 3, IMAGE_SIZE, IMAGE_SIZE),
+        "state": torch.randn(batch_size, STATE_DIM),
+        "lang_tokens": torch.tensor([[2, 3, 0]], dtype=torch.long).expand(batch_size, -1).clone(),
+        "lang_masks": torch.tensor([[True, True, False]], dtype=torch.bool).expand(batch_size, -1).clone(),
+    }
+
+
+def test_smolvlm_embedding_text_mode_prunes_text_layers_and_uses_only_token_embeddings(monkeypatch):
+    created_models = _install_fake_transformers(monkeypatch)
+    config = enable_fake_smolvlm(make_tiny_config())
+    config.vlm_resize_shape = (8, 8)
+    config.vlm_tokenizer_max_length = 3
+    config.vlm_text_encoder_mode = "embedding"
+
+    encoder = IMFAttnResSmolVLMVLEncoder(config)
+    prefix_tokens = encoder(**_make_direct_vl_encoder_inputs(config))
+
+    fake_vlm = created_models[-1]
+    assert len(encoder.vlm_model.text_model.layers) == 0
+    assert encoder.vlm_model.text_model.forward_calls == 0
+    assert isinstance(fake_vlm.lm_head, nn.Identity)
+    assert prefix_tokens.shape == (1, 12, 6)
+
+    language_tokens = prefix_tokens[:, 8:11]
+    torch.testing.assert_close(language_tokens[0, 0], torch.full((6,), 2.0))
+    torch.testing.assert_close(language_tokens[0, 1], torch.full((6,), 3.0))
+    torch.testing.assert_close(language_tokens[0, 2], torch.zeros(6))
+
+
+def test_smolvlm_transformer_text_mode_keeps_and_runs_first_configured_text_layers(monkeypatch):
+    _install_fake_transformers(monkeypatch)
+    config = enable_fake_smolvlm(make_tiny_config())
+    config.vlm_resize_shape = (8, 8)
+    config.vlm_tokenizer_max_length = 3
+    config.vlm_text_encoder_mode = "transformer"
+    config.vlm_text_num_layers = 2
+
+    encoder = IMFAttnResSmolVLMVLEncoder(config)
+    prefix_tokens = encoder(**_make_direct_vl_encoder_inputs(config))
+
+    text_model = encoder.vlm_model.text_model
+    assert len(text_model.layers) == 2
+    assert text_model.config.num_hidden_layers == 2
+    assert text_model.forward_calls == 1
+    assert [layer.calls for layer in text_model.layers] == [1, 1]
+    assert prefix_tokens.shape == (1, 12, 6)
+
+    language_tokens = prefix_tokens[:, 8:11]
+    torch.testing.assert_close(language_tokens[0, 0], torch.full((6,), 5.0))
+    torch.testing.assert_close(language_tokens[0, 1], torch.full((6,), 6.0))
+    torch.testing.assert_close(language_tokens[0, 2], torch.zeros(6))
+
+
+def test_smolvlm_text_encoder_config_rejects_invalid_mode_and_layer_count():
+    with pytest.raises(ValueError, match="vlm_text_encoder_mode"):
+        make_policy_config(POLICY_NAME, vlm_text_encoder_mode="full", push_to_hub=False)
+
+    with pytest.raises(ValueError, match="vlm_text_num_layers"):
+        make_policy_config(
+            POLICY_NAME,
+            vlm_text_encoder_mode="transformer",
+            vlm_text_num_layers=0,
+            push_to_hub=False,
+        )
