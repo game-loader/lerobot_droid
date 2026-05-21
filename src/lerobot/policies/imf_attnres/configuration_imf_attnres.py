@@ -57,6 +57,9 @@ class IMFAttnResConfig(PreTrainedConfig):
     #                    SmolVLM text transformer layers, like SmolVLA's truncated VLM.
     vlm_text_encoder_mode: str = "embedding"
     vlm_text_num_layers: int = 16
+    # In transformer mode, include the projected robot state token in the SmolVLM
+    # text-layer prefix, matching SmolVLA. Set False to append state after VLM text layers.
+    vlm_state_in_text_layers: bool = True
     vlm_hidden_size: int | None = None
     vlm_tokens_per_step: int | None = None
 

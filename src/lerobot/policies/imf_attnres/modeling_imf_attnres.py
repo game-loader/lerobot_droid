@@ -149,6 +149,7 @@ class IMFAttnResSmolVLMVLEncoder(nn.Module):
         self.image_forward_batch_size = int(getattr(config, "vlm_image_forward_batch_size", 0))
         self.text_encoder_mode = getattr(config, "vlm_text_encoder_mode", "embedding")
         self.text_num_layers = int(getattr(config, "vlm_text_num_layers", 16))
+        self.state_in_text_layers = bool(getattr(config, "vlm_state_in_text_layers", True))
         self.num_images = len(getattr(config, "image_features", {}))
 
         if self.load_vlm_weights:
@@ -431,13 +432,14 @@ class IMFAttnResSmolVLMVLEncoder(nn.Module):
             state_parts.append(env_state)
         state_token_input = torch.cat(state_parts, dim=-1)
         state_token = self.state_projection(state_token_input).unsqueeze(1)
+        include_state_in_text_layers = self.text_encoder_mode == "transformer" and self.state_in_text_layers
         vlm_prefix_tokens = self._encode_vlm_prefix(
             image_tokens,
             language_tokens,
             language_masks,
-            state_token=state_token if self.text_encoder_mode == "transformer" else None,
+            state_token=state_token if include_state_in_text_layers else None,
         )
-        if self.text_encoder_mode == "transformer":
+        if include_state_in_text_layers:
             prefix_tokens = vlm_prefix_tokens.to(dtype=state_token.dtype)
         else:
             prefix_tokens = torch.cat(
