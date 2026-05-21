@@ -3,6 +3,7 @@
 from collections import deque
 from contextlib import nullcontext
 from copy import deepcopy
+import math
 
 import einops
 import torch
@@ -347,7 +348,17 @@ class IMFAttnResSmolVLMVLEncoder(nn.Module):
         ).unsqueeze(-1)
         return lang_embeddings, masks
 
-    def _encode_vlm_prefix(self, image_tokens: Tensor, language_tokens: Tensor, language_masks: Tensor) -> Tensor:
+    @staticmethod
+    def _scale_vlm_token_embeddings(tokens: Tensor) -> Tensor:
+        return tokens * math.sqrt(tokens.shape[-1])
+
+    def _encode_vlm_prefix(
+        self,
+        image_tokens: Tensor,
+        language_tokens: Tensor,
+        language_masks: Tensor,
+        state_token: Tensor | None = None,
+    ) -> Tensor:
         if self.text_encoder_mode != "transformer":
             return torch.cat([image_tokens, language_tokens], dim=1)
 
@@ -358,8 +369,22 @@ class IMFAttnResSmolVLMVLEncoder(nn.Module):
             dtype=torch.bool,
             device=image_tokens.device,
         )
-        prefix_tokens = torch.cat([image_tokens, language_tokens], dim=1)
-        prefix_masks = torch.cat([image_masks, language_masks.to(device=image_tokens.device)], dim=1)
+        token_parts = [
+            self._scale_vlm_token_embeddings(image_tokens),
+            self._scale_vlm_token_embeddings(language_tokens),
+        ]
+        mask_parts = [image_masks, language_masks.to(device=image_tokens.device)]
+        if state_token is not None:
+            token_parts.append(state_token.to(device=image_tokens.device, dtype=image_tokens.dtype))
+            mask_parts.append(
+                torch.ones(
+                    state_token.shape[:2],
+                    dtype=torch.bool,
+                    device=image_tokens.device,
+                )
+            )
+        prefix_tokens = torch.cat(token_parts, dim=1)
+        prefix_masks = torch.cat(mask_parts, dim=1)
         position_ids = torch.arange(
             prefix_tokens.shape[1],
             device=prefix_tokens.device,
@@ -398,7 +423,6 @@ class IMFAttnResSmolVLMVLEncoder(nn.Module):
         with vlm_context:
             image_tokens = self._embed_images(images)
             language_tokens, language_masks = self._embed_language_tokens(lang_tokens, lang_masks)
-            vlm_prefix_tokens = self._encode_vlm_prefix(image_tokens, language_tokens, language_masks)
 
         state_parts = [state]
         if self.state_env_dim > state.shape[-1]:
@@ -407,13 +431,22 @@ class IMFAttnResSmolVLMVLEncoder(nn.Module):
             state_parts.append(env_state)
         state_token_input = torch.cat(state_parts, dim=-1)
         state_token = self.state_projection(state_token_input).unsqueeze(1)
-        prefix_tokens = torch.cat(
-            [
-                vlm_prefix_tokens.to(dtype=state_token.dtype),
-                state_token,
-            ],
-            dim=1,
+        vlm_prefix_tokens = self._encode_vlm_prefix(
+            image_tokens,
+            language_tokens,
+            language_masks,
+            state_token=state_token if self.text_encoder_mode == "transformer" else None,
         )
+        if self.text_encoder_mode == "transformer":
+            prefix_tokens = vlm_prefix_tokens.to(dtype=state_token.dtype)
+        else:
+            prefix_tokens = torch.cat(
+                [
+                    vlm_prefix_tokens.to(dtype=state_token.dtype),
+                    state_token,
+                ],
+                dim=1,
+            )
         if prefix_tokens.shape[1] != self.tokens_per_step:
             raise ValueError(
                 "SmolVLM VL encoder produced an unexpected number of condition tokens. "

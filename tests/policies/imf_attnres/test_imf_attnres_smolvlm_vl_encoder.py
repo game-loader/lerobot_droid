@@ -366,7 +366,7 @@ def test_smolvlm_embedding_text_mode_prunes_text_layers_and_uses_only_token_embe
     torch.testing.assert_close(language_tokens[0, 2], torch.zeros(6))
 
 
-def test_smolvlm_transformer_text_mode_processes_image_and_language_tokens_but_not_state(monkeypatch):
+def test_smolvlm_transformer_text_mode_processes_image_language_and_state_like_smolvla(monkeypatch):
     _install_fake_transformers(monkeypatch)
     config = enable_fake_smolvlm(make_tiny_config())
     config.vlm_resize_shape = (8, 8)
@@ -376,27 +376,31 @@ def test_smolvlm_transformer_text_mode_processes_image_and_language_tokens_but_n
 
     encoder = IMFAttnResSmolVLMVLEncoder(config)
     inputs = _make_direct_vl_encoder_inputs(config)
+    with torch.no_grad():
+        encoder.state_projection.weight.zero_()
+        encoder.state_projection.bias.fill_(1.0)
     prefix_tokens = encoder(**inputs)
 
     text_model = encoder.vlm_model.text_model
     assert len(text_model.layers) == 2
     assert text_model.config.num_hidden_layers == 2
     assert text_model.forward_calls == 1
-    assert text_model.last_input_shape == (1, 11, 6)
+    assert text_model.last_input_shape == (1, 12, 6)
     assert [layer.calls for layer in text_model.layers] == [1, 1]
     assert prefix_tokens.shape == (1, 12, 6)
 
     image_tokens = prefix_tokens[:, :8]
     language_tokens = prefix_tokens[:, 8:11]
     state_token = prefix_tokens[:, 11:]
+    embedding_scale = torch.tensor(6.0).sqrt()
     expected_image_values = encoder._preprocess_images(inputs["images"]).mean(dim=(1, 2, 3))
     expected_image_tokens = expected_image_values.view(1, len(IMAGE_KEYS), 1, 1).expand(1, len(IMAGE_KEYS), 4, 6)
-    expected_image_tokens = expected_image_tokens.reshape(1, len(IMAGE_KEYS) * 4, 6) + 3.0
+    expected_image_tokens = expected_image_tokens.reshape(1, len(IMAGE_KEYS) * 4, 6) * embedding_scale + 3.0
     torch.testing.assert_close(image_tokens, expected_image_tokens)
-    torch.testing.assert_close(language_tokens[0, 0], torch.full((6,), 5.0))
-    torch.testing.assert_close(language_tokens[0, 1], torch.full((6,), 6.0))
+    torch.testing.assert_close(language_tokens[0, 0], torch.full((6,), 2.0 * embedding_scale + 3.0))
+    torch.testing.assert_close(language_tokens[0, 1], torch.full((6,), 3.0 * embedding_scale + 3.0))
     torch.testing.assert_close(language_tokens[0, 2], torch.zeros(6))
-    assert not torch.allclose(state_token, torch.full_like(state_token, 3.0))
+    torch.testing.assert_close(state_token, torch.full((1, 1, 6), 4.0))
 
 
 def test_smolvlm_vl_encoder_chunks_vision_forward_without_changing_token_order(monkeypatch):
