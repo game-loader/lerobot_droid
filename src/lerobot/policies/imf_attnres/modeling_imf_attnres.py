@@ -3,6 +3,7 @@
 from collections import deque
 from contextlib import nullcontext
 from copy import deepcopy
+from dataclasses import dataclass
 import math
 
 import einops
@@ -35,6 +36,41 @@ try:
     from torch.func import jvp as torch_func_jvp
 except ImportError:  # pragma: no cover
     torch_func_jvp = None
+
+
+@dataclass
+class IMFLayerwiseConditioning:
+    """Per-layer SmolVLM prefix states used by the layer-wise IMF action head."""
+
+    prefix_layers: Tensor
+    prefix_mask: Tensor
+    attention_mode: str = "cross_attn"
+    self_attn_every_n_layers: int = 2
+
+    def detach(self) -> "IMFLayerwiseConditioning":
+        return IMFLayerwiseConditioning(
+            prefix_layers=self.prefix_layers.detach(),
+            prefix_mask=self.prefix_mask.detach(),
+            attention_mode=self.attention_mode,
+            self_attn_every_n_layers=self.self_attn_every_n_layers,
+        )
+
+    def to(self, *args, **kwargs) -> "IMFLayerwiseConditioning":
+        prefix_layers = self.prefix_layers.to(*args, **kwargs)
+        return IMFLayerwiseConditioning(
+            prefix_layers=prefix_layers,
+            prefix_mask=self.prefix_mask.to(device=prefix_layers.device),
+            attention_mode=self.attention_mode,
+            self_attn_every_n_layers=self.self_attn_every_n_layers,
+        )
+
+    def as_dict(self) -> dict[str, Tensor | str | int]:
+        return {
+            "prefix_layers": self.prefix_layers,
+            "prefix_mask": self.prefix_mask,
+            "attention_mode": self.attention_mode,
+            "self_attn_every_n_layers": self.self_attn_every_n_layers,
+        }
 
 
 class IMFAttnResRgbEncoder(nn.Module):
@@ -359,10 +395,9 @@ class IMFAttnResSmolVLMVLEncoder(nn.Module):
         language_tokens: Tensor,
         language_masks: Tensor,
         state_token: Tensor | None = None,
-    ) -> Tensor:
-        if self.text_encoder_mode != "transformer":
-            return torch.cat([image_tokens, language_tokens], dim=1)
-
+        *,
+        output_hidden_states: bool = False,
+    ) -> tuple[Tensor, Tensor, tuple[Tensor, ...] | None]:
         batch_size, image_token_count = image_tokens.shape[:2]
         image_masks = torch.ones(
             batch_size,
@@ -370,10 +405,13 @@ class IMFAttnResSmolVLMVLEncoder(nn.Module):
             dtype=torch.bool,
             device=image_tokens.device,
         )
-        token_parts = [
-            self._scale_vlm_token_embeddings(image_tokens),
-            self._scale_vlm_token_embeddings(language_tokens),
-        ]
+        if self.text_encoder_mode == "transformer":
+            token_parts = [
+                self._scale_vlm_token_embeddings(image_tokens),
+                self._scale_vlm_token_embeddings(language_tokens),
+            ]
+        else:
+            token_parts = [image_tokens, language_tokens]
         mask_parts = [image_masks, language_masks.to(device=image_tokens.device)]
         if state_token is not None:
             token_parts.append(state_token.to(device=image_tokens.device, dtype=image_tokens.dtype))
@@ -386,6 +424,13 @@ class IMFAttnResSmolVLMVLEncoder(nn.Module):
             )
         prefix_tokens = torch.cat(token_parts, dim=1)
         prefix_masks = torch.cat(mask_parts, dim=1)
+        if self.text_encoder_mode != "transformer":
+            prefix_tokens = prefix_tokens * prefix_masks.to(
+                device=prefix_tokens.device,
+                dtype=prefix_tokens.dtype,
+            ).unsqueeze(-1)
+            return prefix_tokens, prefix_masks, None
+
         position_ids = torch.arange(
             prefix_tokens.shape[1],
             device=prefix_tokens.device,
@@ -396,13 +441,25 @@ class IMFAttnResSmolVLMVLEncoder(nn.Module):
             attention_mask=prefix_masks,
             position_ids=position_ids,
             use_cache=False,
+            output_hidden_states=output_hidden_states,
         )
         prefix_tokens = (
             text_outputs.last_hidden_state
             if hasattr(text_outputs, "last_hidden_state")
             else text_outputs[0]
         )
-        return prefix_tokens * prefix_masks.to(device=prefix_tokens.device, dtype=prefix_tokens.dtype).unsqueeze(-1)
+        prefix_tokens = prefix_tokens * prefix_masks.to(
+            device=prefix_tokens.device,
+            dtype=prefix_tokens.dtype,
+        ).unsqueeze(-1)
+        hidden_states = getattr(text_outputs, "hidden_states", None) if output_hidden_states else None
+        if hidden_states is not None:
+            hidden_states = tuple(
+                layer_tokens
+                * prefix_masks.to(device=layer_tokens.device, dtype=layer_tokens.dtype).unsqueeze(-1)
+                for layer_tokens in hidden_states
+            )
+        return prefix_tokens, prefix_masks, hidden_states
 
     def forward(
         self,
@@ -438,7 +495,7 @@ class IMFAttnResSmolVLMVLEncoder(nn.Module):
             language_tokens,
             language_masks,
             state_token=state_token if include_state_in_text_layers else None,
-        )
+        )[0]
         if include_state_in_text_layers:
             prefix_tokens = vlm_prefix_tokens.to(dtype=state_token.dtype)
         else:
@@ -455,6 +512,79 @@ class IMFAttnResSmolVLMVLEncoder(nn.Module):
                 f"Got {prefix_tokens.shape[1]}, expected {self.tokens_per_step}."
             )
         return prefix_tokens
+
+    def forward_layerwise_prefix(
+        self,
+        images: Tensor,
+        state: Tensor,
+        lang_tokens: Tensor,
+        lang_masks: Tensor,
+        *,
+        env_state: Tensor | None = None,
+        num_layers: int,
+    ) -> tuple[Tensor, Tensor]:
+        if self.text_encoder_mode != "transformer":
+            raise ValueError("Layer-wise SmolVLM conditioning requires vlm_text_encoder_mode='transformer'.")
+        if num_layers < 1:
+            raise ValueError(f"num_layers must be >= 1, got {num_layers}.")
+
+        device = self.state_projection.weight.device
+        images = images.to(device=device)
+        state = state.to(device=device, dtype=self.state_projection.weight.dtype)
+        lang_tokens = lang_tokens.to(device=device, dtype=torch.long)
+        lang_masks = lang_masks.to(device=device, dtype=torch.bool)
+        if env_state is not None:
+            env_state = env_state.to(device=device, dtype=self.state_projection.weight.dtype)
+
+        vlm_context = torch.no_grad() if self.freeze_vlm_encoder else nullcontext()
+        with vlm_context:
+            image_tokens = self._embed_images(images)
+            language_tokens, language_masks = self._embed_language_tokens(lang_tokens, lang_masks)
+
+        state_parts = [state]
+        if self.state_env_dim > state.shape[-1]:
+            if env_state is None:
+                raise ValueError("SmolVLM state projection expects env_state, but none was provided.")
+            state_parts.append(env_state)
+        state_token_input = torch.cat(state_parts, dim=-1)
+        state_token = self.state_projection(state_token_input).unsqueeze(1)
+        include_state_in_text_layers = self.state_in_text_layers
+        _, prefix_masks, hidden_states = self._encode_vlm_prefix(
+            image_tokens,
+            language_tokens,
+            language_masks,
+            state_token=state_token if include_state_in_text_layers else None,
+            output_hidden_states=True,
+        )
+        if hidden_states is None:
+            raise RuntimeError("SmolVLM text model did not return hidden_states for layer-wise conditioning.")
+
+        # hidden_states[0] is the input embedding. SmolVLA-style layer-wise coupling uses one prefix
+        # state for each action-head layer; repeat the last available SmolVLM layer if the IMF head is deeper.
+        layer_states = list(hidden_states[1:])
+        if not layer_states:
+            raise RuntimeError("Layer-wise conditioning requires at least one SmolVLM text layer state.")
+        if not include_state_in_text_layers:
+            layer_states = [
+                torch.cat([layer_state.to(dtype=state_token.dtype), state_token], dim=1)
+                for layer_state in layer_states
+            ]
+            state_mask = torch.ones(
+                state_token.shape[:2],
+                dtype=torch.bool,
+                device=prefix_masks.device,
+            )
+            prefix_masks = torch.cat([prefix_masks, state_mask], dim=1)
+
+        while len(layer_states) < num_layers:
+            layer_states.append(layer_states[-1])
+        prefix_layers = torch.stack(layer_states[:num_layers], dim=1)
+        if prefix_layers.shape[2] != self.tokens_per_step:
+            raise ValueError(
+                "SmolVLM layer-wise prefix produced an unexpected number of condition tokens. "
+                f"Got {prefix_layers.shape[2]}, expected {self.tokens_per_step}."
+            )
+        return prefix_layers.to(dtype=state_token.dtype), prefix_masks
 
 
 class IMFAttnResPolicy(PreTrainedPolicy):
@@ -601,6 +731,11 @@ class IMFAttnResModel(nn.Module):
             attn_res_eps=config.attn_res_eps,
             attn_res_rope_theta=config.attn_res_rope_theta,
         )
+        if getattr(config, "vlm_conditioning_mode", "flat_tokens") == "layerwise":
+            self.head.set_layerwise_prefix_config(
+                attention_mode=config.vlm_layerwise_attention_mode,
+                self_attn_every_n_layers=config.vlm_layerwise_self_attn_every_n_layers,
+            )
         self.semigroup_teacher_head = None
         if config.enable_semigroup_consistency:
             self._reset_semigroup_teacher()
@@ -721,7 +856,13 @@ class IMFAttnResModel(nn.Module):
         t = s + segment_lengths[:, 2]
         return r, s, t
 
-    def fn(self, z: Tensor, r: Tensor, t: Tensor, cond: Tensor | None = None) -> Tensor:
+    def fn(
+        self,
+        z: Tensor,
+        r: Tensor,
+        t: Tensor,
+        cond: Tensor | IMFLayerwiseConditioning | dict | None = None,
+    ) -> Tensor:
         return self.head(z, r, t, cond=cond)
 
     def _semigroup_teacher_fn(
@@ -729,7 +870,7 @@ class IMFAttnResModel(nn.Module):
         z: Tensor,
         r: Tensor,
         t: Tensor,
-        cond: Tensor | None = None,
+        cond: Tensor | IMFLayerwiseConditioning | dict | None = None,
     ) -> Tensor:
         if self.semigroup_teacher_head is None:
             raise RuntimeError("Semigroup teacher head is not initialized.")
@@ -740,7 +881,7 @@ class IMFAttnResModel(nn.Module):
         z_t: Tensor,
         r: Tensor,
         t: Tensor,
-        cond: Tensor,
+        cond: Tensor | IMFLayerwiseConditioning | dict,
         v: Tensor,
         condition_data: Tensor | None = None,
         condition_mask: Tensor | None = None,
@@ -782,7 +923,7 @@ class IMFAttnResModel(nn.Module):
         z_t: Tensor,
         r: Tensor,
         t: Tensor,
-        cond: Tensor,
+        cond: Tensor | IMFLayerwiseConditioning | dict,
         *,
         fn=None,
     ) -> Tensor:
@@ -791,6 +932,17 @@ class IMFAttnResModel(nn.Module):
         u = fn(z_t, r, t, cond=cond)
         delta = self._broadcast_batch_time(t - r, z_t)
         return z_t - delta * u
+
+    @staticmethod
+    def _detach_conditioning(cond):
+        if hasattr(cond, "detach"):
+            return cond.detach()
+        if isinstance(cond, dict):
+            return {
+                key: value.detach() if torch.is_tensor(value) else value
+                for key, value in cond.items()
+            }
+        return cond
 
     def _semigroup_loss_weight(self, current_step: int | None) -> float:
         if not self.config.enable_semigroup_consistency:
@@ -812,7 +964,7 @@ class IMFAttnResModel(nn.Module):
     def _semigroup_consistency_loss(
         self,
         x_t: Tensor,
-        cond: Tensor,
+        cond: Tensor | IMFLayerwiseConditioning | dict,
         r: Tensor | None = None,
         s: Tensor | None = None,
         t: Tensor | None = None,
@@ -821,11 +973,11 @@ class IMFAttnResModel(nn.Module):
             r, s, t = self._sample_semigroup_times(x_t.shape[0], device=x_t.device, dtype=x_t.dtype)
         if self.semigroup_teacher_head is None:
             self._reset_semigroup_teacher()
-        semigroup_cond = cond.detach()
+        semigroup_cond = self._detach_conditioning(cond)
         direct = self._flow_map(x_t, r=r, t=t, cond=semigroup_cond)
         with torch.no_grad():
             teacher_x_t = x_t.detach()
-            teacher_cond = semigroup_cond.detach()
+            teacher_cond = self._detach_conditioning(semigroup_cond)
             mid = self._flow_map(
                 teacher_x_t,
                 r=s,
@@ -1093,6 +1245,35 @@ class IMFAttnResModel(nn.Module):
             env_state = einops.rearrange(env, "b s d -> (b s) d")
 
         lang_tokens, lang_masks = self._prepare_smolvlm_language(batch, batch_size, n_obs_steps)
+        if getattr(self.config, "vlm_conditioning_mode", "flat_tokens") == "layerwise":
+            prefix_layers, prefix_mask = self.vl_encoder.forward_layerwise_prefix(
+                flat_images,
+                flat_state,
+                lang_tokens,
+                lang_masks,
+                env_state=env_state,
+                num_layers=self.config.n_layer,
+            )
+            prefix_layers = einops.rearrange(
+                prefix_layers,
+                "(b s) l t d -> b l (s t) d",
+                b=batch_size,
+                s=n_obs_steps,
+            )
+            prefix_mask = einops.rearrange(
+                prefix_mask,
+                "(b s) t -> b (s t)",
+                b=batch_size,
+                s=n_obs_steps,
+            )
+            head_dtype = get_dtype_from_parameters(self.head)
+            return IMFLayerwiseConditioning(
+                prefix_layers=prefix_layers.to(dtype=head_dtype),
+                prefix_mask=prefix_mask,
+                attention_mode=self.config.vlm_layerwise_attention_mode,
+                self_attn_every_n_layers=self.config.vlm_layerwise_self_attn_every_n_layers,
+            )
+
         step_tokens = self.vl_encoder(flat_images, flat_state, lang_tokens, lang_masks, env_state=env_state)
         cond = einops.rearrange(
             step_tokens,

@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 
-from lerobot.configs import NormalizationMode, PreTrainedConfig
+from lerobot.configs import FeatureType, NormalizationMode, PreTrainedConfig
 from lerobot.optim import AdamConfig, CosineDecayWithWarmupSchedulerConfig, LRSchedulerConfig
 
 
@@ -60,6 +60,16 @@ class IMFAttnResConfig(PreTrainedConfig):
     # In transformer mode, include the projected robot state token in the SmolVLM
     # text-layer prefix, matching SmolVLA. Set False to append state after VLM text layers.
     vlm_state_in_text_layers: bool = True
+    # How SmolVLM conditions the IMF action head:
+    #   "flat_tokens" — encode the visual-language-state prefix once and prepend it to the action head.
+    #   "layerwise"   — expose SmolVLM prefix hidden states per action-head layer, then couple them
+    #                   with IMF action tokens layer-by-layer in a SmolVLA-style pattern.
+    vlm_conditioning_mode: str = "flat_tokens"
+    # Layer-wise coupling schedule. With the default "cross_attn" and interval 2, even action-head
+    # layers jointly self-attend over prefix+action tokens, while odd layers cross-attend action tokens
+    # to the corresponding SmolVLM prefix state.
+    vlm_layerwise_attention_mode: str = "cross_attn"
+    vlm_layerwise_self_attn_every_n_layers: int = 2
     vlm_hidden_size: int | None = None
     vlm_tokens_per_step: int | None = None
 
@@ -136,6 +146,10 @@ class IMFAttnResConfig(PreTrainedConfig):
 
     def __post_init__(self):
         super().__post_init__()
+        if self.use_smolvlm_vl_encoder:
+            self.normalization_mapping = dict(self.normalization_mapping)
+            self.normalization_mapping["VISUAL"] = NormalizationMode.IDENTITY
+            self.normalization_mapping[FeatureType.VISUAL] = NormalizationMode.IDENTITY
         if self.drop_n_last_frames is None:
             self.drop_n_last_frames = self.horizon - self.n_action_steps - self.n_obs_steps + 1
         if self.n_obs_steps < 1:
@@ -213,6 +227,28 @@ class IMFAttnResConfig(PreTrainedConfig):
             raise ValueError(
                 "vlm_text_encoder_mode must be one of {'embedding', 'transformer'}, got "
                 f"{self.vlm_text_encoder_mode!r}."
+            )
+        if self.vlm_conditioning_mode not in {"flat_tokens", "layerwise"}:
+            raise ValueError(
+                "vlm_conditioning_mode must be one of {'flat_tokens', 'layerwise'}, got "
+                f"{self.vlm_conditioning_mode!r}."
+            )
+        if self.vlm_conditioning_mode == "layerwise":
+            if not self.use_smolvlm_vl_encoder:
+                raise ValueError("vlm_conditioning_mode='layerwise' requires use_smolvlm_vl_encoder=True.")
+            if self.vlm_text_encoder_mode != "transformer":
+                raise ValueError(
+                    "vlm_conditioning_mode='layerwise' requires vlm_text_encoder_mode='transformer'."
+                )
+        if self.vlm_layerwise_attention_mode not in {"self_attn", "cross_attn"}:
+            raise ValueError(
+                "vlm_layerwise_attention_mode must be one of {'self_attn', 'cross_attn'}, got "
+                f"{self.vlm_layerwise_attention_mode!r}."
+            )
+        if self.vlm_layerwise_self_attn_every_n_layers < 1:
+            raise ValueError(
+                "vlm_layerwise_self_attn_every_n_layers must be >= 1, got "
+                f"{self.vlm_layerwise_self_attn_every_n_layers}."
             )
         if self.vlm_text_num_layers < 0:
             raise ValueError(

@@ -13,6 +13,7 @@ from lerobot.policies.imf_attnres.modeling_imf_attnres import (
     IMFAttnResPolicy,
     IMFAttnResSmolVLMVLEncoder,
 )
+from lerobot.policies.imf_attnres.imf_transformer1d import IMFTransformer1D
 from lerobot.utils.constants import (
     ACTION,
     OBS_IMAGES,
@@ -267,13 +268,22 @@ class _FakeTextModel(nn.Module):
     def get_input_embeddings(self):
         return self.embedding
 
-    def forward(self, *, inputs_embeds, attention_mask=None, use_cache=False, **kwargs):
+    def forward(self, *, inputs_embeds, attention_mask=None, use_cache=False, output_hidden_states=False, **kwargs):
         self.forward_calls += 1
         self.last_input_shape = tuple(inputs_embeds.shape)
         hidden_states = inputs_embeds
+        all_hidden_states = [hidden_states]
         for layer in self.layers:
             hidden_states = layer(hidden_states)
-        return type("FakeTextOutput", (), {"last_hidden_state": hidden_states})()
+            all_hidden_states.append(hidden_states)
+        return type(
+            "FakeTextOutput",
+            (),
+            {
+                "last_hidden_state": hidden_states,
+                "hidden_states": tuple(all_hidden_states) if output_hidden_states else None,
+            },
+        )()
 
 
 class _FakeVisionModel(nn.Module):
@@ -438,6 +448,46 @@ def test_smolvlm_transformer_text_mode_can_keep_state_outside_text_layers(monkey
     torch.testing.assert_close(state_token, torch.ones(1, 1, 6))
 
 
+def test_smolvlm_layerwise_mode_returns_per_text_layer_prefix_states(monkeypatch):
+    _install_fake_transformers(monkeypatch)
+    config = enable_fake_smolvlm(make_tiny_config())
+    config.vlm_resize_shape = (8, 8)
+    config.vlm_tokenizer_max_length = 3
+    config.vlm_text_encoder_mode = "transformer"
+    config.vlm_text_num_layers = 3
+    config.vlm_conditioning_mode = "layerwise"
+
+    encoder = IMFAttnResSmolVLMVLEncoder(config)
+    inputs = _make_direct_vl_encoder_inputs(config)
+    with torch.no_grad():
+        encoder.state_projection.weight.zero_()
+        encoder.state_projection.bias.fill_(1.0)
+
+    prefix_layers, prefix_masks = encoder.forward_layerwise_prefix(
+        **inputs,
+        num_layers=2,
+    )
+
+    text_model = encoder.vlm_model.text_model
+    assert text_model.forward_calls == 1
+    assert text_model.last_input_shape == (1, 12, 6)
+    assert [layer.calls for layer in text_model.layers] == [1, 1, 1]
+    assert prefix_layers.shape == (1, 2, 12, 6)
+    assert prefix_masks.shape == (1, 12)
+    assert prefix_masks[:, :10].all()
+    assert not prefix_masks[:, 10].any()
+    assert prefix_masks[:, 11:].all()
+
+    embedding_scale = torch.tensor(6.0).sqrt()
+    expected_image_values = encoder._preprocess_images(inputs["images"]).mean(dim=(1, 2, 3))
+    expected_image_tokens = expected_image_values.view(1, len(IMAGE_KEYS), 1, 1).expand(1, len(IMAGE_KEYS), 4, 6)
+    expected_image_tokens = expected_image_tokens.reshape(1, len(IMAGE_KEYS) * 4, 6) * embedding_scale
+    torch.testing.assert_close(prefix_layers[:, 0, :8], expected_image_tokens + 1.0)
+    torch.testing.assert_close(prefix_layers[:, 1, :8], expected_image_tokens + 3.0)
+    torch.testing.assert_close(prefix_layers[:, 0, 11:], torch.full((1, 1, 6), 2.0))
+    torch.testing.assert_close(prefix_layers[:, 1, 11:], torch.full((1, 1, 6), 4.0))
+
+
 def test_smolvlm_vl_encoder_chunks_vision_forward_without_changing_token_order(monkeypatch):
     _install_fake_transformers(monkeypatch)
     config = enable_fake_smolvlm(make_tiny_config())
@@ -477,3 +527,100 @@ def test_smolvlm_text_encoder_config_rejects_invalid_mode_and_layer_count():
 
     with pytest.raises(ValueError, match="vlm_image_forward_batch_size"):
         make_policy_config(POLICY_NAME, vlm_image_forward_batch_size=-1, push_to_hub=False)
+
+    with pytest.raises(ValueError, match="vlm_conditioning_mode"):
+        make_policy_config(POLICY_NAME, vlm_conditioning_mode="late", push_to_hub=False)
+
+    with pytest.raises(ValueError, match="vlm_text_encoder_mode='transformer'"):
+        make_policy_config(
+            POLICY_NAME,
+            use_smolvlm_vl_encoder=True,
+            vlm_conditioning_mode="layerwise",
+            vlm_text_encoder_mode="embedding",
+            push_to_hub=False,
+        )
+
+
+def test_smolvlm_layerwise_prepare_conditioning_returns_prefix_stack(monkeypatch):
+    _install_fake_transformers(monkeypatch)
+    config = enable_fake_smolvlm(make_tiny_config())
+    config.n_layer = 2
+    config.n_emb = 32
+    config.n_head = 8
+    config.n_kv_head = 8
+    config.vlm_resize_shape = (8, 8)
+    config.vlm_tokenizer_max_length = 3
+    config.vlm_text_encoder_mode = "transformer"
+    config.vlm_text_num_layers = 2
+    config.vlm_conditioning_mode = "layerwise"
+
+    model = IMFAttnResModel(config)
+    cond = model._prepare_conditioning(make_stacked_batch())
+
+    assert cond.prefix_layers.shape == (
+        2,
+        config.n_layer,
+        config.n_obs_steps * model.vl_encoder.tokens_per_step,
+        model.vl_encoder.feature_dim,
+    )
+    assert cond.prefix_mask.shape == (
+        2,
+        config.n_obs_steps * model.vl_encoder.tokens_per_step,
+    )
+    assert cond.attention_mode == config.vlm_layerwise_attention_mode
+    assert cond.self_attn_every_n_layers == config.vlm_layerwise_self_attn_every_n_layers
+
+
+def test_smolvlm_layerwise_policy_forward_returns_finite_scalar_loss(monkeypatch):
+    _install_fake_transformers(monkeypatch)
+    config = enable_fake_smolvlm(make_tiny_config())
+    config.n_layer = 2
+    config.n_emb = 32
+    config.n_head = 8
+    config.n_kv_head = 8
+    config.vlm_resize_shape = (8, 8)
+    config.vlm_tokenizer_max_length = 3
+    config.vlm_text_encoder_mode = "transformer"
+    config.vlm_text_num_layers = 2
+    config.vlm_conditioning_mode = "layerwise"
+
+    policy = IMFAttnResPolicy(config)
+
+    loss, diagnostics = policy.forward(make_policy_batch())
+
+    assert loss.shape == ()
+    assert torch.isfinite(loss)
+    assert diagnostics is None
+
+
+@pytest.mark.parametrize("backbone_type", ["attnres_full", "attnres_diff", "diff_transformer", "vanilla"])
+def test_imf_transformer_layerwise_conditioning_supports_existing_backbones(backbone_type):
+    torch.manual_seed(0)
+    head = IMFTransformer1D(
+        input_dim=ACTION_DIM,
+        output_dim=ACTION_DIM,
+        horizon=4,
+        n_obs_steps=5,
+        cond_dim=6,
+        n_layer=2,
+        n_head=8,
+        n_emb=32,
+        n_kv_head=8,
+        p_drop_emb=0.0,
+        p_drop_attn=0.0,
+        backbone_type=backbone_type,
+        time_as_cond=True,
+        obs_as_cond=True,
+    )
+    sample = torch.randn(2, 4, ACTION_DIM)
+    cond = {
+        "prefix_layers": torch.randn(2, 2, 5, 6),
+        "prefix_mask": torch.ones(2, 5, dtype=torch.bool),
+        "attention_mode": "cross_attn",
+        "self_attn_every_n_layers": 2,
+    }
+
+    output = head(sample, torch.zeros(2), torch.ones(2), cond=cond)
+
+    assert output.shape == sample.shape
+    assert torch.isfinite(output).all()

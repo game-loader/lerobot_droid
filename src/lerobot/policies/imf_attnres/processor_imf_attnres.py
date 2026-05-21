@@ -4,6 +4,7 @@ from typing import Any
 
 import torch
 
+from lerobot.configs import FeatureType, NormalizationMode
 from lerobot.processor import (
     AddBatchDimensionProcessorStep,
     DeviceProcessorStep,
@@ -44,11 +45,16 @@ def make_imf_attnres_pre_post_processors(
                 truncation=config.vlm_tokenizer_truncation,
             ),
         ]
+    normalization_mapping = config.normalization_mapping
+    if config.use_smolvlm_vl_encoder:
+        normalization_mapping = dict(normalization_mapping)
+        normalization_mapping["VISUAL"] = NormalizationMode.IDENTITY
+        normalization_mapping[FeatureType.VISUAL] = NormalizationMode.IDENTITY
     input_steps += [
         DeviceProcessorStep(device=config.device),
         NormalizerProcessorStep(
             features={**config.input_features, **config.output_features},
-            norm_map=config.normalization_mapping,
+            norm_map=normalization_mapping,
             stats=dataset_stats,
         ),
     ]

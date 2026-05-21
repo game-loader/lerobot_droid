@@ -171,3 +171,53 @@ def test_make_imf_attnres_processor_with_smolvlm_vl_encoder(monkeypatch):
     assert len(postprocessor.steps) == 2
     assert isinstance(postprocessor.steps[0], UnnormalizerProcessorStep)
     assert isinstance(postprocessor.steps[1], DeviceProcessorStep)
+
+
+def test_smolvlm_processor_forces_visual_identity_normalization(monkeypatch):
+    """SmolVLM expects policy images to stay in [0, 1] before its internal [-1, 1] conversion."""
+
+    class DummyTokenizerProcessorStep(ProcessorStep):
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __call__(self, transition: EnvTransition) -> EnvTransition:
+            return transition
+
+        def transform_features(self, features):
+            return features
+
+    import lerobot.policies.imf_attnres.processor_imf_attnres as processor_imf_attnres
+
+    monkeypatch.setattr(processor_imf_attnres, "TokenizerProcessorStep", DummyTokenizerProcessorStep)
+
+    config = make_tiny_imf_attnres_config()
+    config.use_smolvlm_vl_encoder = True
+    config.normalization_mapping = {
+        FeatureType.STATE: NormalizationMode.MEAN_STD,
+        FeatureType.VISUAL: NormalizationMode.MEAN_STD,
+        FeatureType.ACTION: NormalizationMode.MIN_MAX,
+    }
+    stats = {
+        OBS_STATE: {"mean": torch.zeros(STATE_DIM), "std": torch.ones(STATE_DIM)},
+        ACTION: {"min": torch.full((ACTION_DIM,), -1.0), "max": torch.ones(ACTION_DIM)},
+        **{
+            key: {
+                "mean": torch.tensor([0.485, 0.456, 0.406]),
+                "std": torch.tensor([0.229, 0.224, 0.225]),
+            }
+            for key in IMAGE_KEYS
+        },
+    }
+
+    preprocessor, _ = make_pre_post_processors(config, dataset_stats=stats)
+    normalizer = preprocessor.steps[-1]
+
+    assert isinstance(normalizer, NormalizerProcessorStep)
+    assert normalizer.norm_map[FeatureType.VISUAL] == NormalizationMode.IDENTITY
+    assert normalizer.norm_map[FeatureType.STATE] == NormalizationMode.MEAN_STD
+    assert normalizer.norm_map[FeatureType.ACTION] == NormalizationMode.MIN_MAX
+
+    batch = make_single_transition_batch()
+    processed = preprocessor(batch)
+    for key in IMAGE_KEYS:
+        assert torch.allclose(processed[key][0], batch[key], rtol=1e-5)

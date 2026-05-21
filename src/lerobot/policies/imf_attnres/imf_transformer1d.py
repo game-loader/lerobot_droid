@@ -173,6 +173,23 @@ class IMFTransformer1D(ModuleAttrMixin):
 
             self.ln_f = nn.LayerNorm(n_emb)
 
+        self.layerwise_attention_mode = 'cross_attn'
+        self.layerwise_self_attn_every_n_layers = 2
+        self.layerwise_prefix_proj = nn.Linear(cond_dim, n_emb) if obs_as_cond else None
+        self.layerwise_cross_attn = None
+        if obs_as_cond:
+            self.layerwise_cross_attn = nn.ModuleList(
+                [
+                    nn.MultiheadAttention(
+                        embed_dim=n_emb,
+                        num_heads=n_head,
+                        dropout=p_drop_attn,
+                        batch_first=True,
+                    )
+                    for _ in range(n_layer)
+                ]
+            )
+
         if causal_attn and backbone_type != 'attnres_full':
             sz = t_seq
             mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
@@ -200,12 +217,28 @@ class IMFTransformer1D(ModuleAttrMixin):
         self.T = t_seq
         self.T_cond = t_cond
         self.horizon = horizon
+        self.n_layer = n_layer
         self.time_as_cond = time_as_cond
         self.obs_as_cond = obs_as_cond
         self.encoder_only = encoder_only
 
         self.apply(self._init_weights)
         logger.info('number of parameters: %e', sum(p.numel() for p in self.parameters()))
+
+    def set_layerwise_prefix_config(
+        self,
+        *,
+        attention_mode: str = 'cross_attn',
+        self_attn_every_n_layers: int = 2,
+    ) -> None:
+        if attention_mode not in {'self_attn', 'cross_attn'}:
+            raise ValueError(f"Unsupported layerwise attention_mode: {attention_mode!r}.")
+        if self_attn_every_n_layers < 1:
+            raise ValueError(
+                f"self_attn_every_n_layers must be >= 1, got {self_attn_every_n_layers}."
+            )
+        self.layerwise_attention_mode = attention_mode
+        self.layerwise_self_attn_every_n_layers = self_attn_every_n_layers
 
     def _init_weights(self, module):
         ignore_types = (
@@ -226,6 +259,7 @@ class IMFTransformer1D(ModuleAttrMixin):
             MultiheadDifferentialSelfAttention,
             SwiGLUFFN,
             RMSNormNoWeight,
+            nn.MultiheadAttention,
         )
         if isinstance(module, (nn.Linear, nn.Embedding)):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
@@ -406,6 +440,162 @@ class IMFTransformer1D(ModuleAttrMixin):
             )
         return x
 
+    @staticmethod
+    def _condition_value(cond, key: str, default=None):
+        if isinstance(cond, dict):
+            return cond.get(key, default)
+        return getattr(cond, key, default)
+
+    def _layerwise_additive_key_mask(self, key_mask: torch.Tensor, query_len: int) -> torch.Tensor:
+        additive_mask = torch.zeros(
+            key_mask.shape[0],
+            1,
+            query_len,
+            key_mask.shape[1],
+            device=key_mask.device,
+            dtype=self.input_emb.weight.dtype,
+        )
+        return additive_mask.masked_fill(~key_mask[:, None, None, :], torch.finfo(additive_mask.dtype).min)
+
+    def _run_single_layerwise_backbone_step(
+        self,
+        tokens: torch.Tensor,
+        layer_idx: int,
+        *,
+        key_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if self.backbone_type in {'attnres_full', 'attnres_diff'}:
+            rope_freqs = self.attnres_backbone.rope_freqs[: tokens.shape[1]]
+            mask = None
+            if key_mask is not None:
+                mask = self._layerwise_additive_key_mask(key_mask, tokens.shape[1])
+            if self.attnres_backbone.causal_attn:
+                causal_mask = self.attnres_backbone._build_causal_mask(tokens.shape[1], tokens.device)
+                mask = causal_mask if mask is None else mask + causal_mask
+            layer_outputs = [tokens]
+            start = 2 * layer_idx
+            for sublayer in self.attnres_backbone.layers[start : start + 2]:
+                sources = torch.stack(layer_outputs, dim=0)
+                layer_outputs.append(sublayer(sources, rope_freqs, mask))
+            return torch.stack(layer_outputs, dim=0).sum(dim=0)
+
+        if self.backbone_type == 'diff_transformer':
+            rope_freqs = self.diff_transformer_backbone.rope_freqs[: tokens.shape[1]]
+            mask = None
+            if key_mask is not None:
+                mask = self._layerwise_additive_key_mask(key_mask, tokens.shape[1])
+            if self.diff_transformer_backbone.causal_attn:
+                causal_mask = self.diff_transformer_backbone._build_causal_mask(tokens.shape[1], tokens.device)
+                mask = causal_mask if mask is None else mask + causal_mask
+            return self.diff_transformer_backbone.layers[layer_idx](tokens, rope_freqs=rope_freqs, mask=mask)
+
+        if self.encoder_only and isinstance(self.encoder, nn.TransformerEncoder):
+            return self.encoder.layers[layer_idx](tokens)
+        if self.decoder is not None:
+            return self.decoder.layers[layer_idx](tgt=tokens, memory=tokens)
+        return self.encoder(tokens)
+
+    def _forward_layerwise_prefix(
+        self,
+        sample: torch.Tensor,
+        r: torch.Tensor,
+        t: torch.Tensor,
+        cond,
+    ) -> torch.Tensor:
+        if not self.obs_as_cond or self.layerwise_prefix_proj is None or self.layerwise_cross_attn is None:
+            raise ValueError('Layer-wise prefix conditioning requires cond_dim > 0.')
+        prefix_layers = self._condition_value(cond, 'prefix_layers')
+        prefix_mask = self._condition_value(cond, 'prefix_mask')
+        if prefix_layers is None or prefix_mask is None:
+            raise ValueError("Layer-wise conditioning requires 'prefix_layers' and 'prefix_mask'.")
+        if prefix_layers.ndim != 4:
+            raise ValueError(
+                "prefix_layers must have shape (B, n_layers, prefix_tokens, cond_dim). "
+                f"Got {tuple(prefix_layers.shape)}."
+            )
+        if prefix_mask.ndim != 2:
+            raise ValueError(f"prefix_mask must have shape (B, prefix_tokens). Got {tuple(prefix_mask.shape)}.")
+        if prefix_layers.shape[0] != sample.shape[0] or prefix_mask.shape[0] != sample.shape[0]:
+            raise ValueError("Layer-wise prefix batch dimension must match sample batch dimension.")
+        if prefix_layers.shape[2] != prefix_mask.shape[1]:
+            raise ValueError("Layer-wise prefix token dimension must match prefix_mask.")
+
+        prefix_layers = prefix_layers.to(device=sample.device, dtype=self.input_emb.weight.dtype)
+        prefix_mask = prefix_mask.to(device=sample.device, dtype=torch.bool)
+        attention_mode = self._condition_value(cond, 'attention_mode', self.layerwise_attention_mode)
+        self_attn_every_n_layers = int(
+            self._condition_value(
+                cond,
+                'self_attn_every_n_layers',
+                self.layerwise_self_attn_every_n_layers,
+            )
+        )
+        if attention_mode not in {'self_attn', 'cross_attn'}:
+            raise ValueError(f"Unsupported layer-wise attention mode: {attention_mode!r}.")
+        if self_attn_every_n_layers < 1:
+            raise ValueError(
+                f"self_attn_every_n_layers must be >= 1, got {self_attn_every_n_layers}."
+            )
+
+        sample_tokens = self.input_emb(sample)
+        action_token_count = sample_tokens.shape[1]
+        r_token = self.time_emb(r).unsqueeze(1)
+        t_token = self.time_emb(t).unsqueeze(1)
+        if self.time_token_proj is not None:
+            r_token = self.time_token_proj(r_token)
+            t_token = self.time_token_proj(t_token)
+        action_tokens = torch.cat(
+            [
+                r_token,
+                t_token,
+                sample_tokens,
+            ],
+            dim=1,
+        )
+        action_tokens = self.drop(action_tokens)
+        num_layers = self.n_layer
+        if prefix_layers.shape[1] < num_layers:
+            repeat_count = num_layers - prefix_layers.shape[1]
+            prefix_layers = torch.cat(
+                [prefix_layers, prefix_layers[:, -1:].expand(-1, repeat_count, -1, -1)],
+                dim=1,
+            )
+
+        for layer_idx in range(num_layers):
+            prefix_tokens = self.layerwise_prefix_proj(prefix_layers[:, layer_idx])
+            use_joint_self = (
+                attention_mode != 'cross_attn'
+                or layer_idx % self_attn_every_n_layers == 0
+            )
+            if use_joint_self:
+                joint = torch.cat([prefix_tokens, action_tokens], dim=1)
+                joint_mask = torch.cat(
+                    [
+                        prefix_mask,
+                        torch.ones(
+                            action_tokens.shape[:2],
+                            dtype=torch.bool,
+                            device=action_tokens.device,
+                        ),
+                    ],
+                    dim=1,
+                )
+                joint = self._run_single_layerwise_backbone_step(joint, layer_idx, key_mask=joint_mask)
+                action_tokens = joint[:, -action_tokens.shape[1] :]
+            else:
+                key_padding_mask = ~prefix_mask
+                cross_out, _ = self.layerwise_cross_attn[layer_idx](
+                    query=action_tokens,
+                    key=prefix_tokens,
+                    value=prefix_tokens,
+                    key_padding_mask=key_padding_mask,
+                    need_weights=False,
+                )
+                action_tokens = action_tokens + cross_out
+                action_tokens = self._run_single_layerwise_backbone_step(action_tokens, layer_idx)
+
+        return action_tokens[:, -action_token_count:, :]
+
     def forward(
         self,
         sample: torch.Tensor,
@@ -416,11 +606,19 @@ class IMFTransformer1D(ModuleAttrMixin):
         dtype = self.input_emb.weight.dtype
         sample = sample.to(dtype=dtype)
         if cond is not None:
-            cond = cond.to(dtype=dtype)
+            if isinstance(cond, dict):
+                cond = {
+                    key: value.to(dtype=dtype) if torch.is_tensor(value) and value.is_floating_point() else value
+                    for key, value in cond.items()
+                }
+            else:
+                cond = cond.to(dtype=dtype)
         r = self._prepare_time_input(r, sample)
         t = self._prepare_time_input(t, sample)
 
-        if self.backbone_type in {'attnres_full', 'attnres_diff'}:
+        if isinstance(cond, dict) or hasattr(cond, 'prefix_layers'):
+            x = self._forward_layerwise_prefix(sample, r, t, cond)
+        elif self.backbone_type in {'attnres_full', 'attnres_diff'}:
             x = self._forward_attnres_full(sample, r, t, cond=cond)
         elif self.backbone_type == 'diff_transformer':
             x = self._forward_diff_transformer(sample, r, t, cond=cond)

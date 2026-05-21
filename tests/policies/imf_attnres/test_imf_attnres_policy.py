@@ -176,6 +176,13 @@ def test_imf_attnres_default_normalization_matches_lerobot_diffusion_convention(
     assert config.normalization_mapping["ACTION"] == NormalizationMode.MIN_MAX
 
 
+def test_imf_attnres_smolvlm_config_forces_visual_identity_normalization():
+    """SmolVLM path keeps raw [0, 1] images for its internal SigLIP [-1, 1] conversion."""
+    config = make_policy_config(POLICY_NAME, use_smolvlm_vl_encoder=True, push_to_hub=False)
+
+    assert config.normalization_mapping["VISUAL"] == NormalizationMode.IDENTITY
+
+
 def test_imf_attnres_default_tr_sampling_config_matches_pmf_logit_normal_defaults():
     """IMF-AttnRes should expose the pMF Logit-Normal t/r sampling defaults, without uniform mixing."""
     config = make_policy_config(POLICY_NAME, push_to_hub=False)
