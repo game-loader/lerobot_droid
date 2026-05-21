@@ -566,6 +566,52 @@ def test_imf_attnres_forward_adds_weighted_semigroup_loss_and_logs_components(mo
     assert output_dict["imf_diagnostics/semigroup/weighted_loss"] == pytest.approx(0.1)
 
 
+def test_imf_attnres_compute_loss_uses_no_grad_jvp_tangent_and_detached_diagnostics(monkeypatch):
+    """The JVP tangent v and logged du/dt should not keep extra reverse-mode graphs alive."""
+    config = make_tiny_imf_attnres_config()
+    config.enable_imf_diagnostics = True
+    model = IMFAttnResModel(config)
+    batch = make_libero_like_batch()
+    batch[OBS_IMAGES] = torch.stack([batch.pop(key) for key in IMAGE_KEYS], dim=2)
+    call_records = []
+    diagnostic_records = []
+    trainable_scale = torch.nn.Parameter(torch.tensor(0.25))
+
+    def fake_prepare_conditioning(batch):
+        return torch.zeros(batch[ACTION].shape[0], config.n_obs_steps, model.cond_dim)
+
+    def fake_fn(z, r, t, cond=None):
+        call_records.append(torch.is_grad_enabled())
+        return z * trainable_scale + (r + t).view(-1, 1, 1)
+
+    def fake_compute_u_and_du_dt(z_t, r, t, cond, v, condition_data=None, condition_mask=None):
+        assert v.requires_grad is False
+        assert call_records == [False]
+        return fake_fn(z_t, r, t, cond=cond), z_t * 0.5
+
+    def fake_diagnostics(**kwargs):
+        diagnostic_records.append(kwargs)
+        return {"imf_diagnostics/test": 1.0}
+
+    monkeypatch.setattr(model, "_prepare_conditioning", fake_prepare_conditioning)
+    monkeypatch.setattr(model, "fn", fake_fn)
+    monkeypatch.setattr(model, "_compute_u_and_du_dt", fake_compute_u_and_du_dt)
+    monkeypatch.setattr(model, "_imf_training_diagnostics", fake_diagnostics)
+
+    loss, diagnostics = model.compute_loss(batch)
+
+    assert loss.requires_grad
+    assert diagnostics == {"imf_diagnostics/test": 1.0}
+    assert call_records == [False, True]
+    assert len(diagnostic_records) == 1
+    logged_du_dt = diagnostic_records[0]["du_dt"]
+    logged_delta_du_dt = diagnostic_records[0]["delta_du_dt"]
+    assert logged_du_dt.requires_grad is False
+    assert logged_du_dt.grad_fn is None
+    assert logged_delta_du_dt.requires_grad is False
+    assert logged_delta_du_dt.grad_fn is None
+
+
 def test_imf_attnres_dct_action_latent_roundtrip_recovers_actions():
     """Orthonormal DCT followed by IDCT along the horizon should recover actions."""
     config = make_tiny_imf_attnres_config()

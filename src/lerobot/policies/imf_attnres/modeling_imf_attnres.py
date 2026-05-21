@@ -1122,10 +1122,12 @@ class IMFAttnResModel(nn.Module):
         t_broadcast = self._broadcast_batch_time(t, x)
         z_t = (1 - t_broadcast) * x + t_broadcast * e
 
-        v = self.fn(z_t, t, t, cond=cond)
+        with torch.no_grad():
+            v = self.fn(z_t, t, t, cond=cond)
         u, du_dt = self._compute_u_and_du_dt(z_t, r, t, cond=cond, v=v)
+        du_dt = du_dt.detach()
         delta = self._broadcast_batch_time(t - r, du_dt)
-        delta_du_dt = delta * du_dt.detach()
+        delta_du_dt = delta * du_dt
         compound_velocity = u + delta_du_dt
         target = e - x
 
