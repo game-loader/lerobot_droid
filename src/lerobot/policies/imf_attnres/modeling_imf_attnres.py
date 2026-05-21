@@ -145,6 +145,7 @@ class IMFAttnResSmolVLMVLEncoder(nn.Module):
         self.padding_side = getattr(config, "vlm_tokenizer_padding_side", "right")
         self.truncate_language = getattr(config, "vlm_tokenizer_truncation", True)
         self.vlm_resize_shape = getattr(config, "vlm_resize_shape", (512, 512))
+        self.image_forward_batch_size = int(getattr(config, "vlm_image_forward_batch_size", 0))
         self.text_encoder_mode = getattr(config, "vlm_text_encoder_mode", "embedding")
         self.text_num_layers = int(getattr(config, "vlm_text_num_layers", 16))
         self.num_images = len(getattr(config, "image_features", {}))
@@ -311,10 +312,24 @@ class IMFAttnResSmolVLMVLEncoder(nn.Module):
 
         pixel_values = self._preprocess_images(images)
         vision_dtype = getattr(self.vision_model, "dtype", pixel_values.dtype)
-        image_hidden_states = self.vision_model(
-            pixel_values=pixel_values.to(dtype=vision_dtype),
-            patch_attention_mask=None,
-        ).last_hidden_state
+        pixel_values = pixel_values.to(dtype=vision_dtype)
+        image_forward_batch_size = self.image_forward_batch_size
+        if image_forward_batch_size > 0 and pixel_values.shape[0] > image_forward_batch_size:
+            image_hidden_states = torch.cat(
+                [
+                    self.vision_model(
+                        pixel_values=pixel_values_chunk,
+                        patch_attention_mask=None,
+                    ).last_hidden_state
+                    for pixel_values_chunk in pixel_values.split(image_forward_batch_size, dim=0)
+                ],
+                dim=0,
+            )
+        else:
+            image_hidden_states = self.vision_model(
+                pixel_values=pixel_values,
+                patch_attention_mask=None,
+            ).last_hidden_state
         image_hidden_states = self.connector(image_hidden_states)
         return einops.rearrange(
             image_hidden_states,

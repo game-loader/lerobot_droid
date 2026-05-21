@@ -48,6 +48,9 @@ class IMFAttnResConfig(PreTrainedConfig):
     vlm_tokenizer_padding_side: str = "right"
     vlm_tokenizer_truncation: bool = True
     vlm_resize_shape: tuple[int, int] = (512, 512)
+    # Maximum flattened image batch passed through SmolVLM's ViT at once.
+    # 0 disables chunking and preserves the previous single-call behavior.
+    vlm_image_forward_batch_size: int = 0
     # Text conditioning for the SmolVLM path:
     #   "embedding"    — current memory-light path: use token embeddings only.
     #   "transformer"  — run language embeddings through the first vlm_text_num_layers
@@ -197,6 +200,11 @@ class IMFAttnResConfig(PreTrainedConfig):
         if self.vlm_tokenizer_max_length <= 0:
             raise ValueError(
                 f"vlm_tokenizer_max_length must be a positive integer. Got {self.vlm_tokenizer_max_length}."
+            )
+        if self.vlm_image_forward_batch_size < 0:
+            raise ValueError(
+                "vlm_image_forward_batch_size must be >= 0, where 0 disables chunking. "
+                f"Got {self.vlm_image_forward_batch_size}."
             )
         if self.vlm_text_encoder_mode not in {"embedding", "transformer"}:
             raise ValueError(

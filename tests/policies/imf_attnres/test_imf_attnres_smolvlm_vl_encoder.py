@@ -279,9 +279,15 @@ class _FakeTextModel(nn.Module):
 class _FakeVisionModel(nn.Module):
     dtype = torch.float32
 
+    def __init__(self):
+        super().__init__()
+        self.batch_sizes = []
+
     def forward(self, *, pixel_values, patch_attention_mask=None):
         batch_size = pixel_values.shape[0]
-        hidden_states = torch.zeros(batch_size, 4, 6, dtype=pixel_values.dtype, device=pixel_values.device)
+        self.batch_sizes.append(batch_size)
+        image_values = pixel_values.mean(dim=(1, 2, 3), keepdim=False).view(batch_size, 1, 1)
+        hidden_states = image_values.expand(batch_size, 4, 6).to(dtype=pixel_values.dtype)
         return type("FakeVisionOutput", (), {"last_hidden_state": hidden_states})()
 
 
@@ -369,7 +375,8 @@ def test_smolvlm_transformer_text_mode_processes_image_and_language_tokens_but_n
     config.vlm_text_num_layers = 2
 
     encoder = IMFAttnResSmolVLMVLEncoder(config)
-    prefix_tokens = encoder(**_make_direct_vl_encoder_inputs(config))
+    inputs = _make_direct_vl_encoder_inputs(config)
+    prefix_tokens = encoder(**inputs)
 
     text_model = encoder.vlm_model.text_model
     assert len(text_model.layers) == 2
@@ -382,11 +389,39 @@ def test_smolvlm_transformer_text_mode_processes_image_and_language_tokens_but_n
     image_tokens = prefix_tokens[:, :8]
     language_tokens = prefix_tokens[:, 8:11]
     state_token = prefix_tokens[:, 11:]
-    torch.testing.assert_close(image_tokens, torch.full((1, 8, 6), 3.0))
+    expected_image_values = encoder._preprocess_images(inputs["images"]).mean(dim=(1, 2, 3))
+    expected_image_tokens = expected_image_values.view(1, len(IMAGE_KEYS), 1, 1).expand(1, len(IMAGE_KEYS), 4, 6)
+    expected_image_tokens = expected_image_tokens.reshape(1, len(IMAGE_KEYS) * 4, 6) + 3.0
+    torch.testing.assert_close(image_tokens, expected_image_tokens)
     torch.testing.assert_close(language_tokens[0, 0], torch.full((6,), 5.0))
     torch.testing.assert_close(language_tokens[0, 1], torch.full((6,), 6.0))
     torch.testing.assert_close(language_tokens[0, 2], torch.zeros(6))
     assert not torch.allclose(state_token, torch.full_like(state_token, 3.0))
+
+
+def test_smolvlm_vl_encoder_chunks_vision_forward_without_changing_token_order(monkeypatch):
+    _install_fake_transformers(monkeypatch)
+    config = enable_fake_smolvlm(make_tiny_config())
+    config.vlm_resize_shape = (8, 8)
+    config.vlm_tokenizer_max_length = 3
+    config.vlm_image_forward_batch_size = 3
+
+    encoder = IMFAttnResSmolVLMVLEncoder(config)
+    inputs = _make_direct_vl_encoder_inputs(config, batch_size=3)
+    inputs["images"] = torch.arange(
+        3 * len(IMAGE_KEYS) * 3 * IMAGE_SIZE * IMAGE_SIZE,
+        dtype=torch.float32,
+    ).view(3, len(IMAGE_KEYS), 3, IMAGE_SIZE, IMAGE_SIZE)
+
+    image_tokens = encoder._embed_images(inputs["images"])
+
+    assert encoder.vision_model.batch_sizes == [3, 3]
+    assert image_tokens.shape == (3, 8, 6)
+    flat_images = encoder._preprocess_images(inputs["images"])
+    expected_values = flat_images.mean(dim=(1, 2, 3))
+    expected_tokens = expected_values.view(3, len(IMAGE_KEYS), 1, 1).expand(3, len(IMAGE_KEYS), 4, 6)
+    expected_tokens = expected_tokens.reshape(3, len(IMAGE_KEYS) * 4, 6)
+    torch.testing.assert_close(image_tokens, expected_tokens)
 
 
 def test_smolvlm_text_encoder_config_rejects_invalid_mode_and_layer_count():
@@ -400,3 +435,6 @@ def test_smolvlm_text_encoder_config_rejects_invalid_mode_and_layer_count():
             vlm_text_num_layers=0,
             push_to_hub=False,
         )
+
+    with pytest.raises(ValueError, match="vlm_image_forward_batch_size"):
+        make_policy_config(POLICY_NAME, vlm_image_forward_batch_size=-1, push_to_hub=False)
