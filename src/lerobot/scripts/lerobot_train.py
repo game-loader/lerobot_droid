@@ -15,7 +15,7 @@
 # limitations under the License.
 """Train a policy.
 
-Requires: pip install 'lerobot[training]'  (includes dataset + accelerate + wandb extras)
+Requires: pip install 'lerobot[training]'  (includes dataset + accelerate + WandB/SwanLab extras)
 """
 
 import dataclasses
@@ -40,7 +40,7 @@ from lerobot.common.train_utils import (
     save_checkpoint,
     update_last_checkpoint,
 )
-from lerobot.common.wandb_utils import WandBLogger
+from lerobot.common.wandb_utils import make_train_logger
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
 from lerobot.datasets import EpisodeAwareSampler, make_dataset
@@ -91,7 +91,7 @@ def _gradient_norm_diagnostics(policy: PreTrainedPolicy) -> dict[str, float]:
     }
 
 
-def _split_every_step_wandb_diagnostics(output_dict: dict | None) -> tuple[dict, dict]:
+def _split_every_step_logger_diagnostics(output_dict: dict | None) -> tuple[dict, dict]:
     if not output_dict:
         return {}, {}
     every_step = {}
@@ -102,6 +102,10 @@ def _split_every_step_wandb_diagnostics(output_dict: dict | None) -> tuple[dict,
         else:
             regular[key] = value
     return every_step, regular
+
+
+def _split_every_step_wandb_diagnostics(output_dict: dict | None) -> tuple[dict, dict]:
+    return _split_every_step_logger_diagnostics(output_dict)
 
 
 def update_policy(
@@ -165,6 +169,11 @@ def update_policy(
                 output_dict = {}
             for key, value in weight_stats.items():
                 output_dict[f"sample_weight_{key}"] = value
+        elif (
+            getattr(policy, "name", None) == "imf-attnres"
+            or getattr(accelerator.unwrap_model(policy, keep_fp32_wrapper=True), "name", None) == "imf-attnres"
+        ):
+            loss, output_dict = policy.forward(batch, current_step=train_metrics.steps)
         else:
             loss, output_dict = policy.forward(batch)
 
@@ -262,13 +271,10 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
     if is_main_process:
         logging.info(pformat(cfg.to_dict()))
 
-    # Initialize wandb only on main process
-    if cfg.wandb.enable and cfg.wandb.project and is_main_process:
-        wandb_logger = WandBLogger(cfg)
-    else:
-        wandb_logger = None
-        if is_main_process:
-            logging.info(colored("Logs will be saved locally.", "yellow", attrs=["bold"]))
+    # Initialize external logger only on main process.
+    train_logger = make_train_logger(cfg) if is_main_process else None
+    if train_logger is None and is_main_process:
+        logging.info(colored("Logs will be saved locally.", "yellow", attrs=["bold"]))
 
     if cfg.seed is not None:
         set_seed(cfg.seed, accelerator=accelerator)
@@ -537,23 +543,23 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
 
         if is_log_step:
             logging.info(train_tracker)
-            if wandb_logger:
-                wandb_log_dict = train_tracker.to_dict()
-                every_step_output_dict, regular_output_dict = _split_every_step_wandb_diagnostics(output_dict)
+            if train_logger:
+                logger_log_dict = train_tracker.to_dict()
+                every_step_output_dict, regular_output_dict = _split_every_step_logger_diagnostics(output_dict)
                 if every_step_output_dict:
-                    wandb_log_dict.update(every_step_output_dict)
+                    logger_log_dict.update(every_step_output_dict)
                 if regular_output_dict:
-                    wandb_log_dict.update(regular_output_dict)
+                    logger_log_dict.update(regular_output_dict)
                 # Log sample weighting statistics if enabled
                 if sample_weighter is not None:
                     weighter_stats = sample_weighter.get_stats()
-                    wandb_log_dict.update({f"sample_weighting/{k}": v for k, v in weighter_stats.items()})
-                wandb_logger.log_dict(wandb_log_dict, step)
+                    logger_log_dict.update({f"sample_weighting/{k}": v for k, v in weighter_stats.items()})
+                train_logger.log_dict(logger_log_dict, step)
             train_tracker.reset_averages()
-        elif wandb_logger and is_main_process:
-            every_step_output_dict, _ = _split_every_step_wandb_diagnostics(output_dict)
+        elif train_logger and is_main_process:
+            every_step_output_dict, _ = _split_every_step_logger_diagnostics(output_dict)
             if every_step_output_dict:
-                wandb_logger.log_dict(every_step_output_dict, step)
+                train_logger.log_dict(every_step_output_dict, step)
 
         if cfg.save_checkpoint and is_saving_step:
             if is_main_process:
@@ -570,8 +576,8 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
                     postprocessor=postprocessor,
                 )
                 update_last_checkpoint(checkpoint_dir)
-                if wandb_logger:
-                    wandb_logger.log_policy(checkpoint_dir)
+                if train_logger:
+                    train_logger.log_policy(checkpoint_dir)
 
             accelerator.wait_for_everyone()
 
@@ -617,10 +623,10 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
                 eval_tracker.eval_s = aggregated.pop("eval_s")
                 eval_tracker.avg_sum_reward = aggregated.pop("avg_sum_reward")
                 eval_tracker.pc_success = aggregated.pop("pc_success")
-                if wandb_logger:
-                    wandb_log_dict = {**eval_tracker.to_dict(), **eval_info}
-                    wandb_logger.log_dict(wandb_log_dict, step, mode="eval")
-                    wandb_logger.log_video(eval_info["overall"]["video_paths"][0], step, mode="eval")
+                if train_logger:
+                    logger_log_dict = {**eval_tracker.to_dict(), **eval_info}
+                    train_logger.log_dict(logger_log_dict, step, mode="eval")
+                    train_logger.log_video(eval_info["overall"]["video_paths"][0], step, mode="eval")
 
             accelerator.wait_for_everyone()
 

@@ -65,6 +65,20 @@ class WandBConfig:
 
 
 @dataclass
+class SwanLabConfig:
+    enable: bool = False
+    # SwanLab project name for grouping experiments.
+    project: str = "lerobot"
+    # SwanLab workspace (team/org). None uses the user's default workspace.
+    workspace: str | None = None
+    # Free-text description attached to the run.
+    description: str | None = None
+    # Run ID for resuming a previous SwanLab run. Auto-assigned if None.
+    run_id: str | None = None
+    mode: str | None = None  # Allowed values: 'cloud', 'local', 'offline', 'disabled'. Defaults to SwanLab.
+    add_tags: bool = True  # If True, save configuration as tags in the SwanLab run.
+
+@dataclass
 class EvalConfig:
     n_episodes: int = 50
     # `batch_size` specifies the number of environments to use in a gym.vector.VectorEnv.

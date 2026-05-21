@@ -11,7 +11,10 @@ from .attnres_transformer_components import (
     AttnResOperator,
     AttnResSubLayer,
     AttnResTransformerBackbone,
+    DifferentialTransformerBackbone,
+    DifferentialTransformerBlock,
     GroupedQuerySelfAttention,
+    MultiheadDifferentialSelfAttention,
     RMSNorm,
     RMSNormNoWeight,
     SwiGLUFFN,
@@ -54,9 +57,9 @@ class IMFTransformer1D(ModuleAttrMixin):
             raise ValueError(f'n_emb={n_emb} must be divisible by n_head={n_head}.')
         if n_head % n_kv_head != 0:
             raise ValueError(f'n_head={n_head} must be divisible by n_kv_head={n_kv_head}.')
-        if backbone_type == 'attnres_full' and (n_emb // n_head) % 2 != 0:
+        if backbone_type in {'attnres_full', 'attnres_diff', 'diff_transformer'} and (n_emb // n_head) % 2 != 0:
             raise ValueError(
-                'attnres_full uses RoPE, which requires an even per-head dimension. '
+                f'{backbone_type} uses RoPE, which requires an even per-head dimension. '
                 f'Got n_emb={n_emb}, n_head={n_head}, head_dim={n_emb // n_head}.'
             )
         if n_obs_steps is None:
@@ -84,27 +87,35 @@ class IMFTransformer1D(ModuleAttrMixin):
         self.encoder = None
         self.decoder = None
         self.attnres_backbone = None
+        self.diff_transformer_backbone = None
         encoder_only = False
 
-        if backbone_type == 'attnres_full':
+        if backbone_type in {'attnres_full', 'attnres_diff', 'diff_transformer'}:
             if not time_as_cond:
-                raise ValueError('attnres_full backbone requires time_as_cond=True.')
+                raise ValueError(f'{backbone_type} backbone requires time_as_cond=True.')
             if n_cond_layers != 0:
-                raise ValueError('attnres_full backbone does not support n_cond_layers > 0.')
+                raise ValueError(f'{backbone_type} backbone does not support n_cond_layers > 0.')
 
             self.time_token_proj = nn.Linear(n_emb, n_emb)
-            self.attnres_backbone = AttnResTransformerBackbone(
-                d_model=n_emb,
-                n_blocks=n_layer,
-                n_heads=n_head,
-                n_kv_heads=n_kv_head,
-                max_seq_len=t_seq + t_cond,
-                dropout=p_drop_attn,
-                ffn_mult=attn_res_ffn_mult,
-                eps=attn_res_eps,
-                rope_theta=attn_res_rope_theta,
-                causal_attn=causal_attn,
-            )
+            backbone_kwargs = {
+                'd_model': n_emb,
+                'n_blocks': n_layer,
+                'n_heads': n_head,
+                'n_kv_heads': n_kv_head,
+                'max_seq_len': t_seq + t_cond,
+                'dropout': p_drop_attn,
+                'ffn_mult': attn_res_ffn_mult,
+                'eps': attn_res_eps,
+                'rope_theta': attn_res_rope_theta,
+                'causal_attn': causal_attn,
+            }
+            if backbone_type in {'attnres_full', 'attnres_diff'}:
+                self.attnres_backbone = AttnResTransformerBackbone(
+                    **backbone_kwargs,
+                    use_differential_attention=backbone_type == 'attnres_diff',
+                )
+            else:
+                self.diff_transformer_backbone = DifferentialTransformerBackbone(**backbone_kwargs)
             self.ln_f = RMSNorm(n_emb, eps=attn_res_eps)
         else:
             self.pos_emb = nn.Parameter(torch.zeros(1, t_seq, n_emb))
@@ -208,8 +219,11 @@ class IMFTransformer1D(ModuleAttrMixin):
             nn.Mish,
             nn.Sequential,
             AttnResTransformerBackbone,
+            DifferentialTransformerBackbone,
+            DifferentialTransformerBlock,
             AttnResSubLayer,
             GroupedQuerySelfAttention,
+            MultiheadDifferentialSelfAttention,
             SwiGLUFFN,
             RMSNormNoWeight,
         )
@@ -246,7 +260,11 @@ class IMFTransformer1D(ModuleAttrMixin):
     def get_optim_groups(self, weight_decay: float = 1e-3):
         decay = set()
         no_decay = set()
-        whitelist_weight_modules = (torch.nn.Linear, torch.nn.MultiheadAttention)
+        whitelist_weight_modules = (
+            torch.nn.Linear,
+            torch.nn.MultiheadAttention,
+            MultiheadDifferentialSelfAttention,
+        )
         blacklist_weight_modules = (torch.nn.LayerNorm, torch.nn.Embedding, RMSNorm)
         for mn, m in self.named_modules():
             for pn, _ in m.named_parameters(recurse=False):
@@ -325,6 +343,29 @@ class IMFTransformer1D(ModuleAttrMixin):
         x = x[:, -sample_tokens.shape[1]:, :]
         return x
 
+    def _forward_diff_transformer(
+        self,
+        sample: torch.Tensor,
+        r: torch.Tensor,
+        t: torch.Tensor,
+        cond: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        sample_tokens = self.input_emb(sample)
+        token_parts = [
+            self.time_token_proj(self.time_emb(r)).unsqueeze(1),
+            self.time_token_proj(self.time_emb(t)).unsqueeze(1),
+        ]
+        if self.obs_as_cond:
+            if cond is None:
+                raise ValueError('cond is required when obs_as_cond=True for diff_transformer backbone.')
+            token_parts.append(self.cond_obs_emb(cond))
+        token_parts.append(sample_tokens)
+        x = torch.cat(token_parts, dim=1)
+        x = self.drop(x)
+        x = self.diff_transformer_backbone(x)
+        x = x[:, -sample_tokens.shape[1]:, :]
+        return x
+
     def _forward_vanilla(
         self,
         sample: torch.Tensor,
@@ -379,8 +420,10 @@ class IMFTransformer1D(ModuleAttrMixin):
         r = self._prepare_time_input(r, sample)
         t = self._prepare_time_input(t, sample)
 
-        if self.backbone_type == 'attnres_full':
+        if self.backbone_type in {'attnres_full', 'attnres_diff'}:
             x = self._forward_attnres_full(sample, r, t, cond=cond)
+        elif self.backbone_type == 'diff_transformer':
+            x = self._forward_diff_transformer(sample, r, t, cond=cond)
         else:
             x = self._forward_vanilla(sample, r, t, cond=cond)
 

@@ -13,7 +13,7 @@
 # limitations under the License.
 import pytest
 
-from lerobot.configs.default import DatasetConfig
+from lerobot.configs.default import DatasetConfig, SwanLabConfig, WandBConfig
 
 
 def test_dataset_config_valid():
@@ -36,3 +36,15 @@ def test_dataset_config_none_episodes_ok():
 
 def test_dataset_config_empty_episodes_ok():
     DatasetConfig(repo_id="user/repo", episodes=[])
+
+
+def test_wandb_config_default_behavior_unchanged():
+    cfg = WandBConfig()
+    assert cfg.enable is False
+    assert cfg.project == "lerobot"
+
+
+def test_swanlab_config_defaults_disabled_and_project_lerobot():
+    cfg = SwanLabConfig()
+    assert cfg.enable is False
+    assert cfg.project == "lerobot"

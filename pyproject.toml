@@ -117,6 +117,8 @@ training = [
     "lerobot[dataset]",
     "accelerate>=1.10.0,<2.0.0",
     "wandb>=0.24.0,<0.25.0",
+    # SwanLab currently pins Rich <14, which also applies to the training extra.
+    "swanlab>=0.7.19,<0.8.0",
 ]
 hardware = [
     "lerobot[pynput-dep]",

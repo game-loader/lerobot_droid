@@ -151,3 +151,105 @@ num_workers: 24
 | W&B init timeout | 网络问题 | 重试或 `wandb.mode=offline` |
 | Loss spike (IMF) | JVP du_dt 极端值 | Pseudo-Huber loss + grad_clip=5 |
 | Goal suite ~0% | 无 task conditioning | 需加 language embedding |
+
+## 6. 8卡 L20 远程机器部署经验
+
+**机器**: `droid@100.119.99.14` (8× NVIDIA L20 46GB, Ubuntu, 3.5TB /data)
+
+### 6.1 目录结构
+
+```
+/data/lerobot-imf-attnres-exp/
+├── lerobot-imf-attnres/          # 项目代码 + .venv (uv管理)
+│   ├── .venv/                    # uv sync 创建的虚拟环境 (~8.6GB)
+│   ├── .libero_config/config.yaml
+│   └── src/lerobot/...
+├── datasets/
+│   ├── libero_combined/          # 完整 40-task 数据集 (33GB)
+│   ├── libero_goal/              # 子集: tasks 0-9, 379 episodes
+│   ├── libero_long/              # 子集: tasks 10-19, 428 episodes
+│   ├── libero_spatial/           # 子集: tasks 30-39, 432 episodes
+│   └── libero_object/            # 子集: tasks 20-29, 454 episodes
+├── outputs/train/                # 训练输出 (checkpoints, eval videos)
+├── cache/                        # uv, hf, wandb 缓存
+├── wandb/                        # W&B 日志
+├── goal_episodes.txt             # episode 索引文件
+├── long_episodes.txt
+├── train_lang_diffusion_goal.sh  # 训练脚本
+└── train_lang_diffusion_long.sh
+```
+
+### 6.2 环境搭建步骤
+
+```bash
+# 1. uv 已通过 pipx 安装在 ~/.local/bin/uv
+#    PATH 中需要包含 ~/.local/bin
+
+# 2. 安装 cmake (egl-probe 编译需要)
+uv tool install cmake
+
+# 3. 安装项目依赖 (需要 CMAKE_POLICY_VERSION_MINIMUM 因为 cmake 4.x)
+export PATH=$HOME/.local/bin:$PATH
+export CMAKE_POLICY_VERSION_MINIMUM=3.5
+cd /data/lerobot-imf-attnres-exp/lerobot-imf-attnres
+uv sync --extra training --extra libero --extra evaluation --extra diffusion
+
+# 4. LIBERO assets 需要 symlink 到 venv 内
+ln -sf /home/droid/.libero/assets \
+  .venv/lib/python3.12/site-packages/libero/libero/assets
+
+# 5. 更新 .libero_config/config.yaml 指向正确路径
+# assets: /home/droid/.libero/assets
+# bddl_files: .../.venv/.../libero/libero/bddl_files
+# init_states: .../.venv/.../libero/libero/init_files
+
+# 6. W&B 登录
+uv run python3 -c "import wandb; wandb.login(key='YOUR_KEY')"
+```
+
+### 6.3 数据集子集创建
+
+使用 `scripts/imf_attnres_experiments/train_eval_suite.py` 中的 `ensure_subset_dataset()`:
+
+```python
+from train_eval_suite import ensure_subset_dataset
+from pathlib import Path
+
+ensure_subset_dataset(
+    source_root=Path('/data/.../datasets/libero_combined'),
+    subset_root=Path('/data/.../datasets/libero_goal'),
+    episodes_path=Path('/data/.../goal_episodes.txt'),
+)
+```
+
+Episode 索引文件每行一个 episode index（从 combined 数据集中的全局索引）。
+
+### 6.4 训练启动
+
+```bash
+# 每个任务一张卡，通过 CUDA_VISIBLE_DEVICES 指定
+export CUDA_VISIBLE_DEVICES=0  # 或 1,2,...,7
+nohup /data/.../train_script.sh > train.log 2>&1 &
+```
+
+关键环境变量:
+```bash
+export MUJOCO_GL=egl
+export PYOPENGL_PLATFORM=egl
+export CMAKE_POLICY_VERSION_MINIMUM=3.5
+export LIBERO_CONFIG_PATH=$PWD/.libero_config
+```
+
+### 6.5 资源使用
+
+| 模型 | GPU 显存 | 速度 | Workers |
+|------|---------|------|---------|
+| Diffusion 89M + SmolVLM 455M (frozen) | ~38GB/46GB | ~5 step/s | 24 |
+
+### 6.6 注意事项
+
+- **无 sudo 权限**: 所有工具通过 `uv tool install` 或 `pipx` 安装
+- **cmake 4.x 兼容性**: 必须设置 `CMAKE_POLICY_VERSION_MINIMUM=3.5`，否则 egl-probe 编译失败
+- **LIBERO assets symlink**: venv 内的 libero 包会直接引用 `libero/libero/assets/` 路径，必须 symlink 到实际 assets 目录
+- **nohup 启动**: SSH 断开后训练继续运行
+- **Eval 耗时**: Goal ~7min/轮, Long ~10min/轮 (10 tasks × 10 episodes)

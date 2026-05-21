@@ -30,7 +30,7 @@ from lerobot.utils.hub import HubMixin
 from lerobot.utils.sample_weighting import SampleWeightingConfig
 
 from . import parser
-from .default import DatasetConfig, EvalConfig, PeftConfig, WandBConfig
+from .default import DatasetConfig, EvalConfig, PeftConfig, SwanLabConfig, WandBConfig
 from .policies import PreTrainedConfig
 from .rewards import RewardModelConfig
 
@@ -110,7 +110,11 @@ class TrainPipelineConfig(HubMixin):
     optimizer: OptimizerConfig | None = None
     scheduler: LRSchedulerConfig | None = None
     eval: EvalConfig = field(default_factory=EvalConfig)
+    # Experiment logger backend. "auto" keeps the legacy behavior: WandB when wandb.enable=true,
+    # otherwise SwanLab when swanlab.enable=true. Use "wandb", "swanlab", or "none" to force a mode.
+    logger: str = "auto"
     wandb: WandBConfig = field(default_factory=WandBConfig)
+    swanlab: SwanLabConfig = field(default_factory=SwanLabConfig)
     peft: PeftConfig | None = None
 
     # Sample weighting configuration (e.g., for RA-BC training)
@@ -204,6 +208,9 @@ class TrainPipelineConfig(HubMixin):
 
         if hasattr(active_cfg, "push_to_hub") and active_cfg.push_to_hub and not active_cfg.repo_id:
             raise ValueError("'repo_id' argument missing. Please specify it to push the model to the hub.")
+
+        if self.logger not in {"auto", "wandb", "swanlab", "none"}:
+            raise ValueError("logger must be one of 'auto', 'wandb', 'swanlab', or 'none'.")
 
     @classmethod
     def __get_path_fields__(cls) -> list[str]:

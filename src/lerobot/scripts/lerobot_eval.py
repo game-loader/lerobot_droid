@@ -771,7 +771,12 @@ def eval_policy_all(
                 prefetch_thread = None
 
             try:
-                tg, tid, metrics = task_runner(task_group, task_id, env)
+                try:
+                    tg, tid, metrics = task_runner(task_group, task_id, env)
+                except (AttributeError, RuntimeError) as e:
+                    logging.warning(f"Eval task {task_group}_{task_id} failed: {e}. Skipping with zero metrics.")
+                    tg, tid = task_group, task_id
+                    metrics = {"pc_success": 0.0, "avg_sum_reward": 0.0, "avg_max_reward": 0.0, "n_episodes": 0}
                 _accumulate_to(tg, metrics)
                 per_task_infos.append({"task_group": tg, "task_id": tid, "metrics": metrics})
             finally:
