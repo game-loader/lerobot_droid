@@ -612,6 +612,27 @@ def test_imf_attnres_compute_loss_uses_no_grad_jvp_tangent_and_detached_diagnost
     assert logged_delta_du_dt.grad_fn is None
 
 
+def test_imf_attnres_jvp_fallback_keeps_primal_output_differentiable(monkeypatch):
+    """If torch.func.jvp falls back, u must still keep gradients for loss.backward()."""
+    import lerobot.policies.imf_attnres.modeling_imf_attnres as modeling_imf_attnres
+
+    config = make_tiny_imf_attnres_config()
+    model = IMFAttnResModel(config)
+    batch = make_libero_like_batch()
+    batch[OBS_IMAGES] = torch.stack([batch.pop(key) for key in IMAGE_KEYS], dim=2)
+
+    def failing_jvp(*args, **kwargs):
+        raise RuntimeError("simulate torch.func.jvp unsupported backend")
+
+    monkeypatch.setattr(modeling_imf_attnres, "torch_func_jvp", failing_jvp)
+
+    loss, _ = model.compute_loss(batch)
+
+    assert loss.requires_grad
+    loss.backward()
+    assert any(parameter.grad is not None for parameter in model.head.parameters())
+
+
 def test_imf_attnres_dct_action_latent_roundtrip_recovers_actions():
     """Orthonormal DCT followed by IDCT along the horizon should recover actions."""
     config = make_tiny_imf_attnres_config()

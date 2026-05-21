@@ -726,7 +726,7 @@ class IMFAttnResModel(nn.Module):
                 g,
                 (z_t, r, t),
                 tangents,
-                create_graph=False,
+                create_graph=True,
                 strict=False,
             )
 
