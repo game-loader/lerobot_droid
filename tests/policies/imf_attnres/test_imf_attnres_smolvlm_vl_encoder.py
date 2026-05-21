@@ -262,12 +262,14 @@ class _FakeTextModel(nn.Module):
         self.embedding = _FakeTokenEmbedding()
         self.layers = nn.ModuleList([_FakeTextLayer(index) for index in range(num_hidden_layers)])
         self.forward_calls = 0
+        self.last_input_shape = None
 
     def get_input_embeddings(self):
         return self.embedding
 
     def forward(self, *, inputs_embeds, attention_mask=None, use_cache=False, **kwargs):
         self.forward_calls += 1
+        self.last_input_shape = tuple(inputs_embeds.shape)
         hidden_states = inputs_embeds
         for layer in self.layers:
             hidden_states = layer(hidden_states)
@@ -358,7 +360,7 @@ def test_smolvlm_embedding_text_mode_prunes_text_layers_and_uses_only_token_embe
     torch.testing.assert_close(language_tokens[0, 2], torch.zeros(6))
 
 
-def test_smolvlm_transformer_text_mode_keeps_and_runs_first_configured_text_layers(monkeypatch):
+def test_smolvlm_transformer_text_mode_processes_image_and_language_tokens_but_not_state(monkeypatch):
     _install_fake_transformers(monkeypatch)
     config = enable_fake_smolvlm(make_tiny_config())
     config.vlm_resize_shape = (8, 8)
@@ -373,13 +375,18 @@ def test_smolvlm_transformer_text_mode_keeps_and_runs_first_configured_text_laye
     assert len(text_model.layers) == 2
     assert text_model.config.num_hidden_layers == 2
     assert text_model.forward_calls == 1
+    assert text_model.last_input_shape == (1, 11, 6)
     assert [layer.calls for layer in text_model.layers] == [1, 1]
     assert prefix_tokens.shape == (1, 12, 6)
 
+    image_tokens = prefix_tokens[:, :8]
     language_tokens = prefix_tokens[:, 8:11]
+    state_token = prefix_tokens[:, 11:]
+    torch.testing.assert_close(image_tokens, torch.full((1, 8, 6), 3.0))
     torch.testing.assert_close(language_tokens[0, 0], torch.full((6,), 5.0))
     torch.testing.assert_close(language_tokens[0, 1], torch.full((6,), 6.0))
     torch.testing.assert_close(language_tokens[0, 2], torch.zeros(6))
+    assert not torch.allclose(state_token, torch.full_like(state_token, 3.0))
 
 
 def test_smolvlm_text_encoder_config_rejects_invalid_mode_and_layer_count():

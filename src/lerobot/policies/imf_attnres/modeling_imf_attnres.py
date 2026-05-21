@@ -323,28 +323,45 @@ class IMFAttnResSmolVLMVLEncoder(nn.Module):
             n=self.num_images,
         )
 
-    def _embed_language_tokens(self, tokens: Tensor, masks: Tensor) -> Tensor:
+    def _embed_language_tokens(self, tokens: Tensor, masks: Tensor) -> tuple[Tensor, Tensor]:
         tokens, masks = self._pad_or_truncate_language(tokens, masks)
         lang_embeddings = self.text_embeddings(tokens)
-        if self.text_encoder_mode == "transformer":
-            device = lang_embeddings.device
-            position_ids = torch.arange(
-                lang_embeddings.shape[1],
-                device=device,
-                dtype=torch.long,
-            ).unsqueeze(0)
-            text_outputs = self.text_model(
-                inputs_embeds=lang_embeddings,
-                attention_mask=masks.to(device=device),
-                position_ids=position_ids,
-                use_cache=False,
-            )
-            lang_embeddings = (
-                text_outputs.last_hidden_state
-                if hasattr(text_outputs, "last_hidden_state")
-                else text_outputs[0]
-            )
-        return lang_embeddings * masks.to(device=lang_embeddings.device, dtype=lang_embeddings.dtype).unsqueeze(-1)
+        lang_embeddings = lang_embeddings * masks.to(
+            device=lang_embeddings.device,
+            dtype=lang_embeddings.dtype,
+        ).unsqueeze(-1)
+        return lang_embeddings, masks
+
+    def _encode_vlm_prefix(self, image_tokens: Tensor, language_tokens: Tensor, language_masks: Tensor) -> Tensor:
+        if self.text_encoder_mode != "transformer":
+            return torch.cat([image_tokens, language_tokens], dim=1)
+
+        batch_size, image_token_count = image_tokens.shape[:2]
+        image_masks = torch.ones(
+            batch_size,
+            image_token_count,
+            dtype=torch.bool,
+            device=image_tokens.device,
+        )
+        prefix_tokens = torch.cat([image_tokens, language_tokens], dim=1)
+        prefix_masks = torch.cat([image_masks, language_masks.to(device=image_tokens.device)], dim=1)
+        position_ids = torch.arange(
+            prefix_tokens.shape[1],
+            device=prefix_tokens.device,
+            dtype=torch.long,
+        ).unsqueeze(0)
+        text_outputs = self.text_model(
+            inputs_embeds=prefix_tokens,
+            attention_mask=prefix_masks,
+            position_ids=position_ids,
+            use_cache=False,
+        )
+        prefix_tokens = (
+            text_outputs.last_hidden_state
+            if hasattr(text_outputs, "last_hidden_state")
+            else text_outputs[0]
+        )
+        return prefix_tokens * prefix_masks.to(device=prefix_tokens.device, dtype=prefix_tokens.dtype).unsqueeze(-1)
 
     def forward(
         self,
@@ -365,7 +382,8 @@ class IMFAttnResSmolVLMVLEncoder(nn.Module):
         vlm_context = torch.no_grad() if self.freeze_vlm_encoder else nullcontext()
         with vlm_context:
             image_tokens = self._embed_images(images)
-            language_tokens = self._embed_language_tokens(lang_tokens, lang_masks)
+            language_tokens, language_masks = self._embed_language_tokens(lang_tokens, lang_masks)
+            vlm_prefix_tokens = self._encode_vlm_prefix(image_tokens, language_tokens, language_masks)
 
         state_parts = [state]
         if self.state_env_dim > state.shape[-1]:
@@ -376,8 +394,7 @@ class IMFAttnResSmolVLMVLEncoder(nn.Module):
         state_token = self.state_projection(state_token_input).unsqueeze(1)
         prefix_tokens = torch.cat(
             [
-                image_tokens.to(dtype=state_token.dtype),
-                language_tokens.to(dtype=state_token.dtype),
+                vlm_prefix_tokens.to(dtype=state_token.dtype),
                 state_token,
             ],
             dim=1,
