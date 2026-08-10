@@ -1,0 +1,129 @@
+{
+  "spatial": {
+    "run_dir": "/data/lerobot-imf-attnres-exp/runs/imf-attnres-libero-spatial-s20000-eval5000",
+    "periodic_ok_evals": [
+      {
+        "step": 5000,
+        "pc_success": 22.0,
+        "n_episodes": 100
+      },
+      {
+        "step": 10000,
+        "pc_success": 37.0,
+        "n_episodes": 100
+      },
+      {
+        "step": 15000,
+        "pc_success": 34.0,
+        "n_episodes": 100
+      },
+      {
+        "step": 20000,
+        "pc_success": 46.0,
+        "n_episodes": 100
+      }
+    ],
+    "best_step_by_rollout10": 20000,
+    "best_rollout10_pc_success": 46.0,
+    "final_rollout50_pc_success": 52.400000000000006,
+    "final_n_episodes": 500,
+    "final_ok": true,
+    "final_eval_dir": "/data/lerobot-imf-attnres-exp/outputs/final_eval/imf-attnres-libero-spatial-s20000-eval5000/step_020000"
+  },
+  "object": {
+    "run_dir": "/data/lerobot-imf-attnres-exp/runs/imf-attnres-libero-object-s20000-eval5000",
+    "periodic_ok_evals": [
+      {
+        "step": 5000,
+        "pc_success": 0.0,
+        "n_episodes": 100
+      },
+      {
+        "step": 10000,
+        "pc_success": 0.0,
+        "n_episodes": 100
+      },
+      {
+        "step": 15000,
+        "pc_success": 0.0,
+        "n_episodes": 100
+      },
+      {
+        "step": 20000,
+        "pc_success": 0.0,
+        "n_episodes": 100
+      }
+    ],
+    "best_step_by_rollout10": 20000,
+    "best_rollout10_pc_success": 0.0,
+    "final_rollout50_pc_success": 0.0,
+    "final_n_episodes": 500,
+    "final_ok": true,
+    "final_eval_dir": "/data/lerobot-imf-attnres-exp/outputs/final_eval/imf-attnres-libero-object-s20000-eval5000/step_020000"
+  },
+  "goal": {
+    "run_dir": "/data/lerobot-imf-attnres-exp/remote_results/imf-attnres-libero-goal-s20000-eval5000",
+    "periodic_ok_evals": [
+      {
+        "step": 5000,
+        "pc_success": 7.000000000000001,
+        "n_episodes": 100
+      },
+      {
+        "step": 10000,
+        "pc_success": 3.0,
+        "n_episodes": 100
+      },
+      {
+        "step": 15000,
+        "pc_success": 5.0,
+        "n_episodes": 100
+      },
+      {
+        "step": 20000,
+        "pc_success": 7.000000000000001,
+        "n_episodes": 100
+      }
+    ],
+    "best_step_by_rollout10": 20000,
+    "best_rollout10_pc_success": 7.000000000000001,
+    "final_rollout50_pc_success": 6.4,
+    "final_n_episodes": 500,
+    "final_ok": true,
+    "final_eval_dir": "/data/lerobot-imf-attnres-exp/outputs/final_eval/imf-attnres-libero-goal-s20000-eval5000/step_020000"
+  },
+  "long": {
+    "run_dir": "/data/lerobot-imf-attnres-exp/remote_results/imf-attnres-libero-long-s20000-eval5000",
+    "periodic_ok_evals": [
+      {
+        "step": 5000,
+        "pc_success": 0.0,
+        "n_episodes": 100
+      },
+      {
+        "step": 10000,
+        "pc_success": 0.0,
+        "n_episodes": 100
+      },
+      {
+        "step": 15000,
+        "pc_success": 0.0,
+        "n_episodes": 100
+      },
+      {
+        "step": 20000,
+        "pc_success": 3.0,
+        "n_episodes": 100
+      }
+    ],
+    "best_step_by_rollout10": 20000,
+    "best_rollout10_pc_success": 3.0,
+    "final_rollout50_pc_success": 4.3999999999999995,
+    "final_n_episodes": 500,
+    "final_ok": true,
+    "final_eval_dir": "/data/lerobot-imf-attnres-exp/outputs/final_eval/imf-attnres-libero-long-s20000-eval5000/step_020000"
+  },
+  "average": {
+    "final_rollout50_pc_success": 15.8
+  }
+}
