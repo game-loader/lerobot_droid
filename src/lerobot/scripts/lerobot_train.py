@@ -75,9 +75,7 @@ def _grad_l2_norm(parameters) -> float:
 def _gradient_norm_diagnostics(policy: PreTrainedPolicy) -> dict[str, float]:
     named_parameters = list(policy.named_parameters())
     attnres_parameters = [
-        parameter
-        for name, parameter in named_parameters
-        if "attnres_backbone" in name or "attn_res" in name
+        parameter for name, parameter in named_parameters if "attnres_backbone" in name or "attn_res" in name
     ]
     main_dit_parameters = [
         parameter
@@ -171,7 +169,8 @@ def update_policy(
                 output_dict[f"sample_weight_{key}"] = value
         elif (
             getattr(policy, "name", None) == "imf-attnres"
-            or getattr(accelerator.unwrap_model(policy, keep_fp32_wrapper=True), "name", None) == "imf-attnres"
+            or getattr(accelerator.unwrap_model(policy, keep_fp32_wrapper=True), "name", None)
+            == "imf-attnres"
         ):
             loss, output_dict = policy.forward(batch, current_step=train_metrics.steps)
         else:
@@ -185,9 +184,8 @@ def update_policy(
     if output_dict is None:
         output_dict = {}
     unwrapped_policy = accelerator.unwrap_model(policy, keep_fp32_wrapper=True)
-    if (
-        getattr(unwrapped_policy, "name", None) == "imf-attnres"
-        and getattr(unwrapped_policy.config, "enable_imf_diagnostics", False)
+    if getattr(unwrapped_policy, "name", None) == "imf-attnres" and getattr(
+        unwrapped_policy.config, "enable_imf_diagnostics", False
     ):
         output_dict.update(_gradient_norm_diagnostics(unwrapped_policy))
 
@@ -249,15 +247,18 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
     # We set step_scheduler_with_optimizer=False to prevent accelerate from adjusting the lr_scheduler steps based on the num_processes
     # We set find_unused_parameters=True to handle models with conditional computation
     if accelerator is None:
-        from accelerate.utils import DistributedDataParallelKwargs
+        from datetime import timedelta
+
+        from accelerate.utils import DistributedDataParallelKwargs, InitProcessGroupKwargs
 
         ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+        init_kwargs = InitProcessGroupKwargs(timeout=timedelta(minutes=60))
         # Accelerate auto-detects the device based on the available hardware and ignores the policy.device setting.
         # Force the device to be CPU when the active config's device is set to CPU (works for both policy and reward model training).
         force_cpu = cfg.trainable_config.device == "cpu"
         accelerator = Accelerator(
             step_scheduler_with_optimizer=False,
-            kwargs_handlers=[ddp_kwargs],
+            kwargs_handlers=[ddp_kwargs, init_kwargs],
             cpu=force_cpu,
         )
 
@@ -468,6 +469,7 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         drop_last=False,
         prefetch_factor=cfg.prefetch_factor if cfg.num_workers > 0 else None,
         persistent_workers=cfg.persistent_workers and cfg.num_workers > 0,
+        multiprocessing_context="forkserver" if cfg.num_workers > 0 else None,
     )
 
     # Prepare everything with accelerator
@@ -545,7 +547,9 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
             logging.info(train_tracker)
             if train_logger:
                 logger_log_dict = train_tracker.to_dict()
-                every_step_output_dict, regular_output_dict = _split_every_step_logger_diagnostics(output_dict)
+                every_step_output_dict, regular_output_dict = _split_every_step_logger_diagnostics(
+                    output_dict
+                )
                 if every_step_output_dict:
                     logger_log_dict.update(every_step_output_dict)
                 if regular_output_dict:

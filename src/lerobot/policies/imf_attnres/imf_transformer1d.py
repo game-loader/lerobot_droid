@@ -41,7 +41,7 @@ class IMFTransformer1D(ModuleAttrMixin):
         time_as_cond: bool = True,
         obs_as_cond: bool = False,
         n_cond_layers: int = 0,
-        backbone_type: str = 'attnres_full',
+        backbone_type: str = "attnres_full",
         n_kv_head: int = 8,
         attn_res_ffn_mult: float = 2.667,
         attn_res_eps: float = 1e-6,
@@ -50,17 +50,20 @@ class IMFTransformer1D(ModuleAttrMixin):
         super().__init__()
 
         if n_head < 1:
-            raise ValueError(f'n_head must be >= 1, got {n_head}.')
+            raise ValueError(f"n_head must be >= 1, got {n_head}.")
         if n_kv_head < 1:
-            raise ValueError(f'n_kv_head must be >= 1, got {n_kv_head}.')
+            raise ValueError(f"n_kv_head must be >= 1, got {n_kv_head}.")
         if n_emb % n_head != 0:
-            raise ValueError(f'n_emb={n_emb} must be divisible by n_head={n_head}.')
+            raise ValueError(f"n_emb={n_emb} must be divisible by n_head={n_head}.")
         if n_head % n_kv_head != 0:
-            raise ValueError(f'n_head={n_head} must be divisible by n_kv_head={n_kv_head}.')
-        if backbone_type in {'attnres_full', 'attnres_diff', 'diff_transformer'} and (n_emb // n_head) % 2 != 0:
+            raise ValueError(f"n_head={n_head} must be divisible by n_kv_head={n_kv_head}.")
+        if (
+            backbone_type in {"attnres_full", "attnres_diff", "diff_transformer"}
+            and (n_emb // n_head) % 2 != 0
+        ):
             raise ValueError(
-                f'{backbone_type} uses RoPE, which requires an even per-head dimension. '
-                f'Got n_emb={n_emb}, n_head={n_head}, head_dim={n_emb // n_head}.'
+                f"{backbone_type} uses RoPE, which requires an even per-head dimension. "
+                f"Got n_emb={n_emb}, n_head={n_head}, head_dim={n_emb // n_head}."
             )
         if n_obs_steps is None:
             n_obs_steps = horizon
@@ -90,29 +93,29 @@ class IMFTransformer1D(ModuleAttrMixin):
         self.diff_transformer_backbone = None
         encoder_only = False
 
-        if backbone_type in {'attnres_full', 'attnres_diff', 'diff_transformer'}:
+        if backbone_type in {"attnres_full", "attnres_diff", "diff_transformer"}:
             if not time_as_cond:
-                raise ValueError(f'{backbone_type} backbone requires time_as_cond=True.')
+                raise ValueError(f"{backbone_type} backbone requires time_as_cond=True.")
             if n_cond_layers != 0:
-                raise ValueError(f'{backbone_type} backbone does not support n_cond_layers > 0.')
+                raise ValueError(f"{backbone_type} backbone does not support n_cond_layers > 0.")
 
             self.time_token_proj = nn.Linear(n_emb, n_emb)
             backbone_kwargs = {
-                'd_model': n_emb,
-                'n_blocks': n_layer,
-                'n_heads': n_head,
-                'n_kv_heads': n_kv_head,
-                'max_seq_len': t_seq + t_cond,
-                'dropout': p_drop_attn,
-                'ffn_mult': attn_res_ffn_mult,
-                'eps': attn_res_eps,
-                'rope_theta': attn_res_rope_theta,
-                'causal_attn': causal_attn,
+                "d_model": n_emb,
+                "n_blocks": n_layer,
+                "n_heads": n_head,
+                "n_kv_heads": n_kv_head,
+                "max_seq_len": t_seq + t_cond,
+                "dropout": p_drop_attn,
+                "ffn_mult": attn_res_ffn_mult,
+                "eps": attn_res_eps,
+                "rope_theta": attn_res_rope_theta,
+                "causal_attn": causal_attn,
             }
-            if backbone_type in {'attnres_full', 'attnres_diff'}:
+            if backbone_type in {"attnres_full", "attnres_diff"}:
                 self.attnres_backbone = AttnResTransformerBackbone(
                     **backbone_kwargs,
-                    use_differential_attention=backbone_type == 'attnres_diff',
+                    use_differential_attention=backbone_type == "attnres_diff",
                 )
             else:
                 self.diff_transformer_backbone = DifferentialTransformerBackbone(**backbone_kwargs)
@@ -127,7 +130,7 @@ class IMFTransformer1D(ModuleAttrMixin):
                         nhead=n_head,
                         dim_feedforward=4 * n_emb,
                         dropout=p_drop_attn,
-                        activation='gelu',
+                        activation="gelu",
                         batch_first=True,
                         norm_first=True,
                     )
@@ -147,7 +150,7 @@ class IMFTransformer1D(ModuleAttrMixin):
                     nhead=n_head,
                     dim_feedforward=4 * n_emb,
                     dropout=p_drop_attn,
-                    activation='gelu',
+                    activation="gelu",
                     batch_first=True,
                     norm_first=True,
                 )
@@ -162,7 +165,7 @@ class IMFTransformer1D(ModuleAttrMixin):
                     nhead=n_head,
                     dim_feedforward=4 * n_emb,
                     dropout=p_drop_attn,
-                    activation='gelu',
+                    activation="gelu",
                     batch_first=True,
                     norm_first=True,
                 )
@@ -173,7 +176,7 @@ class IMFTransformer1D(ModuleAttrMixin):
 
             self.ln_f = nn.LayerNorm(n_emb)
 
-        self.layerwise_attention_mode = 'cross_attn'
+        self.layerwise_attention_mode = "cross_attn"
         self.layerwise_self_attn_every_n_layers = 2
         self.layerwise_prefix_proj = nn.Linear(cond_dim, n_emb) if obs_as_cond else None
         self.layerwise_cross_attn = None
@@ -190,22 +193,22 @@ class IMFTransformer1D(ModuleAttrMixin):
                 ]
             )
 
-        if causal_attn and backbone_type != 'attnres_full':
+        if causal_attn and backbone_type != "attnres_full":
             sz = t_seq
             mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
-            mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, 0.0)
-            self.register_buffer('mask', mask)
+            mask = mask.float().masked_fill(mask == 0, float("-inf")).masked_fill(mask == 1, 0.0)
+            self.register_buffer("mask", mask)
 
             if time_as_cond and obs_as_cond:
                 s_seq = t_cond
                 t_idx, s_idx = torch.meshgrid(
                     torch.arange(t_seq),
                     torch.arange(s_seq),
-                    indexing='ij',
+                    indexing="ij",
                 )
                 mask = t_idx >= (s_idx - 2)
-                mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, 0.0)
-                self.register_buffer('memory_mask', mask)
+                mask = mask.float().masked_fill(mask == 0, float("-inf")).masked_fill(mask == 1, 0.0)
+                self.register_buffer("memory_mask", mask)
             else:
                 self.memory_mask = None
         else:
@@ -223,20 +226,18 @@ class IMFTransformer1D(ModuleAttrMixin):
         self.encoder_only = encoder_only
 
         self.apply(self._init_weights)
-        logger.info('number of parameters: %e', sum(p.numel() for p in self.parameters()))
+        logger.info("number of parameters: %e", sum(p.numel() for p in self.parameters()))
 
     def set_layerwise_prefix_config(
         self,
         *,
-        attention_mode: str = 'cross_attn',
+        attention_mode: str = "cross_attn",
         self_attn_every_n_layers: int = 2,
     ) -> None:
-        if attention_mode not in {'self_attn', 'cross_attn'}:
+        if attention_mode not in {"self_attn", "cross_attn"}:
             raise ValueError(f"Unsupported layerwise attention_mode: {attention_mode!r}.")
         if self_attn_every_n_layers < 1:
-            raise ValueError(
-                f"self_attn_every_n_layers must be >= 1, got {self_attn_every_n_layers}."
-            )
+            raise ValueError(f"self_attn_every_n_layers must be >= 1, got {self_attn_every_n_layers}.")
         self.layerwise_attention_mode = attention_mode
         self.layerwise_self_attn_every_n_layers = self_attn_every_n_layers
 
@@ -266,17 +267,17 @@ class IMFTransformer1D(ModuleAttrMixin):
             if isinstance(module, nn.Linear) and module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
         elif isinstance(module, nn.MultiheadAttention):
-            for name in ('in_proj_weight', 'q_proj_weight', 'k_proj_weight', 'v_proj_weight'):
+            for name in ("in_proj_weight", "q_proj_weight", "k_proj_weight", "v_proj_weight"):
                 weight = getattr(module, name)
                 if weight is not None:
                     torch.nn.init.normal_(weight, mean=0.0, std=0.02)
 
-            for name in ('in_proj_bias', 'bias_k', 'bias_v'):
+            for name in ("in_proj_bias", "bias_k", "bias_v"):
                 bias = getattr(module, name)
                 if bias is not None:
                     torch.nn.init.zeros_(bias)
         elif isinstance(module, (nn.LayerNorm, RMSNorm)):
-            if getattr(module, 'bias', None) is not None:
+            if getattr(module, "bias", None) is not None:
                 torch.nn.init.zeros_(module.bias)
             torch.nn.init.ones_(module.weight)
         elif isinstance(module, AttnResOperator):
@@ -289,7 +290,7 @@ class IMFTransformer1D(ModuleAttrMixin):
         elif isinstance(module, ignore_types):
             pass
         else:
-            raise RuntimeError(f'Unaccounted module {module}')
+            raise RuntimeError(f"Unaccounted module {module}")
 
     def get_optim_groups(self, weight_decay: float = 1e-3):
         decay = set()
@@ -302,37 +303,37 @@ class IMFTransformer1D(ModuleAttrMixin):
         blacklist_weight_modules = (torch.nn.LayerNorm, torch.nn.Embedding, RMSNorm)
         for mn, m in self.named_modules():
             for pn, _ in m.named_parameters(recurse=False):
-                fpn = f'{mn}.{pn}' if mn else pn
+                fpn = f"{mn}.{pn}" if mn else pn
 
-                if pn.endswith('bias') or pn.startswith('bias') or pn == 'pseudo_query':
+                if pn.endswith("bias") or pn.startswith("bias") or pn == "pseudo_query":
                     no_decay.add(fpn)
-                elif pn.endswith('weight') and isinstance(m, whitelist_weight_modules):
+                elif pn.endswith("weight") and isinstance(m, whitelist_weight_modules):
                     decay.add(fpn)
-                elif pn.endswith('weight') and isinstance(m, blacklist_weight_modules):
+                elif pn.endswith("weight") and isinstance(m, blacklist_weight_modules):
                     no_decay.add(fpn)
 
         if self.pos_emb is not None:
-            no_decay.add('pos_emb')
-        no_decay.add('_dummy_variable')
+            no_decay.add("pos_emb")
+        no_decay.add("_dummy_variable")
         if self.cond_pos_emb is not None:
-            no_decay.add('cond_pos_emb')
+            no_decay.add("cond_pos_emb")
 
         param_dict = dict(self.named_parameters())
         inter_params = decay & no_decay
         union_params = decay | no_decay
-        assert len(inter_params) == 0, f'parameters {inter_params} made it into both decay/no_decay sets!'
+        assert len(inter_params) == 0, f"parameters {inter_params} made it into both decay/no_decay sets!"
         assert len(param_dict.keys() - union_params) == 0, (
-            f'parameters {param_dict.keys() - union_params} were not separated into either decay/no_decay sets!'
+            f"parameters {param_dict.keys() - union_params} were not separated into either decay/no_decay sets!"
         )
 
         return [
             {
-                'params': [param_dict[pn] for pn in sorted(decay)],
-                'weight_decay': weight_decay,
+                "params": [param_dict[pn] for pn in sorted(decay)],
+                "weight_decay": weight_decay,
             },
             {
-                'params': [param_dict[pn] for pn in sorted(no_decay)],
-                'weight_decay': 0.0,
+                "params": [param_dict[pn] for pn in sorted(no_decay)],
+                "weight_decay": 0.0,
             },
         ]
 
@@ -368,13 +369,13 @@ class IMFTransformer1D(ModuleAttrMixin):
         ]
         if self.obs_as_cond:
             if cond is None:
-                raise ValueError('cond is required when obs_as_cond=True for attnres_full backbone.')
+                raise ValueError("cond is required when obs_as_cond=True for attnres_full backbone.")
             token_parts.append(self.cond_obs_emb(cond))
         token_parts.append(sample_tokens)
         x = torch.cat(token_parts, dim=1)
         x = self.drop(x)
         x = self.attnres_backbone(x)
-        x = x[:, -sample_tokens.shape[1]:, :]
+        x = x[:, -sample_tokens.shape[1] :, :]
         return x
 
     def _forward_diff_transformer(
@@ -391,13 +392,13 @@ class IMFTransformer1D(ModuleAttrMixin):
         ]
         if self.obs_as_cond:
             if cond is None:
-                raise ValueError('cond is required when obs_as_cond=True for diff_transformer backbone.')
+                raise ValueError("cond is required when obs_as_cond=True for diff_transformer backbone.")
             token_parts.append(self.cond_obs_emb(cond))
         token_parts.append(sample_tokens)
         x = torch.cat(token_parts, dim=1)
         x = self.drop(x)
         x = self.diff_transformer_backbone(x)
-        x = x[:, -sample_tokens.shape[1]:, :]
+        x = x[:, -sample_tokens.shape[1] :, :]
         return x
 
     def _forward_vanilla(
@@ -464,7 +465,7 @@ class IMFTransformer1D(ModuleAttrMixin):
         *,
         key_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.backbone_type in {'attnres_full', 'attnres_diff'}:
+        if self.backbone_type in {"attnres_full", "attnres_diff"}:
             rope_freqs = self.attnres_backbone.rope_freqs[: tokens.shape[1]]
             mask = None
             if key_mask is not None:
@@ -479,13 +480,15 @@ class IMFTransformer1D(ModuleAttrMixin):
                 layer_outputs.append(sublayer(sources, rope_freqs, mask))
             return torch.stack(layer_outputs, dim=0).sum(dim=0)
 
-        if self.backbone_type == 'diff_transformer':
+        if self.backbone_type == "diff_transformer":
             rope_freqs = self.diff_transformer_backbone.rope_freqs[: tokens.shape[1]]
             mask = None
             if key_mask is not None:
                 mask = self._layerwise_additive_key_mask(key_mask, tokens.shape[1])
             if self.diff_transformer_backbone.causal_attn:
-                causal_mask = self.diff_transformer_backbone._build_causal_mask(tokens.shape[1], tokens.device)
+                causal_mask = self.diff_transformer_backbone._build_causal_mask(
+                    tokens.shape[1], tokens.device
+                )
                 mask = causal_mask if mask is None else mask + causal_mask
             return self.diff_transformer_backbone.layers[layer_idx](tokens, rope_freqs=rope_freqs, mask=mask)
 
@@ -495,6 +498,93 @@ class IMFTransformer1D(ModuleAttrMixin):
             return self.decoder.layers[layer_idx](tgt=tokens, memory=tokens)
         return self.encoder(tokens)
 
+    def _layerwise_prefix_context_update(
+        self,
+        action_tokens: torch.Tensor,
+        prefix_tokens: torch.Tensor,
+        prefix_mask: torch.Tensor,
+        layer_idx: int,
+        attention_mode: str,
+        self_attn_every_n_layers: int,
+    ) -> torch.Tensor:
+        use_action_context = attention_mode != "cross_attn" or layer_idx % self_attn_every_n_layers == 0
+        if use_action_context:
+            context_tokens = torch.cat([prefix_tokens, action_tokens], dim=1)
+            context_mask = torch.cat(
+                [
+                    prefix_mask,
+                    torch.ones(
+                        action_tokens.shape[:2],
+                        dtype=torch.bool,
+                        device=action_tokens.device,
+                    ),
+                ],
+                dim=1,
+            )
+        else:
+            context_tokens = prefix_tokens
+            context_mask = prefix_mask
+
+        context_out, _ = self.layerwise_cross_attn[layer_idx](
+            query=action_tokens,
+            key=context_tokens,
+            value=context_tokens,
+            key_padding_mask=~context_mask,
+            need_weights=False,
+        )
+        return context_out
+
+    @staticmethod
+    def _with_last_depth_source_update(
+        layer_outputs: list[torch.Tensor],
+        update: torch.Tensor,
+    ) -> list[torch.Tensor]:
+        if not layer_outputs:
+            raise ValueError("layer_outputs must contain at least one tensor.")
+        conditioned = list(layer_outputs)
+        conditioned[-1] = conditioned[-1] + update
+        return conditioned
+
+    def _forward_layerwise_prefix_attnres(
+        self,
+        action_tokens: torch.Tensor,
+        prefix_layers: torch.Tensor,
+        prefix_mask: torch.Tensor,
+        attention_mode: str,
+        self_attn_every_n_layers: int,
+    ) -> torch.Tensor:
+        rope_freqs = self.attnres_backbone.rope_freqs[: action_tokens.shape[1]]
+        mask = None
+        if self.attnres_backbone.causal_attn:
+            mask = self.attnres_backbone._build_causal_mask(action_tokens.shape[1], action_tokens.device)
+
+        layer_outputs = [action_tokens]
+        for layer_idx in range(self.n_layer):
+            prefix_tokens = self.layerwise_prefix_proj(prefix_layers[:, layer_idx])
+            current_action_tokens = torch.stack(layer_outputs, dim=0).sum(dim=0)
+            context_update = self._layerwise_prefix_context_update(
+                current_action_tokens,
+                prefix_tokens,
+                prefix_mask,
+                layer_idx,
+                attention_mode,
+                self_attn_every_n_layers,
+            )
+            # Keep the AttnRes residual/depth-attention stack identical to the
+            # original backbone: only AttnRes sublayer outputs become persistent
+            # depth branches. SmolVLM context is a temporary action-shaped
+            # conditioning update on the current layer input, not an extra branch.
+            conditioned_layer_outputs = self._with_last_depth_source_update(layer_outputs, context_update)
+
+            start = 2 * layer_idx
+            for sublayer in self.attnres_backbone.layers[start : start + 2]:
+                sources = torch.stack(conditioned_layer_outputs, dim=0)
+                output = sublayer(sources, rope_freqs, mask)
+                layer_outputs.append(output)
+                conditioned_layer_outputs.append(output)
+
+        return torch.stack(layer_outputs, dim=0).sum(dim=0)
+
     def _forward_layerwise_prefix(
         self,
         sample: torch.Tensor,
@@ -503,9 +593,9 @@ class IMFTransformer1D(ModuleAttrMixin):
         cond,
     ) -> torch.Tensor:
         if not self.obs_as_cond or self.layerwise_prefix_proj is None or self.layerwise_cross_attn is None:
-            raise ValueError('Layer-wise prefix conditioning requires cond_dim > 0.')
-        prefix_layers = self._condition_value(cond, 'prefix_layers')
-        prefix_mask = self._condition_value(cond, 'prefix_mask')
+            raise ValueError("Layer-wise prefix conditioning requires cond_dim > 0.")
+        prefix_layers = self._condition_value(cond, "prefix_layers")
+        prefix_mask = self._condition_value(cond, "prefix_mask")
         if prefix_layers is None or prefix_mask is None:
             raise ValueError("Layer-wise conditioning requires 'prefix_layers' and 'prefix_mask'.")
         if prefix_layers.ndim != 4:
@@ -514,7 +604,9 @@ class IMFTransformer1D(ModuleAttrMixin):
                 f"Got {tuple(prefix_layers.shape)}."
             )
         if prefix_mask.ndim != 2:
-            raise ValueError(f"prefix_mask must have shape (B, prefix_tokens). Got {tuple(prefix_mask.shape)}.")
+            raise ValueError(
+                f"prefix_mask must have shape (B, prefix_tokens). Got {tuple(prefix_mask.shape)}."
+            )
         if prefix_layers.shape[0] != sample.shape[0] or prefix_mask.shape[0] != sample.shape[0]:
             raise ValueError("Layer-wise prefix batch dimension must match sample batch dimension.")
         if prefix_layers.shape[2] != prefix_mask.shape[1]:
@@ -522,20 +614,18 @@ class IMFTransformer1D(ModuleAttrMixin):
 
         prefix_layers = prefix_layers.to(device=sample.device, dtype=self.input_emb.weight.dtype)
         prefix_mask = prefix_mask.to(device=sample.device, dtype=torch.bool)
-        attention_mode = self._condition_value(cond, 'attention_mode', self.layerwise_attention_mode)
+        attention_mode = self._condition_value(cond, "attention_mode", self.layerwise_attention_mode)
         self_attn_every_n_layers = int(
             self._condition_value(
                 cond,
-                'self_attn_every_n_layers',
+                "self_attn_every_n_layers",
                 self.layerwise_self_attn_every_n_layers,
             )
         )
-        if attention_mode not in {'self_attn', 'cross_attn'}:
+        if attention_mode not in {"self_attn", "cross_attn"}:
             raise ValueError(f"Unsupported layer-wise attention mode: {attention_mode!r}.")
         if self_attn_every_n_layers < 1:
-            raise ValueError(
-                f"self_attn_every_n_layers must be >= 1, got {self_attn_every_n_layers}."
-            )
+            raise ValueError(f"self_attn_every_n_layers must be >= 1, got {self_attn_every_n_layers}.")
 
         sample_tokens = self.input_emb(sample)
         action_token_count = sample_tokens.shape[1]
@@ -561,12 +651,19 @@ class IMFTransformer1D(ModuleAttrMixin):
                 dim=1,
             )
 
+        if self.backbone_type in {"attnres_full", "attnres_diff"}:
+            action_tokens = self._forward_layerwise_prefix_attnres(
+                action_tokens,
+                prefix_layers,
+                prefix_mask,
+                attention_mode,
+                self_attn_every_n_layers,
+            )
+            return action_tokens[:, -action_token_count:, :]
+
         for layer_idx in range(num_layers):
             prefix_tokens = self.layerwise_prefix_proj(prefix_layers[:, layer_idx])
-            use_joint_self = (
-                attention_mode != 'cross_attn'
-                or layer_idx % self_attn_every_n_layers == 0
-            )
+            use_joint_self = attention_mode != "cross_attn" or layer_idx % self_attn_every_n_layers == 0
             if use_joint_self:
                 joint = torch.cat([prefix_tokens, action_tokens], dim=1)
                 joint_mask = torch.cat(
@@ -608,7 +705,9 @@ class IMFTransformer1D(ModuleAttrMixin):
         if cond is not None:
             if isinstance(cond, dict):
                 cond = {
-                    key: value.to(dtype=dtype) if torch.is_tensor(value) and value.is_floating_point() else value
+                    key: value.to(dtype=dtype)
+                    if torch.is_tensor(value) and value.is_floating_point()
+                    else value
                     for key, value in cond.items()
                 }
             else:
@@ -616,11 +715,11 @@ class IMFTransformer1D(ModuleAttrMixin):
         r = self._prepare_time_input(r, sample)
         t = self._prepare_time_input(t, sample)
 
-        if isinstance(cond, dict) or hasattr(cond, 'prefix_layers'):
+        if isinstance(cond, dict) or hasattr(cond, "prefix_layers"):
             x = self._forward_layerwise_prefix(sample, r, t, cond)
-        elif self.backbone_type in {'attnres_full', 'attnres_diff'}:
+        elif self.backbone_type in {"attnres_full", "attnres_diff"}:
             x = self._forward_attnres_full(sample, r, t, cond=cond)
-        elif self.backbone_type == 'diff_transformer':
+        elif self.backbone_type == "diff_transformer":
             x = self._forward_diff_transformer(sample, r, t, cond=cond)
         else:
             x = self._forward_vanilla(sample, r, t, cond=cond)

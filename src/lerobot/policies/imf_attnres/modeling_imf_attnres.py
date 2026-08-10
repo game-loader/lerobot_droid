@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 
+import math
 from collections import deque
 from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
-import math
 
 import einops
 import torch
@@ -85,9 +85,7 @@ class IMFAttnResRgbEncoder(nn.Module):
     def __init__(self, config: IMFAttnResConfig):
         super().__init__()
         self.resize = (
-            torchvision.transforms.Resize(config.resize_shape)
-            if config.resize_shape is not None
-            else None
+            torchvision.transforms.Resize(config.resize_shape) if config.resize_shape is not None else None
         )
 
         crop_shape = config.crop_shape
@@ -95,9 +93,7 @@ class IMFAttnResRgbEncoder(nn.Module):
             self.do_crop = True
             self.center_crop = torchvision.transforms.CenterCrop(crop_shape)
             self.maybe_random_crop = (
-                torchvision.transforms.RandomCrop(crop_shape)
-                if config.crop_is_random
-                else self.center_crop
+                torchvision.transforms.RandomCrop(crop_shape) if config.crop_is_random else self.center_crop
             )
         else:
             self.do_crop = False
@@ -108,11 +104,15 @@ class IMFAttnResRgbEncoder(nn.Module):
         self.backbone = nn.Sequential(*(list(backbone_model.children())[:-2]))
         if config.use_group_norm:
             if config.pretrained_backbone_weights:
-                raise ValueError("You can't replace BatchNorm in a pretrained model without ruining the weights!")
+                raise ValueError(
+                    "You can't replace BatchNorm in a pretrained model without ruining the weights!"
+                )
             self.backbone = _replace_submodules(
                 root_module=self.backbone,
                 predicate=lambda x: isinstance(x, nn.BatchNorm2d),
-                func=lambda x: nn.GroupNorm(num_groups=max(1, x.num_features // 16), num_channels=x.num_features),
+                func=lambda x: nn.GroupNorm(
+                    num_groups=max(1, x.num_features // 16), num_channels=x.num_features
+                ),
             )
 
         images_shape = next(iter(config.image_features.values())).shape
@@ -208,7 +208,9 @@ class IMFAttnResSmolVLMVLEncoder(nn.Module):
         text_config = getattr(getattr(self.vlm, "config", None), "text_config", None)
         self.feature_dim = getattr(text_config, "hidden_size", None)
         if self.feature_dim is None:
-            self.feature_dim = getattr(getattr(self.vlm_model.text_model, "config", None), "hidden_size", None)
+            self.feature_dim = getattr(
+                getattr(self.vlm_model.text_model, "config", None), "hidden_size", None
+            )
         if self.feature_dim is None and hasattr(self.text_embeddings, "embedding_dim"):
             self.feature_dim = self.text_embeddings.embedding_dim
         if self.feature_dim is None:
@@ -444,9 +446,7 @@ class IMFAttnResSmolVLMVLEncoder(nn.Module):
             output_hidden_states=output_hidden_states,
         )
         prefix_tokens = (
-            text_outputs.last_hidden_state
-            if hasattr(text_outputs, "last_hidden_state")
-            else text_outputs[0]
+            text_outputs.last_hidden_state if hasattr(text_outputs, "last_hidden_state") else text_outputs[0]
         )
         prefix_tokens = prefix_tokens * prefix_masks.to(
             device=prefix_tokens.device,
@@ -649,7 +649,9 @@ class IMFAttnResPolicy(PreTrainedPolicy):
         if batch[OBS_STATE].ndim == 2:
             batch[OBS_STATE] = batch[OBS_STATE].unsqueeze(1).expand(-1, self.config.n_obs_steps, -1)
         if OBS_IMAGES in batch and batch[OBS_IMAGES].ndim == 5:
-            batch[OBS_IMAGES] = batch[OBS_IMAGES].unsqueeze(1).expand(-1, self.config.n_obs_steps, -1, -1, -1, -1)
+            batch[OBS_IMAGES] = (
+                batch[OBS_IMAGES].unsqueeze(1).expand(-1, self.config.n_obs_steps, -1, -1, -1, -1)
+            )
         if self.config.env_state_feature and batch[OBS_ENV_STATE].ndim == 2:
             batch[OBS_ENV_STATE] = batch[OBS_ENV_STATE].unsqueeze(1).expand(-1, self.config.n_obs_steps, -1)
         return self.model.generate_actions(batch, noise=noise)
@@ -832,8 +834,7 @@ class IMFAttnResModel(nn.Module):
         t = self._sample_logit_normal(batch_size, device, dtype)
         r = self._sample_logit_normal(batch_size, device, dtype)
 
-        data_size = int(batch_size * self.config.data_proportion)
-        fm_mask = torch.arange(batch_size, device=device) < data_size
+        fm_mask = torch.rand(batch_size, device=device, dtype=dtype) < self.config.data_proportion
         r = torch.where(fm_mask, t, r)
 
         t_final = torch.maximum(t, r)
@@ -938,10 +939,7 @@ class IMFAttnResModel(nn.Module):
         if hasattr(cond, "detach"):
             return cond.detach()
         if isinstance(cond, dict):
-            return {
-                key: value.detach() if torch.is_tensor(value) else value
-                for key, value in cond.items()
-            }
+            return {key: value.detach() if torch.is_tensor(value) else value for key, value in cond.items()}
         return cond
 
     def _semigroup_loss_weight(self, current_step: int | None) -> float:
@@ -1084,7 +1082,9 @@ class IMFAttnResModel(nn.Module):
         max_weight = torch.cat(max_weight_values)
         diagnostics: dict[str, float] = {}
         self._add_bucket_stats(diagnostics, "imf_diagnostics/attnres", "depth_attention_entropy", entropy)
-        self._add_bucket_stats(diagnostics, "imf_diagnostics/attnres", "depth_attention_max_weight", max_weight)
+        self._add_bucket_stats(
+            diagnostics, "imf_diagnostics/attnres", "depth_attention_max_weight", max_weight
+        )
         return diagnostics
 
     def _imf_training_diagnostics(
@@ -1145,7 +1145,9 @@ class IMFAttnResModel(nn.Module):
         batch_size, n_obs_steps = batch[OBS_STATE].shape[:2]
         if self.config.use_separate_rgb_encoder_per_camera:
             images_per_camera = einops.rearrange(batch[OBS_IMAGES], "b s n ... -> n (b s) ...")
-            encoded = [encoder(images) for encoder, images in zip(self.rgb_encoder, images_per_camera, strict=True)]
+            encoded = [
+                encoder(images) for encoder, images in zip(self.rgb_encoder, images_per_camera, strict=True)
+            ]
             if self.config.output_tokens_per_camera:
                 img_features = torch.stack(encoded, dim=1)
                 return einops.rearrange(img_features, "(b s) n d -> b s n d", b=batch_size, s=n_obs_steps)
@@ -1235,7 +1237,9 @@ class IMFAttnResModel(nn.Module):
         env_state = None
         if self.config.env_state_feature:
             if OBS_ENV_STATE not in batch:
-                raise ValueError("SmolVLM VL encoder expects env_state because config.env_state_feature is set.")
+                raise ValueError(
+                    "SmolVLM VL encoder expects env_state because config.env_state_feature is set."
+                )
             env = batch[OBS_ENV_STATE]
             if env.shape[:2] != (batch_size, n_obs_steps):
                 raise ValueError(
@@ -1312,10 +1316,14 @@ class IMFAttnResModel(nn.Module):
         cond = self._prepare_conditioning(batch)
         device = get_device_from_parameters(self.head)
         dtype = get_dtype_from_parameters(self.head)
-        action_latent = noise if noise is not None else torch.randn(
-            (batch_size, self.config.horizon, self.config.action_feature.shape[0]),
-            device=device,
-            dtype=dtype,
+        action_latent = (
+            noise
+            if noise is not None
+            else torch.randn(
+                (batch_size, self.config.horizon, self.config.action_feature.shape[0]),
+                device=device,
+                dtype=dtype,
+            )
         )
         time_grid = torch.linspace(
             1.0,

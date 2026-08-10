@@ -148,12 +148,7 @@ def make_libero_like_batch(
         ACTION: torch.randn(batch_size, 4, action_dim),
         "action_is_pad": torch.zeros(batch_size, 4, dtype=torch.bool),
     }
-    batch.update(
-        {
-            key: torch.rand(batch_size, 2, 3, IMAGE_SIZE, IMAGE_SIZE)
-            for key in image_keys
-        }
-    )
+    batch.update({key: torch.rand(batch_size, 2, 3, IMAGE_SIZE, IMAGE_SIZE) for key in image_keys})
     return batch
 
 
@@ -164,7 +159,6 @@ def make_observation_batch(batch_size: int = 2, state_dim: int = STATE_DIM) -> d
     }
     batch.update({key: torch.rand(batch_size, 3, IMAGE_SIZE, IMAGE_SIZE) for key in IMAGE_KEYS})
     return batch
-
 
 
 def test_imf_attnres_default_normalization_matches_lerobot_diffusion_convention():
@@ -223,37 +217,44 @@ def test_imf_attnres_factory_returns_registered_config_and_policy_class():
     assert policy_cfg.type == POLICY_NAME
 
 
-def test_imf_attnres_sample_tr_uses_logit_normal_data_proportion_without_uniform(monkeypatch):
-    """Sample t/r from Logit-Normal, force the FM half to r=t, and never draw uniform samples."""
+def test_imf_attnres_sample_tr_uses_logit_normal_random_data_proportion_mask(monkeypatch):
+    """Sample t/r from Logit-Normal and force r=t according to a per-sample random mask."""
     config = make_tiny_imf_attnres_config()
     model = IMFAttnResModel(config)
     logit_t = torch.tensor([-1.0, 0.0, 1.0, 2.0], dtype=torch.float32)
     logit_r = torch.tensor([2.0, 1.0, 0.0, -1.0], dtype=torch.float32)
     randn_values = [logit_t, logit_r]
+    random_draws = torch.tensor([0.75, 0.25, 0.75, 0.25], dtype=torch.float32)
+    rand_calls = []
 
     def fake_randn(batch_size, *, device=None, dtype=None):
         assert batch_size == 4
         return randn_values.pop(0).to(device=device, dtype=dtype)
 
-    def fail_uniform(*args, **kwargs):
-        raise AssertionError("IMF-AttnRes t/r sampling should not use a uniform mixture")
+    def fake_rand(batch_size, *, device=None, dtype=None):
+        assert batch_size == 4
+        rand_calls.append(batch_size)
+        return random_draws.to(device=device, dtype=dtype)
 
     monkeypatch.setattr(torch, "randn", fake_randn)
-    monkeypatch.setattr(torch, "rand", fail_uniform)
+    monkeypatch.setattr(torch, "rand", fake_rand)
 
     t, r = model._sample_tr(batch_size=4, device=torch.device("cpu"), dtype=torch.float32)
 
     raw_t = torch.sigmoid(logit_t * config.p_std + config.p_mean)
     raw_r = torch.sigmoid(logit_r * config.p_std + config.p_mean)
-    expected_r_before_sort = torch.cat([raw_t[:2], raw_r[2:]])
+    fm_mask = random_draws < config.data_proportion
+    expected_r_before_sort = torch.where(fm_mask, raw_t, raw_r)
     expected_t = torch.maximum(raw_t, expected_r_before_sort)
     expected_r = torch.minimum(raw_t, expected_r_before_sort)
 
     torch.testing.assert_close(t, expected_t)
     torch.testing.assert_close(r, expected_r)
     assert randn_values == []
+    assert rand_calls == [4]
     assert torch.all(t >= r)
-    torch.testing.assert_close(t[:2], r[:2])
+    torch.testing.assert_close(t[fm_mask], r[fm_mask])
+    assert not torch.equal(fm_mask, torch.tensor([True, True, False, False]))
 
 
 def test_imf_attnres_compute_loss_uses_tr_sampler(monkeypatch):
@@ -304,9 +305,7 @@ def test_imf_attnres_pseudo_huber_loss_matches_formula():
 
     loss = model._velocity_loss_from_error(error)
 
-    expected = config.pseudo_huber_delta**2 * (
-        torch.sqrt(1 + (error / config.pseudo_huber_delta) ** 2) - 1
-    )
+    expected = config.pseudo_huber_delta**2 * (torch.sqrt(1 + (error / config.pseudo_huber_delta) ** 2) - 1)
     torch.testing.assert_close(loss, expected)
 
 
@@ -473,7 +472,9 @@ def test_imf_attnres_semigroup_teacher_target_is_detached_from_midpoint_gradient
         if torch.equal(r_value, s) and torch.equal(t_value, t):
             teacher_midpoints.append(z)
         if torch.equal(r_value, r) and torch.equal(t_value, s):
-            assert not z.requires_grad, "teacher-composed midpoint must be detached before second teacher call"
+            assert not z.requires_grad, (
+                "teacher-composed midpoint must be detached before second teacher call"
+            )
         return z + (r_value + 2.0 * t_value).view(-1, 1, 1)
 
     model.fn = fake_fn
@@ -718,7 +719,9 @@ def test_imf_attnres_generate_actions_decodes_dct_latent_before_slicing(monkeypa
 
     actions = model.generate_actions(batch, noise=torch.zeros_like(latent))
 
-    expected = original_decode(latent)[:, config.n_obs_steps - 1 : config.n_obs_steps - 1 + config.n_action_steps]
+    expected = original_decode(latent)[
+        :, config.n_obs_steps - 1 : config.n_obs_steps - 1 + config.n_action_steps
+    ]
     assert calls["decode"] == 1
     torch.testing.assert_close(actions, expected)
 
@@ -1041,13 +1044,13 @@ def test_imf_attnres_libero_style_train_pipeline_smoke(tmp_path):
     os.environ["HF_DATASETS_CACHE"] = str(hf_datasets_cache)
     os.environ["HF_HOME"] = str(tmp_path / "hf_home")
 
-    with patch.object(datasets.config, "HF_DATASETS_CACHE", hf_datasets_cache), patch.object(
-        datasets.config, "DOWNLOADED_DATASETS_PATH", hf_downloaded_cache
-    ), patch.object(datasets.config, "EXTRACTED_DATASETS_PATH", hf_extracted_cache), patch(
-        "lerobot.datasets.dataset_metadata.snapshot_download"
-    ) as metadata_download, patch(
-        "lerobot.datasets.lerobot_dataset.snapshot_download"
-    ) as data_download:
+    with (
+        patch.object(datasets.config, "HF_DATASETS_CACHE", hf_datasets_cache),
+        patch.object(datasets.config, "DOWNLOADED_DATASETS_PATH", hf_downloaded_cache),
+        patch.object(datasets.config, "EXTRACTED_DATASETS_PATH", hf_extracted_cache),
+        patch("lerobot.datasets.dataset_metadata.snapshot_download") as metadata_download,
+        patch("lerobot.datasets.lerobot_dataset.snapshot_download") as data_download,
+    ):
         dataset = make_dataset(train_cfg)
 
     metadata_download.assert_not_called()
@@ -1071,7 +1074,9 @@ def test_imf_attnres_libero_style_train_pipeline_smoke(tmp_path):
     preprocessor, _ = make_pre_post_processors(config, dataset_stats=dataset.meta.stats)
     optimizer, scheduler = make_optimizer_and_scheduler(train_cfg, policy)
 
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=2, shuffle=False, num_workers=0, drop_last=True)
+    dataloader = torch.utils.data.DataLoader(
+        dataset, batch_size=2, shuffle=False, num_workers=0, drop_last=True
+    )
     batch = next(iter(dataloader))
     processed = preprocessor(batch)
 

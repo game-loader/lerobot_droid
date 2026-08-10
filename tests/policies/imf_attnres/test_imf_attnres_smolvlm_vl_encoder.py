@@ -8,12 +8,12 @@ from torch import nn
 
 from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
 from lerobot.policies.factory import make_policy_config
+from lerobot.policies.imf_attnres.imf_transformer1d import IMFTransformer1D
 from lerobot.policies.imf_attnres.modeling_imf_attnres import (
     IMFAttnResModel,
     IMFAttnResPolicy,
     IMFAttnResSmolVLMVLEncoder,
 )
-from lerobot.policies.imf_attnres.imf_transformer1d import IMFTransformer1D
 from lerobot.utils.constants import (
     ACTION,
     OBS_IMAGES,
@@ -268,7 +268,9 @@ class _FakeTextModel(nn.Module):
     def get_input_embeddings(self):
         return self.embedding
 
-    def forward(self, *, inputs_embeds, attention_mask=None, use_cache=False, output_hidden_states=False, **kwargs):
+    def forward(
+        self, *, inputs_embeds, attention_mask=None, use_cache=False, output_hidden_states=False, **kwargs
+    ):
         self.forward_calls += 1
         self.last_input_shape = tuple(inputs_embeds.shape)
         hidden_states = inputs_embeds
@@ -404,7 +406,9 @@ def test_smolvlm_transformer_text_mode_processes_image_language_and_state_like_s
     state_token = prefix_tokens[:, 11:]
     embedding_scale = torch.tensor(6.0).sqrt()
     expected_image_values = encoder._preprocess_images(inputs["images"]).mean(dim=(1, 2, 3))
-    expected_image_tokens = expected_image_values.view(1, len(IMAGE_KEYS), 1, 1).expand(1, len(IMAGE_KEYS), 4, 6)
+    expected_image_tokens = expected_image_values.view(1, len(IMAGE_KEYS), 1, 1).expand(
+        1, len(IMAGE_KEYS), 4, 6
+    )
     expected_image_tokens = expected_image_tokens.reshape(1, len(IMAGE_KEYS) * 4, 6) * embedding_scale + 3.0
     torch.testing.assert_close(image_tokens, expected_image_tokens)
     torch.testing.assert_close(language_tokens[0, 0], torch.full((6,), 2.0 * embedding_scale + 3.0))
@@ -439,7 +443,9 @@ def test_smolvlm_transformer_text_mode_can_keep_state_outside_text_layers(monkey
     state_token = prefix_tokens[:, 11:]
     embedding_scale = torch.tensor(6.0).sqrt()
     expected_image_values = encoder._preprocess_images(inputs["images"]).mean(dim=(1, 2, 3))
-    expected_image_tokens = expected_image_values.view(1, len(IMAGE_KEYS), 1, 1).expand(1, len(IMAGE_KEYS), 4, 6)
+    expected_image_tokens = expected_image_values.view(1, len(IMAGE_KEYS), 1, 1).expand(
+        1, len(IMAGE_KEYS), 4, 6
+    )
     expected_image_tokens = expected_image_tokens.reshape(1, len(IMAGE_KEYS) * 4, 6) * embedding_scale + 3.0
     torch.testing.assert_close(image_tokens, expected_image_tokens)
     torch.testing.assert_close(language_tokens[0, 0], torch.full((6,), 2.0 * embedding_scale + 3.0))
@@ -480,7 +486,9 @@ def test_smolvlm_layerwise_mode_returns_per_text_layer_prefix_states(monkeypatch
 
     embedding_scale = torch.tensor(6.0).sqrt()
     expected_image_values = encoder._preprocess_images(inputs["images"]).mean(dim=(1, 2, 3))
-    expected_image_tokens = expected_image_values.view(1, len(IMAGE_KEYS), 1, 1).expand(1, len(IMAGE_KEYS), 4, 6)
+    expected_image_tokens = expected_image_values.view(1, len(IMAGE_KEYS), 1, 1).expand(
+        1, len(IMAGE_KEYS), 4, 6
+    )
     expected_image_tokens = expected_image_tokens.reshape(1, len(IMAGE_KEYS) * 4, 6) * embedding_scale
     torch.testing.assert_close(prefix_layers[:, 0, :8], expected_image_tokens + 1.0)
     torch.testing.assert_close(prefix_layers[:, 1, :8], expected_image_tokens + 3.0)
@@ -624,3 +632,54 @@ def test_imf_transformer_layerwise_conditioning_supports_existing_backbones(back
 
     assert output.shape == sample.shape
     assert torch.isfinite(output).all()
+
+
+@pytest.mark.parametrize("backbone_type", ["attnres_full", "attnres_diff"])
+def test_imf_transformer_layerwise_attnres_keeps_residual_sources_action_only(backbone_type):
+    torch.manual_seed(0)
+    horizon = 4
+    prefix_tokens = 5
+    head = IMFTransformer1D(
+        input_dim=ACTION_DIM,
+        output_dim=ACTION_DIM,
+        horizon=horizon,
+        n_obs_steps=prefix_tokens,
+        cond_dim=6,
+        n_layer=2,
+        n_head=8,
+        n_emb=32,
+        n_kv_head=8,
+        p_drop_emb=0.0,
+        p_drop_attn=0.0,
+        backbone_type=backbone_type,
+        time_as_cond=True,
+        obs_as_cond=True,
+    )
+    seen_source_lengths = []
+    seen_source_depths = []
+
+    def record_sources(_module, inputs, _output):
+        (sources, *_rest) = inputs
+        seen_source_depths.append(sources.shape[0])
+        seen_source_lengths.append(sources.shape[2])
+
+    handles = [layer.attn_res.register_forward_hook(record_sources) for layer in head.attnres_backbone.layers]
+    try:
+        sample = torch.randn(2, horizon, ACTION_DIM)
+        cond = {
+            "prefix_layers": torch.randn(2, 2, prefix_tokens, 6),
+            "prefix_mask": torch.ones(2, prefix_tokens, dtype=torch.bool),
+            "attention_mode": "cross_attn",
+            "self_attn_every_n_layers": 2,
+        }
+
+        output = head(sample, torch.zeros(2), torch.ones(2), cond=cond)
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    assert output.shape == sample.shape
+    assert seen_source_lengths
+    assert set(seen_source_lengths) == {horizon + 2}
+    assert prefix_tokens + horizon + 2 not in seen_source_lengths
+    assert seen_source_depths == list(range(1, 2 * head.n_layer + 1))

@@ -65,9 +65,10 @@ class IMFAttnResConfig(PreTrainedConfig):
     #   "layerwise"   — expose SmolVLM prefix hidden states per action-head layer, then couple them
     #                   with IMF action tokens layer-by-layer in a SmolVLA-style pattern.
     vlm_conditioning_mode: str = "flat_tokens"
-    # Layer-wise coupling schedule. With the default "cross_attn" and interval 2, even action-head
-    # layers jointly self-attend over prefix+action tokens, while odd layers cross-attend action tokens
-    # to the corresponding SmolVLM prefix state.
+    # Layer-wise coupling schedule. In AttnRes backbones, SmolVLM prefix tokens are only read as
+    # attention context and the AttnRes residual stack remains action-shaped across layers. In
+    # non-AttnRes backbones, "cross_attn" alternates joint prefix+action self-attention every
+    # `vlm_layerwise_self_attn_every_n_layers` with action-to-prefix cross-attention.
     vlm_layerwise_attention_mode: str = "cross_attn"
     vlm_layerwise_self_attn_every_n_layers: int = 2
     vlm_hidden_size: int | None = None
@@ -168,35 +169,23 @@ class IMFAttnResConfig(PreTrainedConfig):
         if not (0.0 <= self.data_proportion <= 1.0):
             raise ValueError(f"data_proportion must be in [0, 1], got {self.data_proportion}.")
         if self.loss_type not in {"pseudo_huber", "mse"}:
-            raise ValueError(
-                "loss_type must be one of {'pseudo_huber', 'mse'}, got "
-                f"{self.loss_type!r}."
-            )
+            raise ValueError(f"loss_type must be one of {{'pseudo_huber', 'mse'}}, got {self.loss_type!r}.")
         if self.pseudo_huber_delta <= 0:
             raise ValueError(f"pseudo_huber_delta must be > 0, got {self.pseudo_huber_delta}.")
         if self.action_latent_mode not in {"dct", "identity"}:
             raise ValueError(
-                "action_latent_mode must be one of {'dct', 'identity'}, got "
-                f"{self.action_latent_mode!r}."
+                f"action_latent_mode must be one of {{'dct', 'identity'}}, got {self.action_latent_mode!r}."
             )
         if self.dct_loss_high_freq_weight < 0:
-            raise ValueError(
-                f"dct_loss_high_freq_weight must be >= 0, got {self.dct_loss_high_freq_weight}."
-            )
+            raise ValueError(f"dct_loss_high_freq_weight must be >= 0, got {self.dct_loss_high_freq_weight}.")
         if self.dct_loss_freq_power <= 0:
             raise ValueError(f"dct_loss_freq_power must be > 0, got {self.dct_loss_freq_power}.")
         if self.semigroup_loss_weight < 0:
-            raise ValueError(
-                f"semigroup_loss_weight must be >= 0, got {self.semigroup_loss_weight}."
-            )
+            raise ValueError(f"semigroup_loss_weight must be >= 0, got {self.semigroup_loss_weight}.")
         if self.semigroup_start_step < 0:
-            raise ValueError(
-                f"semigroup_start_step must be >= 0, got {self.semigroup_start_step}."
-            )
+            raise ValueError(f"semigroup_start_step must be >= 0, got {self.semigroup_start_step}.")
         if self.semigroup_warmup_steps < 0:
-            raise ValueError(
-                f"semigroup_warmup_steps must be >= 0, got {self.semigroup_warmup_steps}."
-            )
+            raise ValueError(f"semigroup_warmup_steps must be >= 0, got {self.semigroup_warmup_steps}.")
         if not (0.0 <= self.semigroup_min_time_delta < 1 / 3):
             raise ValueError(
                 "semigroup_min_time_delta must satisfy 0 <= value < 1/3, got "
@@ -213,7 +202,9 @@ class IMFAttnResConfig(PreTrainedConfig):
                 f"{self.imf_diagnostics_spike_loss_threshold}."
             )
         if not self.use_smolvlm_vl_encoder and not self.vision_backbone.startswith("resnet"):
-            raise ValueError(f"vision_backbone must be a torchvision ResNet name, got {self.vision_backbone}.")
+            raise ValueError(
+                f"vision_backbone must be a torchvision ResNet name, got {self.vision_backbone}."
+            )
         if self.vlm_tokenizer_max_length <= 0:
             raise ValueError(
                 f"vlm_tokenizer_max_length must be a positive integer. Got {self.vlm_tokenizer_max_length}."
@@ -251,9 +242,7 @@ class IMFAttnResConfig(PreTrainedConfig):
                 f"{self.vlm_layerwise_self_attn_every_n_layers}."
             )
         if self.vlm_text_num_layers < 0:
-            raise ValueError(
-                f"vlm_text_num_layers must be non-negative. Got {self.vlm_text_num_layers}."
-            )
+            raise ValueError(f"vlm_text_num_layers must be non-negative. Got {self.vlm_text_num_layers}.")
         if self.vlm_text_encoder_mode == "transformer" and self.vlm_text_num_layers < 1:
             raise ValueError(
                 "vlm_text_num_layers must be >= 1 when vlm_text_encoder_mode='transformer'. "
@@ -274,18 +263,17 @@ class IMFAttnResConfig(PreTrainedConfig):
         if self.n_emb % self.n_head != 0:
             raise ValueError(f"n_emb={self.n_emb} must be divisible by n_head={self.n_head}.")
         if self.n_head % self.n_kv_head != 0:
-            raise ValueError(
-                f"n_head={self.n_head} must be divisible by n_kv_head={self.n_kv_head}."
-            )
+            raise ValueError(f"n_head={self.n_head} must be divisible by n_kv_head={self.n_kv_head}.")
         if self.backbone_type not in {"attnres_full", "attnres_diff", "vanilla", "diff_transformer"}:
             raise ValueError(
                 "backbone_type must be one of "
                 f"{'attnres_full', 'attnres_diff', 'vanilla', 'diff_transformer'}, "
                 f"got {self.backbone_type!r}."
             )
-        if self.backbone_type in {"attnres_full", "attnres_diff", "diff_transformer"} and (
-            self.n_emb // self.n_head
-        ) % 2 != 0:
+        if (
+            self.backbone_type in {"attnres_full", "attnres_diff", "diff_transformer"}
+            and (self.n_emb // self.n_head) % 2 != 0
+        ):
             raise ValueError(
                 f"{self.backbone_type} uses RoPE, which requires an even per-head dimension. "
                 f"Got n_emb={self.n_emb}, n_head={self.n_head}, "
