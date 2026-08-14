@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 
+import json
+
 import pytest
 
 from lerobot.envs import MoyaNewtonEnvConfig, PushtEnv
@@ -44,3 +46,12 @@ def test_run_one_does_not_create_video_directory_when_rendering_is_disabled(tmp_
     )
 
     assert not videos_dir.exists()
+
+
+def test_save_eval_info_creates_output_directory(tmp_path) -> None:
+    info = {"overall": {"pc_success": 100.0}}
+    output_dir = tmp_path / "new" / "nested" / "output"
+
+    lerobot_eval._save_eval_info(info, output_dir)
+
+    assert json.loads((output_dir / "eval_info.json").read_text()) == info

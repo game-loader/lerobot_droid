@@ -102,6 +102,12 @@ def resolve_max_episodes_rendered(env_cfg: EnvConfig, requested: int) -> int:
     return requested if env_cfg.supports_rendering else 0
 
 
+def _save_eval_info(info: dict, output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with open(output_dir / "eval_info.json", "w") as f:
+        json.dump(info, f, indent=2)
+
+
 def rollout(
     env: gym.vector.VectorEnv,
     policy: PreTrainedPolicy,
@@ -594,9 +600,7 @@ def eval_main(cfg: EvalPipelineConfig):
     # Close all vec envs
     close_envs(envs)
 
-    # Save info
-    with open(Path(cfg.output_dir) / "eval_info.json", "w") as f:
-        json.dump(info, f, indent=2)
+    _save_eval_info(info, Path(cfg.output_dir))
 
     logging.info("End of eval")
 
