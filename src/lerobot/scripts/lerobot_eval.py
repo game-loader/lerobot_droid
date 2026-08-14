@@ -75,6 +75,7 @@ from tqdm import trange
 from lerobot.configs import parser
 from lerobot.configs.eval import EvalPipelineConfig
 from lerobot.envs import (
+    EnvConfig,
     check_env_attributes_and_types,
     close_envs,
     make_env,
@@ -93,6 +94,12 @@ from lerobot.utils.utils import (
     init_logging,
     inside_slurm,
 )
+
+
+def resolve_max_episodes_rendered(env_cfg: EnvConfig, requested: int) -> int:
+    if requested < 0:
+        raise ValueError("requested rendered episodes must be non-negative")
+    return requested if env_cfg.supports_rendering else 0
 
 
 def rollout(
@@ -572,7 +579,7 @@ def eval_main(cfg: EvalPipelineConfig):
             preprocessor=preprocessor,
             postprocessor=postprocessor,
             n_episodes=cfg.eval.n_episodes,
-            max_episodes_rendered=10,
+            max_episodes_rendered=resolve_max_episodes_rendered(cfg.env, 10),
             videos_dir=Path(cfg.output_dir) / "videos",
             start_seed=cfg.seed,
             max_parallel_tasks=cfg.env.max_parallel_tasks,
