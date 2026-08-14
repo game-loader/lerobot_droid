@@ -97,6 +97,8 @@
     title: Meta-World
   - local: robotwin
     title: RoboTwin 2.0
+  - local: moya_newton
+    title: Moya Newton Charger Grasp
   - local: robocasa
     title: RoboCasa365
   - local: robocerebra
