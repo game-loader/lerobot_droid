@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import abc
 import importlib
+import logging
+import math
 from dataclasses import dataclass, field, fields
 from typing import Any
 
@@ -232,6 +234,87 @@ class PushtEnv(EnvConfig):
             "visualization_height": self.visualization_height,
             "max_episode_steps": self.episode_length,
         }
+
+
+@EnvConfig.register_subclass("moya_newton")
+@dataclass
+class MoyaNewtonEnvConfig(EnvConfig):
+    """State-only charger-grasp evaluation in Moya's fused Newton simulator."""
+
+    task: str = "randomized_grasp_charger"
+    task_description: str = "grasp and lift randomized charger"
+    fps: int = 60
+    episode_length: int = 930
+    device: str = "cuda:0"
+    headless: bool = True
+    sim_substeps: int = 8
+    preset: str = "randomized_grasp_v1"
+    success_min_final_lift_height: float = 0.015
+    supports_rendering: bool = False
+    features: dict[str, PolicyFeature] = field(
+        default_factory=lambda: {
+            ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(14,)),
+            "agent_pos": PolicyFeature(type=FeatureType.STATE, shape=(39,)),
+        }
+    )
+    features_map: dict[str, str] = field(
+        default_factory=lambda: {
+            ACTION: ACTION,
+            "agent_pos": OBS_STATE,
+        }
+    )
+
+    def __post_init__(self) -> None:
+        if self.episode_length <= 0:
+            raise ValueError("episode_length must be positive")
+        if self.sim_substeps <= 0:
+            raise ValueError("sim_substeps must be positive")
+        if not self.device:
+            raise ValueError("device must be a non-empty string")
+        if not self.headless:
+            raise ValueError("Moya LeRobot evaluation currently supports headless=True only")
+        if self.preset != "randomized_grasp_v1":
+            raise ValueError(
+                f"Unknown Moya preset {self.preset!r}. Available presets: ['randomized_grasp_v1']"
+            )
+        if not math.isfinite(self.success_min_final_lift_height) or self.success_min_final_lift_height < 0.0:
+            raise ValueError("success_min_final_lift_height must be finite and non-negative")
+
+    @property
+    def gym_kwargs(self) -> dict:
+        return {
+            "episode_length": self.episode_length,
+            "device": self.device,
+            "headless": self.headless,
+            "sim_substeps": self.sim_substeps,
+            "preset": self.preset,
+        }
+
+    def create_envs(
+        self,
+        n_envs: int,
+        use_async_envs: bool = False,
+    ) -> dict[str, dict[int, gym.vector.VectorEnv]]:
+        from lerobot.envs.moya_newton import create_moya_newton_env
+
+        if n_envs <= 0:
+            raise ValueError("n_envs must be positive")
+        if use_async_envs:
+            logging.warning(
+                "Moya Newton already uses fused native batching; ignoring use_async_envs=True."
+            )
+        env = create_moya_newton_env(
+            num_envs=n_envs,
+            episode_length=self.episode_length,
+            device=self.device,
+            headless=self.headless,
+            sim_substeps=self.sim_substeps,
+            preset=self.preset,
+            task=self.task,
+            task_description=self.task_description,
+            success_min_final_lift_height=self.success_min_final_lift_height,
+        )
+        return {self.type: {0: env}}
 
 
 @dataclass

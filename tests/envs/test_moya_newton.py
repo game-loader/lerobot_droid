@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+import os
+import sys
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import gymnasium as gym
 import numpy as np
 import pytest
 
-from lerobot.envs.moya_newton import MoyaNewtonVectorEnv
+from lerobot.envs.moya_newton import (
+    EXPECTED_MOYA_CONTRACT_SHA256,
+    MOYA_PRESETS,
+    MoyaNewtonVectorEnv,
+    create_moya_newton_env,
+)
 from lerobot.envs.utils import preprocess_observation
 
 
@@ -124,6 +133,30 @@ class FakeMoyaVectorEnv(gym.vector.VectorEnv):
     def close(self, **kwargs: Any) -> None:
         del kwargs
         self.close_calls += 1
+
+
+class ConfiguredFakeMoyaVectorEnv(FakeMoyaVectorEnv):
+    observed_environment: dict[str, str | None] = {}
+    contract_sha256 = EXPECTED_MOYA_CONTRACT_SHA256
+    last_instance: ConfiguredFakeMoyaVectorEnv | None = None
+
+    def __init__(self, **kwargs: Any) -> None:
+        assert kwargs == {
+            "num_envs": 2,
+            "headless": True,
+            "episode_length": 930,
+            "device": "cpu",
+            "sim_substeps": 8,
+        }
+        type(self).observed_environment = {
+            name: os.environ.get(name) for name in MOYA_PRESETS["randomized_grasp_v1"]
+        }
+        type(self).observed_environment["MOYA_UNRELATED"] = os.environ.get("MOYA_UNRELATED")
+        super().__init__()
+        type(self).last_instance = self
+
+    def environment_contract(self) -> dict[str, Any]:
+        return {"schema_version": 14, "sha256": self.contract_sha256}
 
 
 def make_env(**backend_kwargs: Any) -> tuple[MoyaNewtonVectorEnv, FakeMoyaVectorEnv]:
@@ -268,3 +301,181 @@ def test_reset_rejects_invalid_observation(observation: np.ndarray) -> None:
 
     with pytest.raises((TypeError, ValueError)):
         env.reset(seed=0)
+
+
+def test_factory_applies_and_restores_dataset_preset(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MOYA_IK_ITERS", "999")
+    monkeypatch.setenv("MOYA_UNRELATED", "ambient")
+    model_module = SimpleNamespace(CHARGER_MASS=0.5)
+
+    env = create_moya_newton_env(
+        num_envs=2,
+        episode_length=930,
+        device="cpu",
+        headless=True,
+        sim_substeps=8,
+        preset="randomized_grasp_v1",
+        task="randomized_grasp_charger",
+        task_description="grasp and lift randomized charger",
+        success_min_final_lift_height=0.015,
+        _backend_loader=lambda: (ConfiguredFakeMoyaVectorEnv, model_module),
+    )
+
+    assert isinstance(env, MoyaNewtonVectorEnv)
+    assert ConfiguredFakeMoyaVectorEnv.observed_environment == {
+        **MOYA_PRESETS["randomized_grasp_v1"],
+        "MOYA_UNRELATED": None,
+    }
+    assert os.environ["MOYA_IK_ITERS"] == "999"
+    assert os.environ["MOYA_UNRELATED"] == "ambient"
+    env.close()
+
+
+def test_factory_rejects_unknown_preset() -> None:
+    with pytest.raises(ValueError, match="Unknown Moya preset"):
+        create_moya_newton_env(
+            num_envs=2,
+            episode_length=930,
+            device="cpu",
+            headless=True,
+            sim_substeps=8,
+            preset="unknown",
+            task="task",
+            task_description="task",
+            success_min_final_lift_height=0.015,
+            _backend_loader=lambda: (ConfiguredFakeMoyaVectorEnv, SimpleNamespace(CHARGER_MASS=0.5)),
+        )
+
+
+def test_factory_closes_backend_on_contract_mismatch() -> None:
+    class BadContractEnv(ConfiguredFakeMoyaVectorEnv):
+        contract_sha256 = "wrong"
+
+    with pytest.raises(RuntimeError, match="contract SHA-256"):
+        create_moya_newton_env(
+            num_envs=2,
+            episode_length=930,
+            device="cpu",
+            headless=True,
+            sim_substeps=8,
+            preset="randomized_grasp_v1",
+            task="task",
+            task_description="task",
+            success_min_final_lift_height=0.015,
+            _backend_loader=lambda: (BadContractEnv, SimpleNamespace(CHARGER_MASS=0.5)),
+        )
+
+    assert BadContractEnv.last_instance is not None
+    assert BadContractEnv.last_instance.close_calls == 1
+
+
+def test_factory_rejects_wrong_charger_mass() -> None:
+    with pytest.raises(RuntimeError, match="charger mass"):
+        create_moya_newton_env(
+            num_envs=2,
+            episode_length=930,
+            device="cpu",
+            headless=True,
+            sim_substeps=8,
+            preset="randomized_grasp_v1",
+            task="task",
+            task_description="task",
+            success_min_final_lift_height=0.015,
+            _backend_loader=lambda: (
+                ConfiguredFakeMoyaVectorEnv,
+                SimpleNamespace(CHARGER_MASS=1.0),
+            ),
+        )
+
+
+def test_missing_submodule_error_is_actionable(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="git submodule update --init --recursive"):
+        create_moya_newton_env(
+            num_envs=1,
+            episode_length=1,
+            device="cpu",
+            headless=True,
+            sim_substeps=8,
+            preset="randomized_grasp_v1",
+            task="task",
+            task_description="task",
+            success_min_final_lift_height=0.015,
+            submodule_root=tmp_path,
+        )
+
+
+def test_missing_dependency_error_is_actionable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import lerobot.envs.moya_newton as moya_newton
+
+    (tmp_path / "moya_batched_env.py").touch()
+    (tmp_path / "moya_model.py").touch()
+    (tmp_path / "rewards").mkdir()
+    (tmp_path / "rewards" / "reward_api.py").touch()
+
+    def missing_dependency(name: str) -> Any:
+        raise ModuleNotFoundError("No module named 'newton'", name="newton")
+
+    monkeypatch.setattr(moya_newton.importlib, "import_module", missing_dependency)
+    with pytest.raises(RuntimeError, match="uv sync --extra moya_newton"):
+        create_moya_newton_env(
+            num_envs=1,
+            episode_length=1,
+            device="cpu",
+            headless=True,
+            sim_substeps=8,
+            preset="randomized_grasp_v1",
+            task="task",
+            task_description="task",
+            success_min_final_lift_height=0.015,
+            submodule_root=tmp_path,
+        )
+
+
+def test_environment_config_is_registered_without_importing_newton() -> None:
+    from lerobot.envs import MoyaNewtonEnvConfig, make_env_config
+
+    was_loaded = "newton" in sys.modules
+    cfg = make_env_config("moya_newton")
+
+    assert isinstance(cfg, MoyaNewtonEnvConfig)
+    assert cfg.features["agent_pos"].shape == (39,)
+    assert cfg.features["action"].shape == (14,)
+    assert cfg.features_map["agent_pos"] == "observation.state"
+    assert cfg.features_map["action"] == "action"
+    assert ("newton" in sys.modules) is was_loaded
+
+
+def test_config_create_envs_uses_native_fused_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lerobot.envs import MoyaNewtonEnvConfig
+
+    sentinel = object()
+    calls: list[dict[str, Any]] = []
+
+    def fake_create(**kwargs: Any) -> object:
+        calls.append(kwargs)
+        return sentinel
+
+    monkeypatch.setattr("lerobot.envs.moya_newton.create_moya_newton_env", fake_create)
+    cfg = MoyaNewtonEnvConfig(device="cpu")
+
+    result = cfg.create_envs(n_envs=2, use_async_envs=True)
+
+    assert result == {"moya_newton": {0: sentinel}}
+    assert calls == [
+        {
+            "num_envs": 2,
+            "episode_length": 930,
+            "device": "cpu",
+            "headless": True,
+            "sim_substeps": 8,
+            "preset": "randomized_grasp_v1",
+            "task": "randomized_grasp_charger",
+            "task_description": "grasp and lift randomized charger",
+            "success_min_final_lift_height": 0.015,
+        }
+    ]

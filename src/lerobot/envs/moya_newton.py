@@ -15,12 +15,229 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Sequence
+import importlib
+import os
+import sys
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
 from numbers import Integral
+from pathlib import Path
+from types import MappingProxyType, ModuleType
 from typing import Any
 
 import gymnasium as gym
 import numpy as np
+
+EXPECTED_MOYA_CONTRACT_SHA256 = "a06cb5e5a51c3b53a1972e77d803a15c0916395f9c15ecd7172433cc1e6c293e"
+MOYA_CONTRACT_SCHEMA_VERSION = 14
+_RANDOMIZED_GRASP_V1 = MappingProxyType(
+    {
+        "MOYA_IK_ITERS": "24",
+        "MOYA_RIGHT_IK_ROTATION_WEIGHT": "1.0",
+        "MOYA_CHARGER_GRASP_WRIST_ACTION_SCALE": "0.02",
+        "MOYA_CHARGER_GRASP_ROTATION_ACTION_SCALE": "0.1",
+        "MOYA_HAND_CLOSE_CONTROL_RADIUS": "0.03",
+        "MOYA_CHARGER_X": "0.37",
+        "MOYA_CHARGER_Y": "0.00",
+        "MOYA_CHARGER_Z": "1.095",
+        "MOYA_CHARGER_MASS": "0.5",
+        "MOYA_CHARGER_BOX_SCALE": "2.0",
+        "MOYA_CHARGER_CROSS_HALF": "0.0125",
+        "MOYA_CHARGER_GRASP_REFERENCE_X_OFFSET": "-0.04",
+        "MOYA_CHARGER_GRASP_REFERENCE_Y_OFFSET": "-0.03",
+    }
+)
+MOYA_PRESETS: Mapping[str, Mapping[str, str]] = MappingProxyType(
+    {"randomized_grasp_v1": _RANDOMIZED_GRASP_V1}
+)
+
+_BackendLoader = Callable[[], tuple[Callable[..., gym.vector.VectorEnv], Any]]
+_MISSING = object()
+
+
+def _default_submodule_root() -> Path:
+    return Path(__file__).resolve().parents[3] / "third_party" / "moya_newton_sim"
+
+
+@contextmanager
+def _preset_environment(preset: Mapping[str, str]) -> Iterator[None]:
+    original_moya = {name: value for name, value in os.environ.items() if name.startswith("MOYA_")}
+    original_pyglet = os.environ.get("PYGLET_HEADLESS", _MISSING)
+    for name in tuple(os.environ):
+        if name.startswith("MOYA_"):
+            del os.environ[name]
+    os.environ.update(preset)
+    os.environ["PYGLET_HEADLESS"] = "1"
+    try:
+        yield
+    finally:
+        for name in tuple(os.environ):
+            if name.startswith("MOYA_"):
+                del os.environ[name]
+        os.environ.update(original_moya)
+        if original_pyglet is _MISSING:
+            os.environ.pop("PYGLET_HEADLESS", None)
+        else:
+            os.environ["PYGLET_HEADLESS"] = str(original_pyglet)
+
+
+@contextmanager
+def _prepend_sys_path(path: Path) -> Iterator[None]:
+    value = str(path)
+    sys.path.insert(0, value)
+    try:
+        yield
+    finally:
+        with suppress(ValueError):
+            sys.path.remove(value)
+
+
+def _module_origins(module: ModuleType) -> list[Path]:
+    origins: list[Path] = []
+    module_file = getattr(module, "__file__", None)
+    if module_file:
+        origins.append(Path(module_file).resolve())
+    module_path = getattr(module, "__path__", None)
+    if module_path:
+        origins.extend(Path(path).resolve() for path in module_path)
+    return origins
+
+
+def _assert_moya_module_origins(submodule_root: Path) -> None:
+    for name, module in tuple(sys.modules.items()):
+        if not (
+            name in {"moya_batched_env", "moya_model", "rewards"}
+            or name.startswith("rewards.")
+        ):
+            continue
+        if module is None:
+            continue
+        origins = _module_origins(module)
+        if not origins or any(not origin.is_relative_to(submodule_root) for origin in origins):
+            raise RuntimeError(
+                f"Python module {name!r} is already loaded outside the pinned Moya submodule. "
+                "Start evaluation in a fresh Python process without another Moya checkout on PYTHONPATH."
+            )
+
+
+def _load_moya_backend(
+    submodule_root: Path,
+) -> tuple[Callable[..., gym.vector.VectorEnv], ModuleType]:
+    required_paths = (
+        submodule_root / "moya_batched_env.py",
+        submodule_root / "moya_model.py",
+        submodule_root / "rewards" / "reward_api.py",
+    )
+    missing_paths = [path.name for path in required_paths if not path.is_file()]
+    if missing_paths:
+        raise RuntimeError(
+            f"Moya Newton submodule is missing or uninitialized at {submodule_root}. "
+            f"Missing required files: {missing_paths}. "
+            "Run `git submodule update --init --recursive`."
+        )
+
+    submodule_root = submodule_root.resolve()
+    _assert_moya_module_origins(submodule_root)
+    with _prepend_sys_path(submodule_root):
+        try:
+            env_module = importlib.import_module("moya_batched_env")
+            model_module = importlib.import_module("moya_model")
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "Moya Newton dependencies are not installed. Run "
+                "`UV_PROJECT_ENVIRONMENT=.venv uv sync --extra moya_newton`."
+            ) from exc
+
+    _assert_moya_module_origins(submodule_root)
+    backend_cls = getattr(env_module, "MoyaBatchedChargerGraspEnv", None)
+    if backend_cls is None:
+        raise RuntimeError("Pinned Moya module does not define MoyaBatchedChargerGraspEnv")
+    return backend_cls, model_module
+
+
+def _close_backend(backend: Any) -> None:
+    with suppress(Exception):
+        backend.close()
+
+
+def create_moya_newton_env(
+    *,
+    num_envs: int,
+    episode_length: int,
+    device: str,
+    headless: bool,
+    sim_substeps: int,
+    preset: str,
+    task: str,
+    task_description: str,
+    success_min_final_lift_height: float,
+    submodule_root: Path | None = None,
+    _backend_loader: _BackendLoader | None = None,
+) -> MoyaNewtonVectorEnv:
+    """Construct and validate the pinned Moya backend under a dataset preset."""
+
+    if preset not in MOYA_PRESETS:
+        raise ValueError(f"Unknown Moya preset {preset!r}. Available presets: {sorted(MOYA_PRESETS)}")
+    if num_envs <= 0:
+        raise ValueError("num_envs must be positive")
+    if episode_length <= 0:
+        raise ValueError("episode_length must be positive")
+    if sim_substeps <= 0:
+        raise ValueError("sim_substeps must be positive")
+    if not headless:
+        raise ValueError("Moya LeRobot evaluation currently supports headless=True only")
+
+    preset_values = MOYA_PRESETS[preset]
+    backend: gym.vector.VectorEnv | None = None
+    with _preset_environment(preset_values):
+        loader = _backend_loader or (
+            lambda: _load_moya_backend(submodule_root or _default_submodule_root())
+        )
+        backend_cls, model_module = loader()
+        backend = backend_cls(
+            num_envs=num_envs,
+            headless=headless,
+            episode_length=episode_length,
+            device=device,
+            sim_substeps=sim_substeps,
+        )
+
+    try:
+        if not isinstance(backend, gym.vector.VectorEnv):
+            raise TypeError(
+                "MoyaBatchedChargerGraspEnv must be a gymnasium.vector.VectorEnv, "
+                f"got {type(backend).__name__}"
+            )
+        contract = backend.environment_contract()
+        if not isinstance(contract, dict):
+            raise RuntimeError("Moya environment_contract() must return a dictionary")
+        if contract.get("schema_version") != MOYA_CONTRACT_SCHEMA_VERSION:
+            raise RuntimeError(
+                "Moya environment contract schema mismatch: expected "
+                f"{MOYA_CONTRACT_SCHEMA_VERSION}, got {contract.get('schema_version')!r}"
+            )
+        if contract.get("sha256") != EXPECTED_MOYA_CONTRACT_SHA256:
+            raise RuntimeError(
+                "Moya environment contract SHA-256 mismatch: expected "
+                f"{EXPECTED_MOYA_CONTRACT_SHA256}, got {contract.get('sha256')!r}"
+            )
+        expected_mass = float(preset_values["MOYA_CHARGER_MASS"])
+        actual_mass = float(getattr(model_module, "CHARGER_MASS", float("nan")))
+        if not np.isclose(actual_mass, expected_mass, rtol=0.0, atol=1.0e-9):
+            raise RuntimeError(
+                f"Moya charger mass mismatch: expected {expected_mass}, got {actual_mass}"
+            )
+    except Exception:
+        _close_backend(backend)
+        raise
+
+    return MoyaNewtonVectorEnv(
+        backend,
+        episode_length=episode_length,
+        task=task,
+        task_description=task_description,
+        success_min_final_lift_height=success_min_final_lift_height,
+    )
 
 
 class MoyaNewtonVectorEnv(gym.vector.VectorWrapper):
