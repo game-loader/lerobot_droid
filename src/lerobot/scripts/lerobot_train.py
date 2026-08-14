@@ -62,6 +62,14 @@ from lerobot.utils.utils import (
 from .lerobot_eval import eval_policy_all, resolve_max_episodes_rendered
 
 
+def _log_eval_to_wandb(
+    wandb_logger: WandBLogger, wandb_log_dict: dict[str, Any], video_paths: list[str], step: int
+) -> None:
+    wandb_logger.log_dict(wandb_log_dict, step, mode="eval")
+    if video_paths:
+        wandb_logger.log_video(video_paths[0], step, mode="eval")
+
+
 def update_policy(
     train_metrics: MetricsTracker,
     policy: PreTrainedPolicy,
@@ -561,8 +569,9 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
                 eval_tracker.pc_success = aggregated.pop("pc_success")
                 if wandb_logger:
                     wandb_log_dict = {**eval_tracker.to_dict(), **eval_info}
-                    wandb_logger.log_dict(wandb_log_dict, step, mode="eval")
-                    wandb_logger.log_video(eval_info["overall"]["video_paths"][0], step, mode="eval")
+                    _log_eval_to_wandb(
+                        wandb_logger, wandb_log_dict, eval_info["overall"]["video_paths"], step
+                    )
 
             accelerator.wait_for_everyone()
 

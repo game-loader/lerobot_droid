@@ -675,7 +675,7 @@ def run_one(
     This function is intentionally module-level to make it easy to test.
     """
     task_videos_dir = None
-    if videos_dir is not None:
+    if videos_dir is not None and max_episodes_rendered > 0:
         task_videos_dir = videos_dir / f"{task_group}_{task_id}"
         task_videos_dir.mkdir(parents=True, exist_ok=True)
 
