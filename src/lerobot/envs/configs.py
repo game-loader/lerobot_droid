@@ -301,9 +301,7 @@ class MoyaNewtonEnvConfig(EnvConfig):
         if n_envs <= 0:
             raise ValueError("n_envs must be positive")
         if use_async_envs:
-            logging.warning(
-                "Moya Newton already uses fused native batching; ignoring use_async_envs=True."
-            )
+            logging.warning("Moya Newton already uses fused native batching; ignoring use_async_envs=True.")
         env = create_moya_newton_env(
             num_envs=n_envs,
             episode_length=self.episode_length,

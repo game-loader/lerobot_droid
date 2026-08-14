@@ -42,12 +42,8 @@ class FakeMoyaVectorEnv(gym.vector.VectorEnv):
         self.single_observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf, shape=(39,), dtype=np.float32
         )
-        self.observation_space = gym.vector.utils.batch_space(
-            self.single_observation_space, self.num_envs
-        )
-        self.single_action_space = gym.spaces.Box(
-            low=-1.0, high=1.0, shape=(14,), dtype=np.float32
-        )
+        self.observation_space = gym.vector.utils.batch_space(self.single_observation_space, self.num_envs)
+        self.single_action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(14,), dtype=np.float32)
         self.action_space = gym.vector.utils.batch_space(self.single_action_space, self.num_envs)
         self.final_lift_height = final_lift_height
         self.final_table_contacts = final_table_contacts
@@ -238,9 +234,7 @@ def test_final_info_is_dict_of_arrays_and_15mm_is_success() -> None:
         ({}, True),
     ],
 )
-def test_success_requires_every_dataset_condition(
-    backend_kwargs: dict[str, Any], expected: bool
-) -> None:
+def test_success_requires_every_dataset_condition(backend_kwargs: dict[str, Any], expected: bool) -> None:
     env, _ = make_env(**backend_kwargs)
     env.reset(seed=0)
 

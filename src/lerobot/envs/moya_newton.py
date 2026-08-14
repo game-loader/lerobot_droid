@@ -105,10 +105,7 @@ def _module_origins(module: ModuleType) -> list[Path]:
 
 def _assert_moya_module_origins(submodule_root: Path) -> None:
     for name, module in tuple(sys.modules.items()):
-        if not (
-            name in {"moya_batched_env", "moya_model", "rewards"}
-            or name.startswith("rewards.")
-        ):
+        if not (name in {"moya_batched_env", "moya_model", "rewards"} or name.startswith("rewards.")):
             continue
         if module is None:
             continue
@@ -190,9 +187,7 @@ def create_moya_newton_env(
     preset_values = MOYA_PRESETS[preset]
     backend: gym.vector.VectorEnv | None = None
     with _preset_environment(preset_values):
-        loader = _backend_loader or (
-            lambda: _load_moya_backend(submodule_root or _default_submodule_root())
-        )
+        loader = _backend_loader or (lambda: _load_moya_backend(submodule_root or _default_submodule_root()))
         backend_cls, model_module = loader()
         backend = backend_cls(
             num_envs=num_envs,
@@ -224,9 +219,7 @@ def create_moya_newton_env(
         expected_mass = float(preset_values["MOYA_CHARGER_MASS"])
         actual_mass = float(getattr(model_module, "CHARGER_MASS", float("nan")))
         if not np.isclose(actual_mass, expected_mass, rtol=0.0, atol=1.0e-9):
-            raise RuntimeError(
-                f"Moya charger mass mismatch: expected {expected_mass}, got {actual_mass}"
-            )
+            raise RuntimeError(f"Moya charger mass mismatch: expected {expected_mass}, got {actual_mass}")
     except Exception:
         _close_backend(backend)
         raise
@@ -330,9 +323,7 @@ class MoyaNewtonVectorEnv(gym.vector.VectorWrapper):
         if value.ndim == 0:
             return np.full(size, float(value), dtype=np.float32)
         if value.shape != (size,):
-            raise RuntimeError(
-                f"reward_components[{name!r}] must have shape {(size,)}, got {value.shape}"
-            )
+            raise RuntimeError(f"reward_components[{name!r}] must have shape {(size,)}, got {value.shape}")
         return value
 
     def _update_history(self, info: dict[str, Any]) -> None:
@@ -365,8 +356,7 @@ class MoyaNewtonVectorEnv(gym.vector.VectorWrapper):
         return bool(
             self._true_grasp_ever[index]
             and self._clear_table_ever[index]
-            and float(final_info["charger_lift_height"])
-            >= self.success_min_final_lift_height
+            and float(final_info["charger_lift_height"]) >= self.success_min_final_lift_height
             and int(final_info["charger_table_contacts"]) == 0
             and int(final_info["right_hand_charger_contacts"]) > 0
         )
@@ -411,14 +401,7 @@ class MoyaNewtonVectorEnv(gym.vector.VectorWrapper):
     def _collate_final_info(cls, final_info: np.ndarray, size: int) -> dict[str, Any]:
         if final_info.shape != (size,):
             raise RuntimeError(f"final_info must have shape {(size,)}, got {final_info.shape}")
-        keys = sorted(
-            {
-                key
-                for item in final_info
-                if isinstance(item, dict)
-                for key in item
-            }
-        )
+        keys = sorted({key for item in final_info if isinstance(item, dict) for key in item})
         return {
             key: cls._collate_values(
                 [item.get(key) if isinstance(item, dict) else None for item in final_info]
@@ -448,9 +431,7 @@ class MoyaNewtonVectorEnv(gym.vector.VectorWrapper):
         np.ndarray,
         dict[str, Any],
     ]:
-        observation, reward, terminated, truncated, info = self.env.step(
-            self._validate_action(action)
-        )
+        observation, reward, terminated, truncated, info = self.env.step(self._validate_action(action))
         if not isinstance(info, dict):
             raise RuntimeError(f"Moya info must be a dictionary, got {type(info).__name__}")
 
@@ -466,9 +447,7 @@ class MoyaNewtonVectorEnv(gym.vector.VectorWrapper):
             raw_final_info = info["final_info"]
             if not isinstance(raw_final_info, np.ndarray) or raw_final_info.dtype != object:
                 raise RuntimeError("Moya final_info must be an object ndarray")
-            final_mask = np.asarray(info.get("_final_info", done), dtype=np.bool_).reshape(
-                self.num_envs
-            )
+            final_mask = np.asarray(info.get("_final_info", done), dtype=np.bool_).reshape(self.num_envs)
             self._update_terminal_history(raw_final_info, final_mask)
             for index in np.flatnonzero(final_mask):
                 item = raw_final_info[index]
@@ -478,9 +457,7 @@ class MoyaNewtonVectorEnv(gym.vector.VectorWrapper):
                 item["is_success"] = bool(terminal_success[index])
                 item["true_grasp_ever"] = bool(self._true_grasp_ever[index])
                 item["clear_table_ever"] = bool(self._clear_table_ever[index])
-                item["native_success"] = bool(
-                    item.get("success", item.get("charger_success", False))
-                )
+                item["native_success"] = bool(item.get("success", item.get("charger_success", False)))
             info["final_info"] = self._collate_final_info(raw_final_info, self.num_envs)
             info["_final_info"] = final_mask
 
