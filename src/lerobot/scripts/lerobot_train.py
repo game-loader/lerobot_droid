@@ -542,6 +542,7 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
                         max_episodes_rendered=resolve_max_episodes_rendered(cfg.env, 4),
                         start_seed=cfg.seed,
                         max_parallel_tasks=cfg.env.max_parallel_tasks,
+                        close_envs_after_eval=False,
                     )
                 # overall metrics (suite-agnostic)
                 aggregated = eval_info["overall"]

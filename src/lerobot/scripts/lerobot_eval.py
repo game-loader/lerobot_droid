@@ -717,6 +717,7 @@ def eval_policy_all(
     return_episode_data: bool = False,
     start_seed: int | None = None,
     max_parallel_tasks: int = 1,
+    close_envs_after_eval: bool = True,
 ) -> dict:
     """
     Evaluate a nested `envs` dict: {task_group: {task_id: vec_env}}.
@@ -786,14 +787,15 @@ def eval_policy_all(
                 _accumulate_to(tg, metrics)
                 per_task_infos.append({"task_group": tg, "task_id": tid, "metrics": metrics})
             finally:
-                env.close()
-                # Prefetch next task's workers *after* closing current env to prevent
-                # GPU memory overlap between consecutive tasks.
-                if i + 1 < len(tasks):
-                    next_env = tasks[i + 1][2]
-                    if hasattr(next_env, "_ensure"):
-                        prefetch_thread = threading.Thread(target=next_env._ensure, daemon=True)
-                        prefetch_thread.start()
+                if close_envs_after_eval:
+                    env.close()
+                    # Prefetch next task's workers *after* closing current env to prevent
+                    # GPU memory overlap between consecutive tasks.
+                    if i + 1 < len(tasks):
+                        next_env = tasks[i + 1][2]
+                        if hasattr(next_env, "_ensure"):
+                            prefetch_thread = threading.Thread(target=next_env._ensure, daemon=True)
+                            prefetch_thread.start()
     else:
         with cf.ThreadPoolExecutor(max_workers=max_parallel_tasks) as executor:
             fut2meta = {}
@@ -807,7 +809,8 @@ def eval_policy_all(
                     _accumulate_to(tg, metrics)
                     per_task_infos.append({"task_group": tg, "task_id": tid, "metrics": metrics})
                 finally:
-                    env.close()
+                    if close_envs_after_eval:
+                        env.close()
 
     # compute aggregated metrics helper (robust to lists/scalars)
     def _agg_from_list(xs):
