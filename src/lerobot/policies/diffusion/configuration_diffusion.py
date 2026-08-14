@@ -31,11 +31,9 @@ class DiffusionConfig(PreTrainedConfig):
     Those are: `input_features` and `output_features`.
 
     Notes on the inputs and outputs:
-        - "observation.state" is required as an input key.
-        - Either:
-            - At least one key starting with "observation.image is required as an input.
-              AND/OR
-            - The key "observation.environment_state" is required as input.
+        - ``observation.state`` is the required conditioning input. Image and
+          ``observation.environment_state`` features are optional additional
+          conditioning inputs.
         - If there are multiple keys beginning with "observation.image" they are treated as multiple camera
           views. Right now we only support all images having the same shape.
         - "action" is required as an output key.
@@ -224,8 +222,8 @@ class DiffusionConfig(PreTrainedConfig):
         )
 
     def validate_features(self) -> None:
-        if len(self.image_features) == 0 and self.env_state_feature is None:
-            raise ValueError("You must provide at least one image or the environment state among the inputs.")
+        if self.robot_state_feature is None:
+            raise ValueError("Diffusion Policy requires an 'observation.state' input feature.")
 
         if self.resize_shape is None and self.crop_shape is not None:
             for key, image_ft in self.image_features.items():

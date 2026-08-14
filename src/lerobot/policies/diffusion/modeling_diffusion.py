@@ -298,15 +298,14 @@ class DiffusionModel(nn.Module):
         {
             "observation.state": (B, n_obs_steps, state_dim)
 
-            "observation.images": (B, n_obs_steps, num_cameras, C, H, W)
-                AND/OR
-            "observation.environment_state": (B, n_obs_steps, environment_dim)
+            Optional "observation.images": (B, n_obs_steps, num_cameras, C, H, W)
+            Optional "observation.environment_state": (B, n_obs_steps, environment_dim)
         }
         """
         batch_size, n_obs_steps = batch[OBS_STATE].shape[:2]
         assert n_obs_steps == self.config.n_obs_steps
 
-        # Encode image features and concatenate them all together along with the state vector.
+        # Encode optional image/environment features and concatenate them with the required state vector.
         global_cond = self._prepare_global_conditioning(batch)  # (B, global_cond_dim)
 
         # run sampling
@@ -325,9 +324,8 @@ class DiffusionModel(nn.Module):
         {
             "observation.state": (B, n_obs_steps, state_dim)
 
-            "observation.images": (B, n_obs_steps, num_cameras, C, H, W)
-                AND/OR
-            "observation.environment_state": (B, n_obs_steps, environment_dim)
+            Optional "observation.images": (B, n_obs_steps, num_cameras, C, H, W)
+            Optional "observation.environment_state": (B, n_obs_steps, environment_dim)
 
             "action": (B, horizon, action_dim)
             "action_is_pad": (B, horizon)
@@ -335,13 +333,14 @@ class DiffusionModel(nn.Module):
         """
         # Input validation.
         assert set(batch).issuperset({OBS_STATE, ACTION, "action_is_pad"})
-        assert OBS_IMAGES in batch or OBS_ENV_STATE in batch
+        # ``observation.state`` is the required conditioning signal. Images and
+        # environment state are optional additions to that signal.
         n_obs_steps = batch[OBS_STATE].shape[1]
         horizon = batch[ACTION].shape[1]
         assert horizon == self.config.horizon
         assert n_obs_steps == self.config.n_obs_steps
 
-        # Encode image features and concatenate them all together along with the state vector.
+        # Encode optional image/environment features and concatenate them with the required state vector.
         global_cond = self._prepare_global_conditioning(batch)  # (B, global_cond_dim)
 
         # Forward diffusion.
