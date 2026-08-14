@@ -789,13 +789,14 @@ def eval_policy_all(
             finally:
                 if close_envs_after_eval:
                     env.close()
-                    # Prefetch next task's workers *after* closing current env to prevent
-                    # GPU memory overlap between consecutive tasks.
-                    if i + 1 < len(tasks):
-                        next_env = tasks[i + 1][2]
-                        if hasattr(next_env, "_ensure"):
-                            prefetch_thread = threading.Thread(target=next_env._ensure, daemon=True)
-                            prefetch_thread.start()
+
+            # Prefetch next task's workers *after* closing current env to prevent
+            # GPU memory overlap between consecutive tasks.
+            if close_envs_after_eval and i + 1 < len(tasks):
+                next_env = tasks[i + 1][2]
+                if hasattr(next_env, "_ensure"):
+                    prefetch_thread = threading.Thread(target=next_env._ensure, daemon=True)
+                    prefetch_thread.start()
     else:
         with cf.ThreadPoolExecutor(max_workers=max_parallel_tasks) as executor:
             fut2meta = {}

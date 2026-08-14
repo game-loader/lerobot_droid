@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import dataclasses
 import json
 
 import pytest
@@ -12,10 +13,26 @@ from lerobot.scripts.lerobot_eval import resolve_max_episodes_rendered
 class CloseTrackingEnv:
     def __init__(self) -> None:
         self.close_calls = 0
+        self.ensure_calls = 0
         self.use_calls = 0
 
     def close(self) -> None:
         self.close_calls += 1
+
+    def _ensure(self) -> None:
+        self.ensure_calls += 1
+
+
+class ImmediateThread:
+    def __init__(self, *, target, daemon) -> None:
+        self.target = target
+        self.daemon = daemon
+
+    def start(self) -> None:
+        self.target()
+
+    def join(self) -> None:
+        pass
 
 
 def _stub_run_one(task_group, task_id, _env, **_kwargs):
@@ -46,6 +63,11 @@ def test_headless_moya_environment_disables_rendered_episodes() -> None:
 def test_eval_environment_reuse_is_opt_in() -> None:
     assert PushtEnv().supports_eval_env_reuse is False
     assert MoyaNewtonEnvConfig().supports_eval_env_reuse is True
+
+
+def test_eval_environment_reuse_is_not_a_configurable_dataclass_field() -> None:
+    assert "supports_eval_env_reuse" not in {field.name for field in dataclasses.fields(PushtEnv)}
+    assert "supports_eval_env_reuse" not in {field.name for field in dataclasses.fields(MoyaNewtonEnvConfig)}
 
 
 def test_negative_rendered_episode_count_is_rejected() -> None:
@@ -126,3 +148,32 @@ def test_eval_policy_all_can_reuse_environments(monkeypatch, max_parallel_tasks)
 
     assert [env.use_calls for env in envs.values()] == [2, 2]
     assert [env.close_calls for env in envs.values()] == [0, 0]
+
+
+def test_eval_policy_all_does_not_prefetch_next_environment_after_failure(monkeypatch) -> None:
+    first_env = CloseTrackingEnv()
+    second_env = CloseTrackingEnv()
+
+    def fail_run_one(_task_group, _task_id, env, **_kwargs):
+        env.use_calls += 1
+        raise RuntimeError("task failed")
+
+    monkeypatch.setattr(lerobot_eval, "run_one", fail_run_one)
+    monkeypatch.setattr(lerobot_eval.threading, "Thread", ImmediateThread)
+
+    with pytest.raises(RuntimeError, match="task failed"):
+        lerobot_eval.eval_policy_all(
+            envs={"task_group": {0: first_env, 1: second_env}},
+            policy=None,
+            env_preprocessor=None,
+            env_postprocessor=None,
+            preprocessor=None,
+            postprocessor=None,
+            n_episodes=1,
+            max_parallel_tasks=1,
+        )
+
+    assert first_env.use_calls == 1
+    assert first_env.close_calls == 1
+    assert second_env.use_calls == 0
+    assert second_env.ensure_calls == 0
