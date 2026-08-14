@@ -103,12 +103,17 @@ def _module_origins(module: ModuleType) -> list[Path]:
     return origins
 
 
-def _assert_moya_module_origins(submodule_root: Path) -> None:
+def _validate_moya_modules(submodule_root: Path, *, require_unloaded: bool) -> None:
     for name, module in tuple(sys.modules.items()):
         if not (name in {"moya_batched_env", "moya_model", "rewards"} or name.startswith("rewards.")):
             continue
         if module is None:
             continue
+        if require_unloaded:
+            raise RuntimeError(
+                f"Python module {name!r} was already loaded before the current Moya dataset preset import. "
+                "Start evaluation in a fresh Python process without importing Moya modules first."
+            )
         origins = _module_origins(module)
         if not origins or any(not origin.is_relative_to(submodule_root) for origin in origins):
             raise RuntimeError(
@@ -134,7 +139,7 @@ def _load_moya_backend(
         )
 
     submodule_root = submodule_root.resolve()
-    _assert_moya_module_origins(submodule_root)
+    _validate_moya_modules(submodule_root, require_unloaded=True)
     with _prepend_sys_path(submodule_root):
         try:
             env_module = importlib.import_module("moya_batched_env")
@@ -145,7 +150,7 @@ def _load_moya_backend(
                 "`UV_PROJECT_ENVIRONMENT=.venv uv sync --extra moya_newton`."
             ) from exc
 
-    _assert_moya_module_origins(submodule_root)
+    _validate_moya_modules(submodule_root, require_unloaded=False)
     backend_cls = getattr(env_module, "MoyaBatchedChargerGraspEnv", None)
     if backend_cls is None:
         raise RuntimeError("Pinned Moya module does not define MoyaBatchedChargerGraspEnv")

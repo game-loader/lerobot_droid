@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import gymnasium as gym
@@ -396,6 +396,41 @@ def test_missing_submodule_error_is_actionable(tmp_path: Path) -> None:
             success_min_final_lift_height=0.015,
             submodule_root=tmp_path,
         )
+
+
+def test_backend_loader_rejects_preloaded_same_origin_moya_module(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import lerobot.envs.moya_newton as moya_newton
+
+    for name in tuple(sys.modules):
+        if name in {"moya_batched_env", "moya_model", "rewards"} or name.startswith("rewards."):
+            monkeypatch.delitem(sys.modules, name)
+
+    (tmp_path / "moya_batched_env.py").touch()
+    (tmp_path / "moya_model.py").touch()
+    (tmp_path / "rewards").mkdir()
+    (tmp_path / "rewards" / "reward_api.py").touch()
+
+    preloaded_model = ModuleType("moya_model")
+    preloaded_model.__file__ = str(tmp_path / "moya_model.py")
+    monkeypatch.setitem(sys.modules, "moya_model", preloaded_model)
+
+    env_module = ModuleType("moya_batched_env")
+    env_module.MoyaBatchedChargerGraspEnv = object
+    imported: list[str] = []
+
+    def import_module(name: str) -> ModuleType:
+        imported.append(name)
+        return env_module if name == "moya_batched_env" else preloaded_model
+
+    monkeypatch.setattr(moya_newton.importlib, "import_module", import_module)
+
+    with pytest.raises(RuntimeError, match="fresh Python process"):
+        moya_newton._load_moya_backend(tmp_path)
+
+    assert imported == []
 
 
 def test_missing_dependency_error_is_actionable(
