@@ -12,18 +12,24 @@ from lerobot.scripts.lerobot_eval import resolve_max_episodes_rendered
 class CloseTrackingEnv:
     def __init__(self) -> None:
         self.close_calls = 0
+        self.use_calls = 0
 
     def close(self) -> None:
         self.close_calls += 1
 
 
 def _stub_run_one(task_group, task_id, _env, **_kwargs):
-    return task_group, task_id, {
-        "sum_rewards": [1.0],
-        "max_rewards": [1.0],
-        "successes": [True],
-        "video_paths": [],
-    }
+    _env.use_calls += 1
+    return (
+        task_group,
+        task_id,
+        {
+            "sum_rewards": [1.0],
+            "max_rewards": [1.0],
+            "successes": [True],
+            "video_paths": [],
+        },
+    )
 
 
 def test_renderable_environment_preserves_requested_episode_count() -> None:
@@ -35,6 +41,11 @@ def test_headless_moya_environment_disables_rendered_episodes() -> None:
 
     assert resolve_max_episodes_rendered(cfg, 10) == 0
     assert resolve_max_episodes_rendered(cfg, 0) == 0
+
+
+def test_eval_environment_reuse_is_opt_in() -> None:
+    assert PushtEnv().supports_eval_env_reuse is False
+    assert MoyaNewtonEnvConfig().supports_eval_env_reuse is True
 
 
 def test_negative_rendered_episode_count_is_rejected() -> None:
@@ -76,11 +87,11 @@ def test_save_eval_info_creates_output_directory(tmp_path) -> None:
 
 @pytest.mark.parametrize("max_parallel_tasks", [1, 2])
 def test_eval_policy_all_closes_environments_by_default(monkeypatch, max_parallel_tasks) -> None:
-    env = CloseTrackingEnv()
+    envs = {task_id: CloseTrackingEnv() for task_id in range(2)}
     monkeypatch.setattr(lerobot_eval, "run_one", _stub_run_one)
 
     lerobot_eval.eval_policy_all(
-        envs={"task_group": {0: env}},
+        envs={"task_group": envs},
         policy=None,
         env_preprocessor=None,
         env_postprocessor=None,
@@ -90,15 +101,16 @@ def test_eval_policy_all_closes_environments_by_default(monkeypatch, max_paralle
         max_parallel_tasks=max_parallel_tasks,
     )
 
-    assert env.close_calls == 1
+    assert [env.use_calls for env in envs.values()] == [1, 1]
+    assert [env.close_calls for env in envs.values()] == [1, 1]
 
 
 @pytest.mark.parametrize("max_parallel_tasks", [1, 2])
 def test_eval_policy_all_can_reuse_environments(monkeypatch, max_parallel_tasks) -> None:
-    env = CloseTrackingEnv()
+    envs = {task_id: CloseTrackingEnv() for task_id in range(2)}
     monkeypatch.setattr(lerobot_eval, "run_one", _stub_run_one)
     kwargs = {
-        "envs": {"task_group": {0: env}},
+        "envs": {"task_group": envs},
         "policy": None,
         "env_preprocessor": None,
         "env_postprocessor": None,
@@ -112,4 +124,5 @@ def test_eval_policy_all_can_reuse_environments(monkeypatch, max_parallel_tasks)
     lerobot_eval.eval_policy_all(**kwargs)
     lerobot_eval.eval_policy_all(**kwargs)
 
-    assert env.close_calls == 0
+    assert [env.use_calls for env in envs.values()] == [2, 2]
+    assert [env.close_calls for env in envs.values()] == [0, 0]

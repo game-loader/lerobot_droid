@@ -63,6 +63,7 @@ class EnvConfig(draccus.ChoiceRegistry, abc.ABC):
     max_parallel_tasks: int = 1
     disable_env_checker: bool = True
     supports_rendering: bool = True
+    supports_eval_env_reuse: bool = False
 
     @property
     def type(self) -> str:
@@ -252,6 +253,7 @@ class MoyaNewtonEnvConfig(EnvConfig):
     preset: str = "randomized_grasp_v1"
     success_min_final_lift_height: float = 0.015
     supports_rendering: bool = False
+    supports_eval_env_reuse: bool = True
     features: dict[str, PolicyFeature] = field(
         default_factory=lambda: {
             ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(14,)),

@@ -21,7 +21,8 @@ Requires: pip install 'lerobot[training]'  (includes dataset + accelerate + wand
 import dataclasses
 import logging
 import time
-from contextlib import nullcontext
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from pprint import pformat
 from typing import TYPE_CHECKING, Any
 
@@ -68,6 +69,15 @@ def _log_eval_to_wandb(
     wandb_logger.log_dict(wandb_log_dict, step, mode="eval")
     if video_paths:
         wandb_logger.log_video(video_paths[0], step, mode="eval")
+
+
+@contextmanager
+def _close_eval_envs_after_training(eval_env: Any) -> Iterator[None]:
+    try:
+        yield
+    finally:
+        if eval_env:
+            close_envs(eval_env)
 
 
 def update_policy(
@@ -462,125 +472,123 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
             f"Start offline training on a fixed dataset, with effective batch size: {effective_batch_size}"
         )
 
-    for _ in range(step, cfg.steps):
-        start_time = time.perf_counter()
-        batch = next(dl_iter)
-        for cam_key in dataset.meta.camera_keys:
-            if cam_key in batch and batch[cam_key].dtype == torch.uint8:
-                batch[cam_key] = batch[cam_key].to(dtype=torch.float32) / 255.0
-        batch = preprocessor(batch)
-        train_tracker.dataloading_s = time.perf_counter() - start_time
+    with _close_eval_envs_after_training(eval_env):
+        for _ in range(step, cfg.steps):
+            start_time = time.perf_counter()
+            batch = next(dl_iter)
+            for cam_key in dataset.meta.camera_keys:
+                if cam_key in batch and batch[cam_key].dtype == torch.uint8:
+                    batch[cam_key] = batch[cam_key].to(dtype=torch.float32) / 255.0
+            batch = preprocessor(batch)
+            train_tracker.dataloading_s = time.perf_counter() - start_time
 
-        train_tracker, output_dict = update_policy(
-            train_tracker,
-            policy,
-            batch,
-            optimizer,
-            cfg.optimizer.grad_clip_norm,
-            accelerator=accelerator,
-            lr_scheduler=lr_scheduler,
-            sample_weighter=sample_weighter,
-        )
+            train_tracker, output_dict = update_policy(
+                train_tracker,
+                policy,
+                batch,
+                optimizer,
+                cfg.optimizer.grad_clip_norm,
+                accelerator=accelerator,
+                lr_scheduler=lr_scheduler,
+                sample_weighter=sample_weighter,
+            )
 
-        # Note: eval and checkpoint happens *after* the `step`th training update has completed, so we
-        # increment `step` here.
-        step += 1
-        if is_main_process:
-            progbar.update(1)
-        train_tracker.step()
-        is_log_step = cfg.log_freq > 0 and step % cfg.log_freq == 0 and is_main_process
-        is_saving_step = step % cfg.save_freq == 0 or step == cfg.steps
-        is_eval_step = cfg.eval_freq > 0 and step % cfg.eval_freq == 0
-
-        if is_log_step:
-            logging.info(train_tracker)
-            if wandb_logger:
-                wandb_log_dict = train_tracker.to_dict()
-                if output_dict:
-                    wandb_log_dict.update(output_dict)
-                # Log sample weighting statistics if enabled
-                if sample_weighter is not None:
-                    weighter_stats = sample_weighter.get_stats()
-                    wandb_log_dict.update({f"sample_weighting/{k}": v for k, v in weighter_stats.items()})
-                wandb_logger.log_dict(wandb_log_dict, step)
-            train_tracker.reset_averages()
-
-        if cfg.save_checkpoint and is_saving_step:
+            # Note: eval and checkpoint happens *after* the `step`th training update has completed, so we
+            # increment `step` here.
+            step += 1
             if is_main_process:
-                logging.info(f"Checkpoint policy after step {step}")
-                checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
-                save_checkpoint(
-                    checkpoint_dir=checkpoint_dir,
-                    step=step,
-                    cfg=cfg,
-                    policy=accelerator.unwrap_model(policy),
-                    optimizer=optimizer,
-                    scheduler=lr_scheduler,
-                    preprocessor=preprocessor,
-                    postprocessor=postprocessor,
-                )
-                update_last_checkpoint(checkpoint_dir)
+                progbar.update(1)
+            train_tracker.step()
+            is_log_step = cfg.log_freq > 0 and step % cfg.log_freq == 0 and is_main_process
+            is_saving_step = step % cfg.save_freq == 0 or step == cfg.steps
+            is_eval_step = cfg.eval_freq > 0 and step % cfg.eval_freq == 0
+
+            if is_log_step:
+                logging.info(train_tracker)
                 if wandb_logger:
-                    wandb_logger.log_policy(checkpoint_dir)
+                    wandb_log_dict = train_tracker.to_dict()
+                    if output_dict:
+                        wandb_log_dict.update(output_dict)
+                    # Log sample weighting statistics if enabled
+                    if sample_weighter is not None:
+                        weighter_stats = sample_weighter.get_stats()
+                        wandb_log_dict.update({f"sample_weighting/{k}": v for k, v in weighter_stats.items()})
+                    wandb_logger.log_dict(wandb_log_dict, step)
+                train_tracker.reset_averages()
 
-            accelerator.wait_for_everyone()
-
-        if cfg.env and is_eval_step:
-            if is_main_process:
-                step_id = get_step_identifier(step, cfg.steps)
-                logging.info(f"Eval policy at step {step}")
-                with torch.no_grad(), accelerator.autocast():
-                    eval_info = eval_policy_all(
-                        envs=eval_env,  # dict[suite][task_id] -> vec_env
+            if cfg.save_checkpoint and is_saving_step:
+                if is_main_process:
+                    logging.info(f"Checkpoint policy after step {step}")
+                    checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
+                    save_checkpoint(
+                        checkpoint_dir=checkpoint_dir,
+                        step=step,
+                        cfg=cfg,
                         policy=accelerator.unwrap_model(policy),
-                        env_preprocessor=env_preprocessor,
-                        env_postprocessor=env_postprocessor,
+                        optimizer=optimizer,
+                        scheduler=lr_scheduler,
                         preprocessor=preprocessor,
                         postprocessor=postprocessor,
-                        n_episodes=cfg.eval.n_episodes,
-                        videos_dir=cfg.output_dir / "eval" / f"videos_step_{step_id}",
-                        max_episodes_rendered=resolve_max_episodes_rendered(cfg.env, 4),
-                        start_seed=cfg.seed,
-                        max_parallel_tasks=cfg.env.max_parallel_tasks,
-                        close_envs_after_eval=False,
                     )
-                # overall metrics (suite-agnostic)
-                aggregated = eval_info["overall"]
+                    update_last_checkpoint(checkpoint_dir)
+                    if wandb_logger:
+                        wandb_logger.log_policy(checkpoint_dir)
 
-                # optional: per-suite logging
-                for suite, suite_info in eval_info.items():
-                    logging.info("Suite %s aggregated: %s", suite, suite_info)
+                accelerator.wait_for_everyone()
 
-                # meters/tracker
-                eval_metrics = {
-                    "avg_sum_reward": AverageMeter("∑rwrd", ":.3f"),
-                    "pc_success": AverageMeter("success", ":.1f"),
-                    "eval_s": AverageMeter("eval_s", ":.3f"),
-                }
-                eval_tracker = MetricsTracker(
-                    cfg.batch_size,
-                    dataset.num_frames,
-                    dataset.num_episodes,
-                    eval_metrics,
-                    initial_step=step,
-                    accelerator=accelerator,
-                )
-                eval_tracker.eval_s = aggregated.pop("eval_s")
-                eval_tracker.avg_sum_reward = aggregated.pop("avg_sum_reward")
-                eval_tracker.pc_success = aggregated.pop("pc_success")
-                if wandb_logger:
-                    wandb_log_dict = {**eval_tracker.to_dict(), **eval_info}
-                    _log_eval_to_wandb(
-                        wandb_logger, wandb_log_dict, eval_info["overall"]["video_paths"], step
+            if cfg.env and is_eval_step:
+                if is_main_process:
+                    step_id = get_step_identifier(step, cfg.steps)
+                    logging.info(f"Eval policy at step {step}")
+                    with torch.no_grad(), accelerator.autocast():
+                        eval_info = eval_policy_all(
+                            envs=eval_env,  # dict[suite][task_id] -> vec_env
+                            policy=accelerator.unwrap_model(policy),
+                            env_preprocessor=env_preprocessor,
+                            env_postprocessor=env_postprocessor,
+                            preprocessor=preprocessor,
+                            postprocessor=postprocessor,
+                            n_episodes=cfg.eval.n_episodes,
+                            videos_dir=cfg.output_dir / "eval" / f"videos_step_{step_id}",
+                            max_episodes_rendered=resolve_max_episodes_rendered(cfg.env, 4),
+                            start_seed=cfg.seed,
+                            max_parallel_tasks=cfg.env.max_parallel_tasks,
+                            close_envs_after_eval=not cfg.env.supports_eval_env_reuse,
+                        )
+                    # overall metrics (suite-agnostic)
+                    aggregated = eval_info["overall"]
+
+                    # optional: per-suite logging
+                    for suite, suite_info in eval_info.items():
+                        logging.info("Suite %s aggregated: %s", suite, suite_info)
+
+                    # meters/tracker
+                    eval_metrics = {
+                        "avg_sum_reward": AverageMeter("∑rwrd", ":.3f"),
+                        "pc_success": AverageMeter("success", ":.1f"),
+                        "eval_s": AverageMeter("eval_s", ":.3f"),
+                    }
+                    eval_tracker = MetricsTracker(
+                        cfg.batch_size,
+                        dataset.num_frames,
+                        dataset.num_episodes,
+                        eval_metrics,
+                        initial_step=step,
+                        accelerator=accelerator,
                     )
+                    eval_tracker.eval_s = aggregated.pop("eval_s")
+                    eval_tracker.avg_sum_reward = aggregated.pop("avg_sum_reward")
+                    eval_tracker.pc_success = aggregated.pop("pc_success")
+                    if wandb_logger:
+                        wandb_log_dict = {**eval_tracker.to_dict(), **eval_info}
+                        _log_eval_to_wandb(
+                            wandb_logger, wandb_log_dict, eval_info["overall"]["video_paths"], step
+                        )
 
-            accelerator.wait_for_everyone()
+                accelerator.wait_for_everyone()
 
     if is_main_process:
         progbar.close()
-
-    if eval_env:
-        close_envs(eval_env)
 
     if is_main_process:
         logging.info("End of training")

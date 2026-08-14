@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from lerobot.scripts import lerobot_train
 
 
@@ -24,3 +26,22 @@ def test_log_eval_to_wandb_logs_first_video_when_available() -> None:
 
     wandb_logger.log_dict.assert_called_once_with(wandb_log_dict, 20, mode="eval")
     wandb_logger.log_video.assert_called_once_with("first.mp4", 20, mode="eval")
+
+
+@pytest.mark.parametrize("raise_error", [False, True])
+def test_training_eval_env_scope_closes_once_on_exit(monkeypatch, raise_error) -> None:
+    eval_env = {"task_group": {0: object()}}
+    close_envs = MagicMock()
+    monkeypatch.setattr(lerobot_train, "close_envs", close_envs)
+
+    if raise_error:
+        with (
+            pytest.raises(RuntimeError, match="training failed"),
+            lerobot_train._close_eval_envs_after_training(eval_env),
+        ):
+            raise RuntimeError("training failed")
+    else:
+        with lerobot_train._close_eval_envs_after_training(eval_env):
+            pass
+
+    close_envs.assert_called_once_with(eval_env)
