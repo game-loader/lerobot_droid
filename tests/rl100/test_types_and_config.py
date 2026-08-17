@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import json
+from pathlib import Path
 
 import pytest
 import torch
@@ -56,8 +57,11 @@ def test_observation_batch_preserves_state_and_optional_images() -> None:
 @pytest.mark.parametrize(
     "features, error",
     [
-        ({}, "nonempty"),
-        ({"observation.state": torch.full((2, 2, 39), torch.nan)}, "finite"),
+        ({}, r"features.*\{\}"),
+        (
+            {"observation.state": torch.full((2, 2, 39), torch.nan)},
+            r"observation\.state.*nan",
+        ),
         (
             {
                 "observation.state": torch.zeros(2, 2, 39),
@@ -151,7 +155,7 @@ def test_trace_config_rejects_non_positive_sigma_min() -> None:
         TraceConfig(sigma_min=0.0)
 
 
-def test_rl_config_json_round_trip_is_deterministic() -> None:
+def test_rl_config_json_round_trip_is_deterministic(tmp_path: Path) -> None:
     config = RLConfig(
         trace=TraceConfig(num_inference_steps=8, eta=0.75, sigma_min=0.01, sigma_max=0.2),
         state_key="observation.state",
@@ -164,9 +168,15 @@ def test_rl_config_json_round_trip_is_deterministic() -> None:
 
     payload = config.to_json()
     restored = RLConfig.from_json(payload)
+    path = tmp_path / "rl_config.json"
+    config.save_json(path)
+    loaded = RLConfig.load_json(path)
 
     assert restored == config
+    assert loaded == config
     assert restored.to_json() == payload
+    assert loaded.to_json() == payload
+    assert path.read_text(encoding="utf-8") == f"{payload}\n"
     assert json.loads(payload)["trace"]["num_inference_steps"] == 8
 
 

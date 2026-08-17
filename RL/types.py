@@ -32,15 +32,26 @@ _INTEGER_DTYPES = {
 _INDEX_DTYPES = {torch.int32, torch.int64}
 
 
+def _nonfinite_value_summary(value: Tensor) -> str:
+    finite = torch.isfinite(value)
+    invalid_values = value.detach().flatten()[~finite.flatten()]
+    preview = invalid_values[:3].cpu().tolist()
+    return f"{preview!r} ({invalid_values.numel()} non-finite value(s))"
+
+
 def _validate_tensor(name: str, value: Tensor, *, ndim: int | None = None) -> None:
     if not isinstance(value, Tensor):
-        raise ValueError(f"{name} must be a torch.Tensor, got {type(value).__name__}")
+        raise ValueError(
+            f"{name} must be a torch.Tensor, got {type(value).__name__}: actual={value!r}"
+        )
     if ndim is not None and value.ndim != ndim:
         raise ValueError(f"{name} must have {ndim} dimensions, got shape {tuple(value.shape)}")
     if value.numel() == 0:
         raise ValueError(f"{name} must be nonempty, got shape {tuple(value.shape)}")
     if not torch.isfinite(value).all().item():
-        raise ValueError(f"{name} must contain only finite values")
+        raise ValueError(
+            f"{name} must contain only finite values: actual={_nonfinite_value_summary(value)}"
+        )
 
 
 def _validate_floating_tensor(name: str, value: Tensor, *, ndim: int) -> None:
@@ -57,9 +68,12 @@ class ObservationBatch:
 
     def __post_init__(self) -> None:
         if not isinstance(self.features, dict):
-            raise ValueError(f"features must be a dict, got {type(self.features).__name__}")
+            raise ValueError(
+                f"features must be a dict, got {type(self.features).__name__}: "
+                f"actual={self.features!r}"
+            )
         if not self.features:
-            raise ValueError("features must be nonempty")
+            raise ValueError(f"features must be nonempty: actual={self.features!r}")
 
         batch_sizes: set[int] = set()
         for key, tensor in self.features.items():
@@ -71,10 +85,10 @@ class ObservationBatch:
             batch_sizes.add(tensor.shape[0])
 
         if len(batch_sizes) != 1:
-            raise ValueError(f"observation batch sizes disagree: {sorted(batch_sizes)}")
+            raise ValueError(f"features batch sizes disagree: actual={sorted(batch_sizes)}")
         batch_size = next(iter(batch_sizes))
         if batch_size == 0:
-            raise ValueError("observation batch size must be nonzero")
+            raise ValueError("features batch size must be nonzero: actual=0")
 
     def batch_size(self) -> int:
         return next(iter(self.features.values())).shape[0]
@@ -107,11 +121,13 @@ class DecisionBatch:
     def _validate_intrinsic(self) -> None:
         if not isinstance(self.observation, ObservationBatch):
             raise ValueError(
-                f"observation must be an ObservationBatch, got {type(self.observation).__name__}"
+                "observation must be an ObservationBatch, "
+                f"got {type(self.observation).__name__}: actual={self.observation!r}"
             )
         if not isinstance(self.next_observation, ObservationBatch):
             raise ValueError(
-                f"next_observation must be an ObservationBatch, got {type(self.next_observation).__name__}"
+                "next_observation must be an ObservationBatch, "
+                f"got {type(self.next_observation).__name__}: actual={self.next_observation!r}"
             )
 
         _validate_floating_tensor("action", self.action, ndim=3)
@@ -172,7 +188,7 @@ class DecisionBatch:
             try:
                 state = observation.features["observation.state"]
             except KeyError as exc:
-                raise ValueError(f"{observation_name}.state is required") from exc
+                raise ValueError(f"{observation_name}.state is required: actual=<missing>") from exc
             if state.shape != expected_state_shape:
                 raise ValueError(
                     f"{observation_name}.state must have shape {expected_state_shape}, "
