@@ -188,6 +188,21 @@ def _polyak_update(target: nn.Module, source: nn.Module, tau: float) -> None:
             target_buffer.copy_(source_buffer)
 
 
+def _require_finite_loss(name: str, loss: Tensor) -> None:
+    if not isinstance(loss, Tensor) or loss.ndim != 0 or not loss.is_floating_point():
+        raise ValueError(f"{name} must be a scalar floating-point torch.Tensor")
+    if not torch.isfinite(loss).item():
+        raise ValueError(f"{name} must be finite before backward and optimizer step")
+
+
+def _clip_finite_gradients(
+    name: str, parameters: Sequence[nn.Parameter], max_norm: float
+) -> None:
+    total_norm = torch.nn.utils.clip_grad_norm_(parameters, max_norm)
+    if not torch.isfinite(total_norm).item():
+        raise ValueError(f"{name} gradients must be finite before optimizer step")
+
+
 class IQL(nn.Module):
     """Double-Q IQL over prepared normalized decision batches."""
 
@@ -284,10 +299,6 @@ class IQL(nn.Module):
         value_prediction = self.value(target_features.detach())
         value_residual = q_bar - value_prediction
         value_loss = expectile_loss(value_residual, expectile=self.expectile)
-        self.v_optimizer.zero_grad(set_to_none=True)
-        value_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.value.parameters(), self.gradient_clip_norm)
-        self.v_optimizer.step()
 
         with torch.no_grad():
             next_features = self.target_encoder(next_observation)
@@ -305,14 +316,30 @@ class IQL(nn.Module):
         q_loss = functional.mse_loss(q1_prediction, td_target) + functional.mse_loss(
             q2_prediction, td_target
         )
-        self.q_optimizer.zero_grad(set_to_none=True)
-        q_loss.backward()
         q_parameters = [
             *self.feature_encoder.parameters(),
             *self.q1.parameters(),
             *self.q2.parameters(),
         ]
-        torch.nn.utils.clip_grad_norm_(q_parameters, self.gradient_clip_norm)
+        value_parameters = list(self.value.parameters())
+        _require_finite_loss("value_loss", value_loss)
+        _require_finite_loss("q_loss", q_loss)
+
+        self.v_optimizer.zero_grad(set_to_none=True)
+        self.q_optimizer.zero_grad(set_to_none=True)
+        try:
+            value_loss.backward()
+            q_loss.backward()
+            _clip_finite_gradients(
+                "value_loss", value_parameters, self.gradient_clip_norm
+            )
+            _clip_finite_gradients("q_loss", q_parameters, self.gradient_clip_norm)
+        except Exception:
+            self.v_optimizer.zero_grad(set_to_none=True)
+            self.q_optimizer.zero_grad(set_to_none=True)
+            raise
+
+        self.v_optimizer.step()
         self.q_optimizer.step()
 
         _polyak_update(self.target_encoder, self.feature_encoder, self.tau)

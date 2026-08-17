@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import math
 
 import pytest
@@ -73,6 +74,25 @@ def _make_dynamics() -> StateDynamicsEnsemble:
     )
 
 
+def _assert_nested_exact(expected: object, actual: object) -> None:
+    assert type(actual) is type(expected)
+    if isinstance(expected, torch.Tensor):
+        assert isinstance(actual, torch.Tensor)
+        assert torch.equal(actual, expected)
+    elif isinstance(expected, dict):
+        assert isinstance(actual, dict)
+        assert actual.keys() == expected.keys()
+        for key in expected:
+            _assert_nested_exact(expected[key], actual[key])
+    elif isinstance(expected, (list, tuple)):
+        assert isinstance(actual, (list, tuple))
+        assert len(actual) == len(expected)
+        for expected_item, actual_item in zip(expected, actual, strict=True):
+            _assert_nested_exact(expected_item, actual_item)
+    else:
+        assert actual == expected
+
+
 def test_dynamics_predicts_next_state_history_reward_and_done(
     decision_batch: DecisionBatch,
 ) -> None:
@@ -120,6 +140,78 @@ def test_dynamics_update_is_finite_and_keeps_encoder_frozen(
         before, dynamics.feature_encoder.parameters(), strict=True
     ):
         torch.testing.assert_close(previous, current)
+
+
+def test_dynamics_update_is_transactional_when_later_member_loss_overflows(
+    decision_batch: DecisionBatch,
+) -> None:
+    dynamics = _make_dynamics()
+    dynamics.update(decision_batch)
+    final_layer = dynamics.members[-1].network[-1]
+    assert isinstance(final_layer, torch.nn.Linear)
+    state_values = dynamics.n_obs_steps * dynamics.state_dim
+    finite_overflow_bias = 2.0 * math.sqrt(torch.finfo(final_layer.bias.dtype).max)
+    with torch.no_grad():
+        final_layer.bias[:state_values].fill_(finite_overflow_bias)
+    assert torch.isfinite(final_layer.bias).all()
+    prediction = dynamics.predict(
+        decision_batch.observation,
+        decision_batch.action,
+        decision_batch.action_valid,
+    )
+    assert torch.isfinite(prediction.state_delta).all()
+
+    parameters_before = {
+        name: parameter.detach().clone()
+        for name, parameter in dynamics.members.named_parameters()
+    }
+    optimizers_before = [
+        copy.deepcopy(optimizer.state_dict()) for optimizer in dynamics.optimizers
+    ]
+
+    with pytest.raises(ValueError, match=r"member 2.*state_loss"):
+        dynamics.update(decision_batch)
+
+    for name, parameter in dynamics.members.named_parameters():
+        assert torch.equal(parameter, parameters_before[name])
+    for optimizer_before, optimizer in zip(
+        optimizers_before, dynamics.optimizers, strict=True
+    ):
+        _assert_nested_exact(optimizer_before, optimizer.state_dict())
+
+
+def test_dynamics_update_is_transactional_when_later_member_gradient_overflows(
+    decision_batch: DecisionBatch,
+) -> None:
+    dynamics = _make_dynamics()
+    dynamics.update(decision_batch)
+    assert math.isfinite(dynamics.validation_loss(decision_batch))
+    final_layer = dynamics.members[-1].network[-1]
+    assert isinstance(final_layer, torch.nn.Linear)
+    hook = final_layer.weight.register_hook(
+        lambda gradient: torch.full_like(gradient, torch.inf)
+    )
+    parameters_before = {
+        name: parameter.detach().clone()
+        for name, parameter in dynamics.members.named_parameters()
+    }
+    optimizers_before = [
+        copy.deepcopy(optimizer.state_dict()) for optimizer in dynamics.optimizers
+    ]
+
+    try:
+        with pytest.raises(ValueError, match=r"member 2.*gradient.*finite"):
+            dynamics.update(decision_batch)
+    finally:
+        hook.remove()
+
+    for name, parameter in dynamics.members.named_parameters():
+        assert torch.equal(parameter, parameters_before[name])
+        assert parameter.grad is None
+    for optimizer_before, optimizer in zip(
+        optimizers_before, dynamics.optimizers, strict=True
+    ):
+        _assert_nested_exact(optimizer_before, optimizer.state_dict())
 
 
 def test_dynamics_bootstrap_indices_are_deterministic_and_member_specific() -> None:
@@ -216,6 +308,21 @@ def test_promotion_gate_handles_zero_baseline_and_validation_boundary() -> None:
 
     assert not equal.promote
     assert improved.promote
+
+
+def test_promotion_gate_rejects_exact_required_return_boundary() -> None:
+    gate = PolicyPromotionGate(relative_margin=0.25, max_validation_loss=0.1)
+
+    boundary = gate.decide(
+        candidate_return=5.0,
+        behavior_return=4.0,
+        critic_return=3.0,
+        dynamics_validation_loss=0.1,
+    )
+
+    assert boundary.required_return == pytest.approx(5.0)
+    assert not boundary.promote
+    assert boundary.reason == "insufficient_return"
 
 
 def test_dynamics_rejects_nonbinary_sparse_reward(decision_batch: DecisionBatch) -> None:

@@ -294,30 +294,65 @@ class StateDynamicsEnsemble(nn.Module):
         )
         return total, state_loss, reward_loss, done_loss
 
+    @staticmethod
+    def _validate_member_losses(
+        member_index: int, losses: tuple[Tensor, Tensor, Tensor, Tensor]
+    ) -> None:
+        total, state_loss, reward_loss, done_loss = losses
+        for component, loss in (
+            ("state_loss", state_loss),
+            ("reward_loss", reward_loss),
+            ("done_loss", done_loss),
+            ("total_loss", total),
+        ):
+            if loss.numel() != 1 or not torch.isfinite(loss.detach()).item():
+                raise ValueError(
+                    f"dynamics member {member_index} {component} must be a finite scalar"
+                )
+
     def update(self, batch: DecisionBatch) -> dict[str, float]:
         if not isinstance(batch, DecisionBatch):
             raise ValueError(f"batch must be a DecisionBatch, got {type(batch).__name__}")
         model_input, state_delta, reward, done = self._targets(batch)
+        for optimizer in self.optimizers:
+            optimizer.zero_grad(set_to_none=True)
+        member_losses: list[tuple[Tensor, Tensor, Tensor, Tensor]] = []
+        try:
+            for member_index, member in enumerate(self.members):
+                indices = self.bootstrap_indices(
+                    model_input.shape[0], member_index=member_index, device=self.device
+                )
+                output = member(model_input.index_select(0, indices))
+                losses = self._member_losses(
+                    output,
+                    state_delta.index_select(0, indices),
+                    reward.index_select(0, indices),
+                    done.index_select(0, indices),
+                )
+                self._validate_member_losses(member_index, losses)
+                member_losses.append(losses)
+
+            for losses in member_losses:
+                losses[0].backward()
+            for member_index, member in enumerate(self.members):
+                gradient_norm = torch.nn.utils.clip_grad_norm_(
+                    member.parameters(), self.gradient_clip_norm
+                )
+                if not torch.isfinite(gradient_norm).item():
+                    raise ValueError(
+                        f"dynamics member {member_index} gradient norm must be finite "
+                        "before optimizer step"
+                    )
+        except Exception:
+            for optimizer in self.optimizers:
+                optimizer.zero_grad(set_to_none=True)
+            raise
+
         totals: list[Tensor] = []
         states: list[Tensor] = []
         rewards: list[Tensor] = []
         dones: list[Tensor] = []
-        for member_index, (member, optimizer) in enumerate(
-            zip(self.members, self.optimizers, strict=True)
-        ):
-            indices = self.bootstrap_indices(
-                model_input.shape[0], member_index=member_index, device=self.device
-            )
-            output = member(model_input.index_select(0, indices))
-            losses = self._member_losses(
-                output,
-                state_delta.index_select(0, indices),
-                reward.index_select(0, indices),
-                done.index_select(0, indices),
-            )
-            optimizer.zero_grad(set_to_none=True)
-            losses[0].backward()
-            torch.nn.utils.clip_grad_norm_(member.parameters(), self.gradient_clip_norm)
+        for optimizer, losses in zip(self.optimizers, member_losses, strict=True):
             optimizer.step()
             total, state_loss, reward_loss, done_loss = losses
             totals.append(total.detach())
@@ -400,7 +435,7 @@ class PolicyPromotionGate:
         if values["dynamics_validation_loss"] > self.max_validation_loss:
             promote = False
             reason = "dynamics_validation_loss"
-        elif values["candidate_return"] <= reference or values["candidate_return"] < required:
+        elif values["candidate_return"] <= required:
             promote = False
             reason = "insufficient_return"
         else:

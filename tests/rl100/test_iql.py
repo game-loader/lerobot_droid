@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import copy
 import math
 
 import pytest
@@ -75,6 +76,48 @@ def _make_iql() -> IQL:
         q_lr=3e-4,
         v_lr=3e-4,
     )
+
+
+def _parameter_snapshot(module: torch.nn.Module) -> dict[str, torch.Tensor]:
+    return {
+        name: parameter.detach().clone()
+        for name, parameter in module.named_parameters()
+    }
+
+
+def _assert_parameters_unchanged(
+    module: torch.nn.Module, before: dict[str, torch.Tensor]
+) -> None:
+    assert before.keys() == dict(module.named_parameters()).keys()
+    for name, parameter in module.named_parameters():
+        torch.testing.assert_close(parameter, before[name], rtol=0.0, atol=0.0)
+
+
+def _assert_nested_equal(actual: object, expected: object) -> None:
+    if isinstance(expected, torch.Tensor):
+        assert isinstance(actual, torch.Tensor)
+        torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
+        return
+    if isinstance(expected, dict):
+        assert isinstance(actual, dict)
+        assert actual.keys() == expected.keys()
+        for key in expected:
+            _assert_nested_equal(actual[key], expected[key])
+        return
+    if isinstance(expected, list):
+        assert isinstance(actual, list)
+        assert len(actual) == len(expected)
+        for actual_item, expected_item in zip(actual, expected, strict=True):
+            _assert_nested_equal(actual_item, expected_item)
+        return
+    assert actual == expected
+
+
+def _force_large_output(module: torch.nn.Module) -> None:
+    linear = [layer for layer in module.modules() if isinstance(layer, torch.nn.Linear)][-1]
+    with torch.no_grad():
+        linear.weight.zero_()
+        linear.bias.fill_(1e20)
 
 
 def test_action_packer_excludes_constant_dimensions_and_padding() -> None:
@@ -219,3 +262,41 @@ def test_iql_advantage_ignores_inactive_and_padded_values(
     )
 
     torch.testing.assert_close(updated, baseline)
+
+
+def test_iql_nonfinite_value_loss_is_rejected_without_partial_update(
+    decision_batch: DecisionBatch,
+) -> None:
+    iql = _make_iql()
+    iql.update(decision_batch)
+    _force_large_output(iql.target_q1)
+    _force_large_output(iql.target_q2)
+    parameters_before = _parameter_snapshot(iql)
+    q_optimizer_before = copy.deepcopy(iql.q_optimizer.state_dict())
+    v_optimizer_before = copy.deepcopy(iql.v_optimizer.state_dict())
+
+    with pytest.raises(ValueError, match="value_loss.*finite"):
+        iql.update(decision_batch)
+
+    _assert_parameters_unchanged(iql, parameters_before)
+    _assert_nested_equal(iql.q_optimizer.state_dict(), q_optimizer_before)
+    _assert_nested_equal(iql.v_optimizer.state_dict(), v_optimizer_before)
+
+
+def test_iql_nonfinite_q_loss_is_rejected_without_partial_update(
+    decision_batch: DecisionBatch,
+) -> None:
+    iql = _make_iql()
+    iql.update(decision_batch)
+    _force_large_output(iql.q1)
+    _force_large_output(iql.q2)
+    parameters_before = _parameter_snapshot(iql)
+    q_optimizer_before = copy.deepcopy(iql.q_optimizer.state_dict())
+    v_optimizer_before = copy.deepcopy(iql.v_optimizer.state_dict())
+
+    with pytest.raises(ValueError, match="q_loss.*finite"):
+        iql.update(decision_batch)
+
+    _assert_parameters_unchanged(iql, parameters_before)
+    _assert_nested_equal(iql.q_optimizer.state_dict(), q_optimizer_before)
+    _assert_nested_equal(iql.v_optimizer.state_dict(), v_optimizer_before)
