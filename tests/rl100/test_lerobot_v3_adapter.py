@@ -18,6 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from torch.utils.data import DataLoader
 
 from RL.adapters import lerobot_v3
 from RL.adapters.lerobot_v3 import (
@@ -92,6 +93,22 @@ def test_terminal_success_rejects_missing_acceptance_fields() -> None:
         terminal_success(metadata)
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"true_grasp_ever": "false"},
+        {"clear_table_ever": 1},
+        {"final_table_contacts": 0.5},
+        {"final_hand_contacts": "1"},
+    ],
+)
+def test_terminal_success_rejects_malformed_acceptance_types(
+    overrides: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError):
+        terminal_success(_episode_metadata(**overrides))
+
+
 def test_build_decisions_adds_only_terminal_sparse_reward() -> None:
     decisions = build_episode_decisions(
         _fake_episode(length=35),
@@ -123,6 +140,18 @@ def test_failed_episode_keeps_terminal_reward_zero() -> None:
 
     assert decision.done.item()
     assert decision.reward.item() == 0.0
+
+
+def test_build_decisions_accepts_zero_discount() -> None:
+    decision = build_episode_decisions(
+        _fake_episode(length=2),
+        success=False,
+        n_obs_steps=2,
+        chunk_size=2,
+        gamma=0.0,
+    )[0]
+
+    assert decision.discount.item() == 0.0
 
 
 def test_decision_history_and_action_padding() -> None:
@@ -228,12 +257,21 @@ def test_load_episode_labels_rejects_duplicates_and_index_mismatches(tmp_path: P
     with pytest.raises(ValueError, match="indices"):
         load_episode_labels(summary_path, expected_episode_count=1)
 
+    summary_path.write_text(
+        json.dumps({"episodes": [_episode_metadata(episode_index=0.5)]}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="episode_index"):
+        load_episode_labels(summary_path, expected_episode_count=1)
+
 
 class _FakeHFDataset:
     def __init__(self, rows: list[dict[str, object]]) -> None:
         self.rows = rows
 
-    def __getitem__(self, index: slice) -> dict[str, object]:
+    def __getitem__(self, index: int | slice) -> dict[str, object]:
+        if isinstance(index, int):
+            return self.rows[index]
         selected = self.rows[index]
         keys = selected[0]
         batch: dict[str, object] = {}
@@ -247,7 +285,10 @@ class _FakeHFDataset:
 
 
 class _FakeLeRobotDataset:
+    last_instance: "_FakeLeRobotDataset | None" = None
+
     def __init__(self, repo_id: str, root: str | Path, **_: object) -> None:
+        type(self).last_instance = self
         self.repo_id = repo_id
         self.root = Path(root)
         self.features = {
@@ -283,6 +324,23 @@ class _FakeLeRobotDataset:
         self.meta = SimpleNamespace(episodes=episode_rows)
         self.num_episodes = len(lengths)
         self.num_frames = sum(lengths)
+
+
+class _FakeCameraLeRobotDataset(_FakeLeRobotDataset):
+    last_instance: "_FakeCameraLeRobotDataset | None" = None
+
+    def __init__(self, repo_id: str, root: str | Path, **kwargs: object) -> None:
+        super().__init__(repo_id, root, **kwargs)
+        type(self).last_instance = self
+        self.features["observation.image"] = {"shape": [3, 2, 2], "dtype": "video"}
+        self.meta.camera_keys = ["observation.image"]
+        self.decoded_indices: list[int] = []
+
+    def __getitem__(self, index: int) -> dict[str, object]:
+        self.decoded_indices.append(index)
+        row = dict(self.hf_dataset[index])
+        row["observation.image"] = torch.full((3, 2, 2), index, dtype=torch.uint8)
+        return row
 
 
 def test_decision_dataset_reports_label_and_chunk_statistics(
@@ -323,3 +381,43 @@ def test_decision_dataset_reports_label_and_chunk_statistics(
         "image_keys": [],
         "partial_chunk_count": 1,
     }
+
+    loader = DataLoader(dataset, batch_size=2, collate_fn=dataset.collate_fn)
+    batch = next(iter(loader))
+    assert batch.action.shape == (2, 2, 2)
+    assert batch.observation.features["observation.state"].shape == (2, 2, 3)
+
+
+def test_camera_features_are_detected_from_metadata_and_loaded_lazily(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "episodes": [
+                    _episode_metadata(episode_index=0),
+                    _episode_metadata(episode_index=1, true_grasp_ever=False),
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(lerobot_v3, "LeRobotDataset", _FakeCameraLeRobotDataset)
+
+    dataset = LeRobotV3DecisionDataset.from_root(
+        dataset_root=tmp_path / "dataset",
+        repo_id="test/camera",
+        summary_path=summary_path,
+        config=RLConfig(state_dim=3, action_dim=2, chunk_size=2),
+    )
+    source = _FakeCameraLeRobotDataset.last_instance
+    assert source is not None
+    assert source.decoded_indices == []
+    assert dataset.inspection_summary()["image_keys"] == ["observation.image"]
+
+    decision = dataset[0]
+
+    assert "observation.image" in decision.observation.features
+    assert "observation.image" in decision.next_observation.features
+    assert sorted(set(source.decoded_indices)) == [0, 1, 2]
