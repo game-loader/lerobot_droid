@@ -307,6 +307,7 @@ class CheckpointAdapter:
     _normalizer: NormalizerProcessorStep = field(repr=False)
     _unnormalizer: UnnormalizerProcessorStep = field(repr=False)
     _processor_fingerprint: str = field(repr=False)
+    source_path: Path = field(repr=False)
 
     @classmethod
     def load(
@@ -321,7 +322,11 @@ class CheckpointAdapter:
                 "action_range_tolerance must be nonnegative, "
                 f"got {action_range_tolerance!r}"
             )
-        processor_fingerprint = _processor_artifact_fingerprint(checkpoint)
+        source_path = Path(checkpoint)
+        if source_path.is_symlink() or not source_path.is_dir():
+            raise ValueError(f"checkpoint must be a local directory, got {checkpoint!r}")
+        source_path = source_path.resolve()
+        processor_fingerprint = _processor_artifact_fingerprint(source_path)
         device = torch.device(device)
         device_name = str(device)
         config = PreTrainedConfig.from_pretrained(
@@ -368,6 +373,7 @@ class CheckpointAdapter:
             _normalizer=normalizer,
             _unnormalizer=unnormalizer,
             _processor_fingerprint=processor_fingerprint,
+            source_path=source_path,
         )
 
     @property
