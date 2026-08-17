@@ -197,6 +197,11 @@ class RLProvenance:
     def __post_init__(self) -> None:
         if self.stage not in {"offline", "online"}:
             raise ValueError(f"stage must be 'offline' or 'online', got {self.stage!r}")
+        if (
+            self.rl100_algorithm_commit != _RL100_ALGORITHM_COMMIT
+            or self.rl100_audited_checkout_commit != _RL100_AUDITED_CHECKOUT
+        ):
+            raise ValueError("RL-100 provenance commits are not the audited commits")
         feature_keys = tuple(self.feature_keys)
         active_action_mask = tuple(self.active_action_mask)
         if not feature_keys or any(not isinstance(key, str) or not key for key in feature_keys):
@@ -329,12 +334,9 @@ def _rename_noreplace(source: Path, destination: Path) -> None:
         libc = ctypes.CDLL(None, use_errno=True)
         renameat2 = libc.renameat2
     except (AttributeError, OSError):
-        if destination.exists():
-            raise FileExistsError(
-                f"checkpoint destination already exists: {destination}"
-            ) from None
-        os.rename(source, destination)
-        return
+        raise OSError(
+            errno.ENOTSUP, "atomic renameat2(RENAME_NOREPLACE) is required"
+        ) from None
     renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
     renameat2.restype = ctypes.c_int
     result = renameat2(

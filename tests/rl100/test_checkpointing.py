@@ -19,8 +19,11 @@ from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 from lerobot.policies.factory import make_pre_post_processors
 from RL.adapters.checkpoint import CheckpointAdapter
 from RL.checkpointing import (
+    _RL100_ALGORITHM_COMMIT,
+    _RL100_AUDITED_CHECKOUT,
     RLCounters,
     RLProvenance,
+    _rename_noreplace,
     load_rl_checkpoint,
     restore_rl_state,
     save_rl_checkpoint,
@@ -244,3 +247,35 @@ def test_checkpoint_metrics_snapshot_must_match_counter(tmp_path: Path) -> None:
             rl_config=RLConfig(state_dim=3, action_dim=2, chunk_size=2, n_obs_steps=2),
             metrics_path=metrics_path,
         )
+
+
+def test_provenance_rejects_unreviewed_rl100_commits(tmp_path: Path) -> None:
+    source = _tiny_adapter(tmp_path / "source")
+    with pytest.raises(ValueError, match="RL-100"):
+        RLProvenance(
+            **(
+                _provenance(source).to_dict()
+                | {
+                    "rl100_algorithm_commit": "0" * 40,
+                    "rl100_audited_checkout_commit": _RL100_AUDITED_CHECKOUT,
+                }
+            )
+        )
+    assert _RL100_ALGORITHM_COMMIT != "0" * 40
+
+
+def test_rename_noreplace_fails_closed_without_atomic_primitive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    source.mkdir()
+    destination.mkdir()
+
+    class NoRenameAt2:
+        def __getattr__(self, name: str) -> object:
+            raise AttributeError(name)
+
+    monkeypatch.setattr("RL.checkpointing.ctypes.CDLL", lambda *_args, **_kwargs: NoRenameAt2())
+    with pytest.raises(OSError, match="renameat2"):
+        _rename_noreplace(source, destination)
