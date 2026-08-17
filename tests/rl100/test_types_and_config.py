@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -192,3 +193,28 @@ def test_rl_config_json_rejects_unknown_fields() -> None:
 
     with pytest.raises(ValueError, match="Unknown TraceConfig field"):
         RLConfig.from_json(json.dumps(nested_payload))
+
+
+def test_rl_config_rejects_none_trace_with_actual_value() -> None:
+    with pytest.raises(ValueError, match=r"trace.*actual=None"):
+        RLConfig(trace=None)  # type: ignore[arg-type]
+
+
+def test_rl_config_json_rejects_non_object_trace_with_actual_value() -> None:
+    with pytest.raises(ValueError, match=r"trace.*actual=\[\]"):
+        RLConfig.from_json('{"trace": []}')
+
+
+@pytest.mark.parametrize(
+    ("loader", "payload", "error"),
+    [
+        (RLConfig.from_json, "[]", r"RLConfig.*actual=\[\]"),
+        (TraceConfig.from_json, "null", r"TraceConfig.*actual=None"),
+        (RLConfig.from_json, "not-json", r"RLConfig.*actual='not-json'"),
+    ],
+)
+def test_config_json_errors_include_the_actual_payload(
+    loader: Callable[[str], object], payload: str, error: str
+) -> None:
+    with pytest.raises(ValueError, match=error):
+        loader(payload)

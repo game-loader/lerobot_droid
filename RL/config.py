@@ -35,9 +35,12 @@ def _parse_json_object(payload: str | bytes | bytearray, config_name: str) -> di
     try:
         data = json.loads(payload)
     except (json.JSONDecodeError, TypeError) as exc:
-        raise ValueError(f"Invalid {config_name} JSON: {exc}") from exc
+        raise ValueError(f"Invalid {config_name} JSON: {exc}; actual={payload!r}") from exc
     if not isinstance(data, dict):
-        raise ValueError(f"{config_name} JSON must contain an object, got {type(data).__name__}")
+        raise ValueError(
+            f"{config_name} JSON must contain an object, got {type(data).__name__}: "
+            f"actual={data!r}"
+        )
     return data
 
 
@@ -99,7 +102,10 @@ class RLConfig:
 
     def __post_init__(self) -> None:
         if not isinstance(self.trace, TraceConfig):
-            raise ValueError(f"trace must be a TraceConfig, got {type(self.trace).__name__}")
+            raise ValueError(
+                f"trace must be a TraceConfig, got {type(self.trace).__name__}: "
+                f"actual={self.trace!r}"
+            )
         if not isinstance(self.state_key, str) or not self.state_key:
             raise ValueError(f"state_key must be a nonempty string, got {self.state_key!r}")
         _positive_int("n_obs_steps", self.n_obs_steps)
@@ -121,7 +127,10 @@ class RLConfig:
         trace_data = data.get("trace")
         if trace_data is not None:
             if not isinstance(trace_data, dict):
-                raise ValueError(f"trace must be a JSON object, got {type(trace_data).__name__}")
+                raise ValueError(
+                    f"trace must be a JSON object, got {type(trace_data).__name__}: "
+                    f"actual={trace_data!r}"
+                )
             _reject_unknown_fields(trace_data, TraceConfig)
             data["trace"] = TraceConfig(**trace_data)
         return cls(**data)
