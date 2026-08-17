@@ -34,6 +34,7 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+import numpy as np
 import torch
 from torch import Tensor, nn
 
@@ -288,7 +289,18 @@ class LoadedRLCheckpoint:
 
 
 def _capture_rng() -> dict[str, Any]:
-    result: dict[str, Any] = {"python": _cpu_state(random.getstate()), "torch_cpu": torch.get_rng_state()}
+    numpy_state = np.random.get_state()
+    result: dict[str, Any] = {
+        "python": _cpu_state(random.getstate()),
+        "numpy": {
+            "bit_generator": str(numpy_state[0]),
+            "state": torch.as_tensor(numpy_state[1].astype(np.uint32), dtype=torch.int64),
+            "pos": int(numpy_state[2]),
+            "has_gauss": int(numpy_state[3]),
+            "cached_gaussian": float(numpy_state[4]),
+        },
+        "torch_cpu": torch.get_rng_state(),
+    }
     if torch.cuda.is_available():
         result["torch_cuda_all"] = [item.cpu() for item in torch.cuda.get_rng_state_all()]
     else:
@@ -301,6 +313,17 @@ def _restore_rng(state: Mapping[str, Any]) -> None:
         random.setstate(tuple(state["python"]))
     if "torch_cpu" in state:
         torch.set_rng_state(state["torch_cpu"])
+    numpy_state = state.get("numpy")
+    if isinstance(numpy_state, Mapping):
+        np.random.set_state(
+            (
+                str(numpy_state["bit_generator"]),
+                np.asarray(numpy_state["state"], dtype=np.uint32),
+                int(numpy_state["pos"]),
+                int(numpy_state["has_gauss"]),
+                float(numpy_state["cached_gaussian"]),
+            )
+        )
     if torch.cuda.is_available() and state.get("torch_cuda_all"):
         torch.cuda.set_rng_state_all(state["torch_cuda_all"])
 
@@ -412,7 +435,12 @@ def _validate_module_state(module: nn.Module | None, state: Mapping[str, Any] | 
         _validate_plain(saved, path=f"{name}.{key}")
 
 
-def _validate_optimizer_state(optimizer: torch.optim.Optimizer | None, state: Mapping[str, Any] | None, *, name: str) -> None:
+def _validate_optimizer_state(
+    optimizer: torch.optim.Optimizer | None,
+    state: Mapping[str, Any] | None,
+    *,
+    name: str,
+) -> None:
     if optimizer is None:
         if state is not None:
             raise ValueError(f"{name} state is present but no optimizer was supplied")
@@ -421,9 +449,37 @@ def _validate_optimizer_state(optimizer: torch.optim.Optimizer | None, state: Ma
         raise ValueError(f"{name} optimizer state is malformed")
     if len(state["param_groups"]) != len(optimizer.param_groups):
         raise ValueError(f"{name} optimizer group count disagrees")
+    saved_state = state["state"]
+    if not isinstance(saved_state, Mapping):
+        raise ValueError(f"{name} optimizer state entries are malformed")
+    saved_ids: set[int] = set()
     for saved_group, group in zip(state["param_groups"], optimizer.param_groups, strict=True):
-        if len(saved_group.get("params", ())) != len(group["params"]):
+        if not isinstance(saved_group, Mapping) or not isinstance(saved_group.get("params"), list):
+            raise ValueError(f"{name} optimizer parameter group is malformed")
+        if len(saved_group["params"]) != len(group["params"]):
             raise ValueError(f"{name} optimizer parameter count disagrees")
+        for saved_id, parameter in zip(saved_group["params"], group["params"], strict=True):
+            if isinstance(saved_id, bool) or not isinstance(saved_id, int) or saved_id in saved_ids:
+                raise ValueError(f"{name} optimizer parameter ids are malformed")
+            saved_ids.add(saved_id)
+            entry = saved_state.get(saved_id)
+            if entry is None:
+                continue
+            if not isinstance(entry, Mapping):
+                raise ValueError(f"{name} optimizer state entry is malformed")
+            for state_name, value in entry.items():
+                if isinstance(value, Tensor):
+                    if value.numel() != 1 and value.shape != parameter.shape:
+                        raise ValueError(
+                            f"{name} optimizer state {state_name!r} shape disagrees"
+                        )
+                    _validate_plain(value, path=f"{name}.{state_name}")
+        saved_hyperparameters = set(saved_group) - {"params", "param_names"}
+        current_hyperparameters = set(group) - {"params", "param_names"}
+        if saved_hyperparameters != current_hyperparameters:
+            raise ValueError(f"{name} optimizer hyperparameter keys disagree")
+    if any(key not in saved_ids for key in saved_state):
+        raise ValueError(f"{name} optimizer contains an unknown parameter state")
     _validate_plain(state, path=name)
 
 
@@ -558,7 +614,10 @@ def load_rl_checkpoint(
     expected_provenance: RLProvenance | None = None,
     action_range_tolerance: float = 1e-8,
 ) -> LoadedRLCheckpoint:
-    root = Path(checkpoint).resolve(strict=True)
+    input_root = Path(checkpoint)
+    if input_root.is_symlink():
+        raise ValueError("checkpoint root must not be a symlink")
+    root = input_root.resolve(strict=True)
     if not root.is_dir():
         raise ValueError(f"checkpoint must be a directory: {checkpoint!r}")
     manifest = _load_manifest(root)
@@ -639,6 +698,18 @@ def restore_rl_state(
         _validate_optimizer_state(optimizer, state.optimizer_states.get(name), name=name)
     if (optimizers or {}).keys() != state.optimizer_states.keys():
         raise ValueError("named optimizer keys disagree")
+    if set(schedulers or {}) != set(state.scheduler_states):
+        raise ValueError("scheduler keys disagree")
+    if set(amp_scalers or {}) != set(state.amp_scaler_states):
+        raise ValueError("AMP scaler keys disagree")
+    for name, _scheduler in (schedulers or {}).items():
+        if not isinstance(state.scheduler_states[name], Mapping):
+            raise ValueError(f"scheduler state {name!r} is malformed")
+        _validate_plain(state.scheduler_states[name], path=f"scheduler.{name}")
+    for name, _scaler in (amp_scalers or {}).items():
+        if not isinstance(state.amp_scaler_states[name], Mapping):
+            raise ValueError(f"AMP scaler state {name!r} is malformed")
+        _validate_plain(state.amp_scaler_states[name], path=f"amp_scaler.{name}")
     if old_policy is not None and state.old_policy_state is not None:
         old_policy.load_state_dict(state.old_policy_state, strict=True)
     if iql is not None and state.iql_state is not None:
@@ -649,12 +720,8 @@ def restore_rl_state(
         actor_optimizer.load_state_dict(state.actor_optimizer_state)
     for name, optimizer in (optimizers or {}).items():
         optimizer.load_state_dict(state.optimizer_states[name])
-    if set(schedulers or {}) != set(state.scheduler_states):
-        raise ValueError("scheduler keys disagree")
     for name, scheduler in (schedulers or {}).items():
         scheduler.load_state_dict(state.scheduler_states[name])
-    if set(amp_scalers or {}) != set(state.amp_scaler_states):
-        raise ValueError("AMP scaler keys disagree")
     for name, scaler in (amp_scalers or {}).items():
         scaler.load_state_dict(state.amp_scaler_states[name])
     if restore_rng:

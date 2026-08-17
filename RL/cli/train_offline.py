@@ -167,7 +167,7 @@ def run(args: argparse.Namespace) -> Path:
         tau=0.005,
         q_lr=3e-4,
         v_lr=3e-4,
-    ).to(current.device)
+    ).to(next(current.policy.parameters()).device)
     actor_optimizer = torch.optim.Adam(current.policy.parameters(), lr=1e-5)
     trainer = OfflineTrainer(
         current_policy=current,
