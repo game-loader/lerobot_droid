@@ -96,3 +96,28 @@ def test_ppo_rejects_shape_mismatch_and_nonfinite_values() -> None:
             action_dim_mask=torch.ones(3, dtype=torch.bool),
             clip_ratio=0.2,
         )
+
+
+@pytest.mark.parametrize("advantage", [1.0, -1.0])
+def test_extreme_joint_log_ratios_remain_finite(advantage: float) -> None:
+    old_log_prob = torch.zeros(1, 1, 32, 5)
+    new_log_prob = torch.full_like(old_log_prob, 0.56).requires_grad_()
+
+    loss, metrics = denoising_ppo_loss(
+        new_log_prob,
+        old_log_prob,
+        torch.tensor([advantage]),
+        step_mask=torch.ones(1, 32, dtype=torch.bool),
+        action_dim_mask=torch.ones(5, dtype=torch.bool),
+        clip_ratio=0.2,
+    )
+    loss.backward()
+
+    assert torch.isfinite(loss)
+    assert new_log_prob.grad is not None
+    assert torch.isfinite(new_log_prob.grad).all()
+    if advantage < 0:
+        assert new_log_prob.grad.abs().sum().item() > 0
+    assert all(torch.isfinite(torch.tensor(value)) for value in metrics.values())
+    if advantage > 0:
+        assert loss.item() == pytest.approx(-1.2)

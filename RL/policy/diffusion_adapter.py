@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 
 import torch
 from diffusers import DDIMScheduler
@@ -27,8 +27,34 @@ from lerobot.policies.utils import get_device_from_parameters, get_dtype_from_pa
 from lerobot.utils.constants import OBS_IMAGES, OBS_STATE
 from RL.adapters.checkpoint import CheckpointAdapter
 from RL.config import TraceConfig
-from RL.policy.ddim import stochastic_ddim_step
+from RL.policy.ddim import _validate_generator_device, stochastic_ddim_step
 from RL.types import DenoisingTrace, ObservationBatch
+
+
+def _stack_policy_images(
+    batch: dict[str, Tensor], *, image_keys: Sequence[str], n_obs_steps: int
+) -> Tensor:
+    if n_obs_steps <= 0:
+        raise ValueError(f"n_obs_steps must be positive, got {n_obs_steps}")
+    images: list[Tensor] = []
+    for key in image_keys:
+        if key not in batch:
+            raise ValueError(f"observation is missing policy image feature {key!r}")
+        image = batch[key]
+        if n_obs_steps == 1 and image.ndim == 4:
+            image = image.unsqueeze(1)
+        if image.ndim != 5 or image.shape[1] != n_obs_steps:
+            raise ValueError(
+                f"{key} must have shape [batch,{n_obs_steps},channels,height,width], "
+                f"got {tuple(image.shape)}"
+            )
+        images.append(image)
+    if not images:
+        raise ValueError("image_keys must be nonempty")
+    try:
+        return torch.stack(images, dim=-4)
+    except RuntimeError as exc:
+        raise ValueError("policy image features must have matching shapes") from exc
 
 
 class DiffusionRLAdapter:
@@ -104,6 +130,12 @@ class DiffusionRLAdapter:
     def execution_slice(self) -> slice:
         return slice(self._execution_start, self._execution_end)
 
+    def make_generator(self, seed: int) -> torch.Generator:
+        if isinstance(seed, bool) or not isinstance(seed, int):
+            raise ValueError(f"seed must be an integer, got {seed!r}")
+        device = get_device_from_parameters(self.policy)
+        return torch.Generator(device=device).manual_seed(seed)
+
     def _prepare_global_conditioning(self, observation: ObservationBatch) -> Tensor:
         if not isinstance(observation, ObservationBatch):
             raise ValueError(
@@ -131,10 +163,11 @@ class DiffusionRLAdapter:
 
         image_keys: Sequence[str] = tuple(self.policy.config.image_features)
         if image_keys:
-            missing = [key for key in image_keys if key not in batch]
-            if missing:
-                raise ValueError(f"observation is missing policy image features: {missing}")
-            batch[OBS_IMAGES] = torch.stack([batch[key] for key in image_keys], dim=-4)
+            batch[OBS_IMAGES] = _stack_policy_images(
+                batch,
+                image_keys=image_keys,
+                n_obs_steps=self.policy.config.n_obs_steps,
+            )
         conditioning = self.policy.diffusion._prepare_global_conditioning(batch)
         if conditioning.shape[0] != observation.batch_size():
             raise ValueError(
@@ -162,6 +195,7 @@ class DiffusionRLAdapter:
         next_latents: list[Tensor] = []
         log_probs: list[Tensor] = []
         self.policy.eval()
+        _validate_generator_device(generator, device)
         with torch.no_grad():
             global_cond = self._prepare_global_conditioning(observation)
             sample = torch.randn(
@@ -191,6 +225,7 @@ class DiffusionRLAdapter:
                     sigma_min=self.trace_config.sigma_min,
                     sigma_max=self.trace_config.sigma_max,
                     generator=generator,
+                    check_finite=False,
                 )
                 next_latents.append(output.previous_sample.detach())
                 log_probs.append(output.log_prob.detach())
@@ -203,11 +238,7 @@ class DiffusionRLAdapter:
             final_actions=sample.detach(),
         )
 
-    def recompute_log_prob(
-        self, observation: ObservationBatch, trace: DenoisingTrace
-    ) -> Tensor:
-        """Replay stored transitions under current weights with differentiable means."""
-
+    def _validate_trace(self, observation: ObservationBatch, trace: DenoisingTrace) -> None:
         if not isinstance(trace, DenoisingTrace):
             raise ValueError(f"trace must be a DenoisingTrace, got {type(trace).__name__}")
         expected_shape = (
@@ -225,12 +256,18 @@ class DiffusionRLAdapter:
             raise ValueError(
                 f"trace timesteps disagree with adapter schedule: {trace_timesteps} != {self._timesteps}"
             )
+
+    def iter_recomputed_log_prob(
+        self, observation: ObservationBatch, trace: DenoisingTrace
+    ) -> Iterator[Tensor]:
+        """Yield one replay graph at a time so trainers can backward without retaining all U-Net graphs."""
+
+        self._validate_trace(observation, trace)
         device = get_device_from_parameters(self.policy)
         dtype = get_dtype_from_parameters(self.policy)
         self.policy.eval()
-        global_cond = self._prepare_global_conditioning(observation)
-        replayed: list[Tensor] = []
         for index, timestep in enumerate(self._timesteps):
+            global_cond = self._prepare_global_conditioning(observation)
             previous_timestep = (
                 self._timesteps[index + 1] if index + 1 < len(self._timesteps) else None
             )
@@ -252,9 +289,16 @@ class DiffusionRLAdapter:
                 sigma_min=self.trace_config.sigma_min,
                 sigma_max=self.trace_config.sigma_max,
                 previous_sample=stored_previous,
+                check_finite=False,
             )
-            replayed.append(output.log_prob)
-        result = torch.stack(replayed)
+            yield output.log_prob.unsqueeze(0)
+
+    def recompute_log_prob(
+        self, observation: ObservationBatch, trace: DenoisingTrace
+    ) -> Tensor:
+        """Replay all stored transitions; trainers should prefer the stepwise iterator."""
+
+        result = torch.cat(tuple(self.iter_recomputed_log_prob(observation, trace)), dim=0)
         if not torch.isfinite(result).all().item():
             raise ValueError("replayed log probability contains non-finite values")
         return result
@@ -262,6 +306,11 @@ class DiffusionRLAdapter:
     def executable_log_prob(self, log_prob: Tensor) -> Tensor:
         if not isinstance(log_prob, Tensor) or log_prob.ndim != 4:
             raise ValueError("log_prob must have shape [denoise,batch,horizon,action_dim]")
+        if log_prob.shape[0] not in (1, len(self._timesteps)) or log_prob.shape[1] == 0:
+            raise ValueError(
+                "log_prob denoising axis must contain one step or the complete schedule, "
+                f"got shape {tuple(log_prob.shape)}"
+            )
         expected_tail = (
             self.policy.config.horizon,
             self.policy.config.action_feature.shape[0],

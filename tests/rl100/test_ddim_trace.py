@@ -26,7 +26,7 @@ from RL.adapters.checkpoint import CheckpointAdapter
 from RL.algorithms.ppo import denoising_ppo_loss
 from RL.config import TraceConfig
 from RL.policy.ddim import stochastic_ddim_step
-from RL.policy.diffusion_adapter import DiffusionRLAdapter
+from RL.policy.diffusion_adapter import DiffusionRLAdapter, _stack_policy_images
 from RL.types import ObservationBatch
 
 
@@ -207,7 +207,7 @@ def test_trace_replay_has_unit_ratio_and_unet_gradients(
 def test_execution_slice_starts_after_observation_prefix(
     tiny_diffusion_adapter: DiffusionRLAdapter,
 ) -> None:
-    full = torch.arange(2 * 1 * 4 * 2, dtype=torch.float32).reshape(2, 1, 4, 2)
+    full = torch.arange(4 * 1 * 4 * 2, dtype=torch.float32).reshape(4, 1, 4, 2)
     sliced = tiny_diffusion_adapter.executable_log_prob(full)
 
     torch.testing.assert_close(sliced, full[:, :, 1:3, :])
@@ -224,6 +224,83 @@ def test_execution_slice_starts_after_observation_prefix(
     )
     assert actions.shape == (1, 2, 2)
     torch.testing.assert_close(actions, expected)
+
+
+def test_stepwise_replay_backpropagates_without_retaining_previous_graphs(
+    tiny_diffusion_adapter: DiffusionRLAdapter,
+) -> None:
+    observation = ObservationBatch(
+        {"observation.state": torch.zeros(2, 2, 3)}
+    )
+    trace = tiny_diffusion_adapter.sample_trace(
+        observation, generator=tiny_diffusion_adapter.make_generator(17)
+    )
+    tiny_diffusion_adapter.policy.zero_grad(set_to_none=True)
+    count = 0
+
+    for index, replayed_step in enumerate(
+        tiny_diffusion_adapter.iter_recomputed_log_prob(observation, trace)
+    ):
+        loss, _ = denoising_ppo_loss(
+            tiny_diffusion_adapter.executable_log_prob(replayed_step),
+            tiny_diffusion_adapter.executable_log_prob(trace.old_log_prob[index : index + 1]),
+            torch.ones(2),
+            step_mask=torch.ones(2, 2, dtype=torch.bool),
+            action_dim_mask=tiny_diffusion_adapter.checkpoint.active_action_mask,
+            clip_ratio=0.2,
+        )
+        loss.backward()
+        count += 1
+
+    assert count == 4
+    assert any(
+        parameter.grad is not None and torch.isfinite(parameter.grad).all()
+        for parameter in tiny_diffusion_adapter.policy.diffusion.unet.parameters()
+    )
+
+
+def test_single_step_image_stack_matches_lerobot_shape() -> None:
+    batch = {
+        "observation.image.front": torch.zeros(2, 3, 8, 8),
+        "observation.image.wrist": torch.ones(2, 3, 8, 8),
+    }
+
+    stacked = _stack_policy_images(
+        batch,
+        image_keys=("observation.image.front", "observation.image.wrist"),
+        n_obs_steps=1,
+    )
+
+    assert stacked.shape == (2, 1, 2, 3, 8, 8)
+    torch.testing.assert_close(stacked[:, 0, 0], batch["observation.image.front"])
+    torch.testing.assert_close(stacked[:, 0, 1], batch["observation.image.wrist"])
+
+
+def test_adapter_creates_generator_on_policy_device(
+    tiny_diffusion_adapter: DiffusionRLAdapter,
+) -> None:
+    generator = tiny_diffusion_adapter.make_generator(19)
+
+    assert generator.device.type == next(tiny_diffusion_adapter.policy.parameters()).device.type
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_stochastic_ddim_rejects_cpu_generator_for_cuda_sample() -> None:
+    scheduler = DDIMScheduler(num_train_timesteps=8)
+    sample = torch.zeros(1, 2, 1, device="cuda")
+
+    with pytest.raises(ValueError, match="generator device"):
+        stochastic_ddim_step(
+            scheduler=scheduler,
+            model_output=torch.zeros_like(sample),
+            timestep=2,
+            previous_timestep=1,
+            sample=sample,
+            eta=1.0,
+            sigma_min=0.01,
+            sigma_max=0.1,
+            generator=torch.Generator().manual_seed(3),
+        )
 
 
 def test_rl_scheduler_is_private(tiny_diffusion_adapter: DiffusionRLAdapter) -> None:

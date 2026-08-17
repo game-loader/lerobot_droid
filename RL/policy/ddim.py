@@ -42,13 +42,15 @@ def _finite_number(name: str, value: float, *, positive: bool = False) -> float:
     return converted
 
 
-def _validate_tensor_pair(model_output: Tensor, sample: Tensor) -> None:
+def _validate_tensor_pair(
+    model_output: Tensor, sample: Tensor, *, check_finite: bool
+) -> None:
     for name, value in (("model_output", model_output), ("sample", sample)):
         if not isinstance(value, Tensor) or not value.is_floating_point():
             raise ValueError(f"{name} must be a floating-point torch.Tensor")
         if value.ndim < 2 or value.numel() == 0:
             raise ValueError(f"{name} must be nonempty with at least two dimensions")
-        if not torch.isfinite(value).all().item():
+        if check_finite and not torch.isfinite(value).all().item():
             raise ValueError(f"{name} must contain only finite values")
     if model_output.shape != sample.shape:
         raise ValueError(
@@ -57,6 +59,20 @@ def _validate_tensor_pair(model_output: Tensor, sample: Tensor) -> None:
         )
     if model_output.device != sample.device or model_output.dtype != sample.dtype:
         raise ValueError("model_output and sample must share device and dtype")
+
+
+def _validate_generator_device(
+    generator: torch.Generator | None, device: torch.device
+) -> None:
+    if generator is None:
+        return
+    if not isinstance(generator, torch.Generator):
+        raise ValueError(f"generator must be a torch.Generator, got {type(generator).__name__}")
+    generator_device = torch.device(generator.device)
+    if generator_device.type != device.type:
+        raise ValueError(
+            f"generator device {generator_device} does not match sample device {device}"
+        )
 
 
 def stochastic_ddim_step(
@@ -71,12 +87,15 @@ def stochastic_ddim_step(
     sigma_max: float,
     previous_sample: Tensor | None = None,
     generator: torch.Generator | None = None,
+    check_finite: bool = True,
 ) -> DDIMStepOutput:
     """Sample or replay one explicit stochastic DDIM schedule transition."""
 
     if not isinstance(scheduler, DDIMScheduler):
         raise ValueError(f"scheduler must be a DDIMScheduler, got {type(scheduler).__name__}")
-    _validate_tensor_pair(model_output, sample)
+    if not isinstance(check_finite, bool):
+        raise ValueError(f"check_finite must be a bool, got {check_finite!r}")
+    _validate_tensor_pair(model_output, sample, check_finite=check_finite)
     if isinstance(timestep, bool) or not isinstance(timestep, int):
         raise ValueError(f"timestep must be an integer, got {timestep!r}")
     num_train_timesteps = int(scheduler.config.num_train_timesteps)
@@ -131,6 +150,7 @@ def stochastic_ddim_step(
     direction_scale = (1.0 - alpha_previous - std.square()).clamp_min(0).sqrt()
     mean = alpha_previous.sqrt() * predicted_clean + direction_scale * predicted_noise
     if previous_sample is None:
+        _validate_generator_device(generator, sample.device)
         noise = torch.randn(
             sample.shape,
             dtype=sample.dtype,
@@ -146,17 +166,21 @@ def stochastic_ddim_step(
             or previous_sample.dtype != sample.dtype
         ):
             raise ValueError("previous_sample must match sample shape, device, and dtype")
-        if not torch.isfinite(previous_sample).all().item():
+        if check_finite and not torch.isfinite(previous_sample).all().item():
             raise ValueError("previous_sample must contain only finite values")
-    log_prob = torch.distributions.Normal(mean, std).log_prob(previous_sample.detach())
-    for name, value in (
-        ("previous_sample", previous_sample),
-        ("mean", mean),
-        ("std", std),
-        ("log_prob", log_prob),
-    ):
-        if not torch.isfinite(value).all().item():
-            raise ValueError(f"DDIM {name} contains non-finite values")
+    if previous_sample is None:
+        raise AssertionError("previous_sample must be populated before log-probability evaluation")
+    residual = (previous_sample.detach() - mean) / std
+    log_prob = -0.5 * residual.square() - std.log() - 0.5 * math.log(2.0 * math.pi)
+    if check_finite:
+        for name, value in (
+            ("previous_sample", previous_sample),
+            ("mean", mean),
+            ("std", std),
+            ("log_prob", log_prob),
+        ):
+            if not torch.isfinite(value).all().item():
+                raise ValueError(f"DDIM {name} contains non-finite values")
     return DDIMStepOutput(
         previous_sample=previous_sample,
         mean=mean,

@@ -21,6 +21,19 @@ import math
 import torch
 from torch import Tensor
 
+_LOG_RATIO_EXACT_LIMIT = 20.0
+
+
+def _stable_probability_ratio(log_ratio: Tensor) -> Tensor:
+    """Exponentiate exactly in the useful range and use a finite smooth tail."""
+
+    capped = log_ratio.clamp(max=_LOG_RATIO_EXACT_LIMIT)
+    exact = torch.exp(capped)
+    excess = (log_ratio - _LOG_RATIO_EXACT_LIMIT).clamp_min(0.0)
+    limit_ratio = math.exp(_LOG_RATIO_EXACT_LIMIT)
+    upper_tail = limit_ratio * (1.0 + excess / (1.0 + excess))
+    return torch.where(log_ratio <= _LOG_RATIO_EXACT_LIMIT, exact, upper_tail)
+
 
 def _validate_log_prob(name: str, value: Tensor) -> None:
     if not isinstance(value, Tensor):
@@ -110,14 +123,17 @@ def denoising_ppo_loss(
     log_ratio = new_reduced - old_reduced
     if not torch.isfinite(log_ratio).all().item():
         raise ValueError("PPO log ratio contains non-finite values")
-    ratio = torch.exp(log_ratio)
+    ratio = _stable_probability_ratio(log_ratio)
     if not torch.isfinite(ratio).all().item():
         raise ValueError("PPO ratio contains non-finite values")
 
     expanded_advantage = advantage.to(device=ratio.device, dtype=ratio.dtype).reshape(1, -1)
     expanded_advantage = expanded_advantage.expand_as(ratio)
     unclipped = ratio * expanded_advantage
-    clipped = ratio.clamp(1.0 - clip_ratio, 1.0 + clip_ratio) * expanded_advantage
+    clipped_log_ratio = log_ratio.clamp(
+        min=math.log1p(-clip_ratio), max=math.log1p(clip_ratio)
+    )
+    clipped = torch.exp(clipped_log_ratio) * expanded_advantage
     loss = -torch.minimum(unclipped, clipped).mean()
     if not torch.isfinite(loss).item():
         raise ValueError("PPO loss is non-finite")
