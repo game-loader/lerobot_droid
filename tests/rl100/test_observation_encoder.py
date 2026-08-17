@@ -97,6 +97,20 @@ def test_registered_image_encoder_is_composed_with_state_features() -> None:
     assert torch.isfinite(output).all()
 
 
+def test_non_image_high_rank_tensor_is_not_treated_as_an_image() -> None:
+    encoder = StateFeatureEncoder(state_dim=3, n_obs_steps=2, hidden_dims=(8,), output_dim=4)
+    observation = ObservationBatch(
+        {
+            "observation.state": torch.zeros(2, 2, 3),
+            "observation.environment_grid": torch.zeros(2, 2, 2, 2, 2),
+        }
+    )
+
+    output = encoder(observation)
+
+    assert output.shape == (2, 4)
+
+
 def test_state_encoder_rejects_wrong_history_shape() -> None:
     encoder = StateFeatureEncoder(state_dim=3, n_obs_steps=2, hidden_dims=(8,), output_dim=4)
 

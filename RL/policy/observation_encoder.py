@@ -47,14 +47,10 @@ def _positive_int(name: str, value: int) -> None:
 
 def _image_keys(observation: ObservationBatch, *, state_key: str) -> list[str]:
     keys: list[str] = []
-    for key, tensor in observation.features.items():
+    for key in observation.features:
         if key == state_key:
             continue
-        if (
-            key.startswith("observation.images.")
-            or key.startswith("observation.image")
-            or tensor.ndim >= 5
-        ):
+        if key.startswith("observation.images.") or key.startswith("observation.image"):
             keys.append(key)
     return sorted(keys)
 
