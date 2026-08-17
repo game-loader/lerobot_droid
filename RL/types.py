@@ -17,7 +17,9 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 import torch
 from torch import Tensor
@@ -64,19 +66,20 @@ def _validate_floating_tensor(name: str, value: Tensor, *, ndim: int) -> None:
 class ObservationBatch:
     """A batch of named observation tensors sharing their leading dimension."""
 
-    features: dict[str, Tensor]
+    features: Mapping[str, Tensor]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.features, dict):
+        if not isinstance(self.features, Mapping):
             raise ValueError(
-                f"features must be a dict, got {type(self.features).__name__}: "
+                f"features must be a mapping, got {type(self.features).__name__}: "
                 f"actual={self.features!r}"
             )
-        if not self.features:
-            raise ValueError(f"features must be nonempty: actual={self.features!r}")
+        features = dict(self.features)
+        if not features:
+            raise ValueError(f"features must be nonempty: actual={features!r}")
 
         batch_sizes: set[int] = set()
-        for key, tensor in self.features.items():
+        for key, tensor in features.items():
             if not isinstance(key, str) or not key:
                 raise ValueError(f"feature keys must be nonempty strings, got {key!r}")
             _validate_tensor(key, tensor)
@@ -89,9 +92,13 @@ class ObservationBatch:
         batch_size = next(iter(batch_sizes))
         if batch_size == 0:
             raise ValueError("features batch size must be nonzero: actual=0")
+        object.__setattr__(self, "features", MappingProxyType(features))
 
     def batch_size(self) -> int:
         return next(iter(self.features.values())).shape[0]
+
+    def __reduce__(self) -> tuple[type[ObservationBatch], tuple[dict[str, Tensor]]]:
+        return type(self), (dict(self.features),)
 
     def to(self, device: torch.device | str) -> ObservationBatch:
         return ObservationBatch({key: value.to(device) for key, value in self.features.items()})
@@ -168,7 +175,15 @@ class DecisionBatch:
         if self.discount.shape != (batch_size, 1):
             raise ValueError(f"discount must have shape {(batch_size, 1)}, got {tuple(self.discount.shape)}")
 
-    def validate(self, *, state_dim: int, action_dim: int, chunk_size: int, n_obs_steps: int) -> None:
+    def validate(
+        self,
+        *,
+        state_dim: int,
+        action_dim: int,
+        chunk_size: int,
+        n_obs_steps: int,
+        state_key: str = "observation.state",
+    ) -> None:
         self._validate_intrinsic()
         for name, value in {
             "state_dim": state_dim,
@@ -178,6 +193,8 @@ class DecisionBatch:
         }.items():
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer, got {value!r}")
+        if not isinstance(state_key, str) or not state_key:
+            raise ValueError(f"state_key must be a nonempty string, got {state_key!r}")
 
         batch_size = self.action.shape[0]
         expected_state_shape = (batch_size, n_obs_steps, state_dim)
@@ -186,13 +203,21 @@ class DecisionBatch:
             ("next_observation", self.next_observation),
         ):
             try:
-                state = observation.features["observation.state"]
+                state = observation.features[state_key]
             except KeyError as exc:
-                raise ValueError(f"{observation_name}.state is required: actual=<missing>") from exc
+                raise ValueError(
+                    f"{observation_name}.state is required for state_key={state_key!r}: "
+                    "actual=<missing>"
+                ) from exc
+            if not state.is_floating_point():
+                raise ValueError(
+                    f"{observation_name}.state selected by state_key={state_key!r} must have "
+                    f"a floating-point dtype, got {state.dtype}: actual={state.dtype}"
+                )
             if state.shape != expected_state_shape:
                 raise ValueError(
-                    f"{observation_name}.state must have shape {expected_state_shape}, "
-                    f"got {tuple(state.shape)}"
+                    f"{observation_name}.state selected by state_key={state_key!r} must have shape "
+                    f"{expected_state_shape}, got {tuple(state.shape)}"
                 )
 
         expected_action_shape = (batch_size, chunk_size, action_dim)

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import json
+import pickle
 from collections.abc import Callable
 from pathlib import Path
 
@@ -53,6 +54,37 @@ def test_observation_batch_preserves_state_and_optional_images() -> None:
     )
     moved = observation.to("cpu")
     assert all(tensor.device == torch.device("cpu") for tensor in moved.features.values())
+
+
+def test_observation_batch_defensively_copies_feature_mapping() -> None:
+    state = torch.zeros(2, 2, 39)
+    features = {"observation.state": state}
+    observation = ObservationBatch(features)
+
+    features["observation.state"] = torch.ones_like(state)
+    features["observation.extra"] = torch.zeros(2, 1)
+
+    assert observation.features["observation.state"] is state
+    assert "observation.extra" not in observation.features
+
+
+def test_observation_batch_feature_mapping_is_read_only() -> None:
+    observation = _observation()
+
+    with pytest.raises(TypeError):
+        observation.features["observation.extra"] = torch.zeros(2, 1)
+
+
+def test_observation_batch_pickle_round_trip_preserves_features() -> None:
+    observation = _observation()
+
+    restored = pickle.loads(pickle.dumps(observation))
+
+    assert set(restored.features) == set(observation.features)
+    for key, tensor in observation.features.items():
+        torch.testing.assert_close(restored.features[key], tensor)
+    with pytest.raises(TypeError):
+        restored.features["observation.extra"] = torch.zeros(2, 1)
 
 
 @pytest.mark.parametrize(
@@ -138,6 +170,72 @@ def test_decision_batch_validates_shapes_and_dtypes() -> None:
             done=torch.zeros(2, 1, dtype=torch.bool),
             discount=torch.full((2, 1), 0.99),
         ).validate(state_dim=39, action_dim=14, chunk_size=32, n_obs_steps=2)
+
+
+def test_decision_batch_validate_supports_custom_state_key() -> None:
+    observation = ObservationBatch(
+        {
+            "robot.state": torch.zeros(2, 2, 39),
+            "observation.images.front": torch.zeros(2, 2, 3, 8, 8, dtype=torch.uint8),
+        }
+    )
+    decision = DecisionBatch(
+        observation=observation,
+        next_observation=observation,
+        action=torch.zeros(2, 32, 14),
+        action_valid=torch.ones(2, 32, dtype=torch.bool),
+        reward=torch.zeros(2, 1),
+        done=torch.zeros(2, 1, dtype=torch.bool),
+        discount=torch.full((2, 1), 0.99),
+    )
+
+    decision.validate(
+        state_dim=39,
+        action_dim=14,
+        chunk_size=32,
+        n_obs_steps=2,
+        state_key="robot.state",
+    )
+
+
+def test_decision_batch_validate_reports_missing_custom_state_key() -> None:
+    observation = _observation()
+    decision = DecisionBatch(
+        observation=observation,
+        next_observation=observation,
+        action=torch.zeros(2, 32, 14),
+        action_valid=torch.ones(2, 32, dtype=torch.bool),
+        reward=torch.zeros(2, 1),
+        done=torch.zeros(2, 1, dtype=torch.bool),
+        discount=torch.full((2, 1), 0.99),
+    )
+
+    with pytest.raises(ValueError, match=r"state_key='robot\.state'.*actual=<missing>"):
+        decision.validate(
+            state_dim=39,
+            action_dim=14,
+            chunk_size=32,
+            n_obs_steps=2,
+            state_key="robot.state",
+        )
+
+
+def test_decision_batch_validate_rejects_integer_state() -> None:
+    observation = ObservationBatch(
+        {"observation.state": torch.zeros(2, 2, 39, dtype=torch.int64)}
+    )
+    decision = DecisionBatch(
+        observation=observation,
+        next_observation=observation,
+        action=torch.zeros(2, 32, 14),
+        action_valid=torch.ones(2, 32, dtype=torch.bool),
+        reward=torch.zeros(2, 1),
+        done=torch.zeros(2, 1, dtype=torch.bool),
+        discount=torch.full((2, 1), 0.99),
+    )
+
+    with pytest.raises(ValueError, match=r"observation\.state.*floating.*torch\.int64"):
+        decision.validate(state_dim=39, action_dim=14, chunk_size=32, n_obs_steps=2)
 
 
 def test_denoising_trace_rejects_inconsistent_shapes() -> None:
