@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from RL.adapters.checkpoint import CheckpointAdapter
+from RL.adapters.checkpoint import CheckpointAdapter, _active_action_mask_from_ranges
 from RL.types import ObservationBatch
 
 REAL_CHECKPOINT = Path(
@@ -77,6 +77,16 @@ def test_checkpoint_adapter_normalizes_batched_state_history(
 
 def test_active_action_mask_uses_saved_ranges(checkpoint_adapter: CheckpointAdapter) -> None:
     assert checkpoint_adapter.active_action_indices.tolist() == [0, 1, 2, 12, 13]
+
+
+def test_active_action_mask_does_not_accept_inverted_ranges() -> None:
+    mask = _active_action_mask_from_ranges(
+        torch.tensor([1.0, 0.0]),
+        torch.tensor([0.0, 1.0]),
+        tolerance=1e-8,
+    )
+
+    assert mask.tolist() == [False, True]
 
 
 def test_processor_fingerprint_is_stable_sha256(checkpoint_adapter: CheckpointAdapter) -> None:

@@ -71,6 +71,17 @@ def _processor_artifact_fingerprint(checkpoint: str | Path) -> str:
     return digest.hexdigest()
 
 
+def _active_action_mask_from_ranges(
+    action_min: Tensor, action_max: Tensor, *, tolerance: float
+) -> Tensor:
+    if action_min.shape != action_max.shape or action_min.ndim != 1:
+        raise ValueError(
+            "action min/max statistics must be matching vectors, "
+            f"got min={tuple(action_min.shape)} max={tuple(action_max.shape)}"
+        )
+    return (action_max - action_min) > tolerance
+
+
 @dataclass
 class CheckpointAdapter:
     """Policy plus the exact saved normalization contract used to train it."""
@@ -128,12 +139,9 @@ class CheckpointAdapter:
             raise ValueError("normalizer is missing action min/max statistics")
         action_min = action_stats["min"].detach().to(device="cpu", dtype=torch.float32)
         action_max = action_stats["max"].detach().to(device="cpu", dtype=torch.float32)
-        if action_min.shape != action_max.shape or action_min.ndim != 1:
-            raise ValueError(
-                "action min/max statistics must be matching vectors, "
-                f"got min={tuple(action_min.shape)} max={tuple(action_max.shape)}"
-            )
-        active_action_mask = (action_max - action_min).abs() > action_range_tolerance
+        active_action_mask = _active_action_mask_from_ranges(
+            action_min, action_max, tolerance=action_range_tolerance
+        )
         if not active_action_mask.any().item():
             raise ValueError(
                 "saved action statistics contain no active dimensions at "
