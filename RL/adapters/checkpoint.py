@@ -57,7 +57,11 @@ def _processor_artifact_fingerprint(checkpoint: str | Path) -> str:
     path = root
     files: set[Path] = set()
     for config_name in ("policy_preprocessor.json", "policy_postprocessor.json"):
-        config_path = path / config_name
+        config_path = (path / config_name).resolve()
+        if not config_path.is_relative_to(root):
+            raise ValueError(
+                f"processor config must remain inside the checkpoint: {config_name!r}"
+            )
         if not config_path.is_file():
             raise ValueError(f"checkpoint is missing processor config {config_name!r}")
         files.add(config_path)
@@ -128,8 +132,14 @@ def _expected_normalization_mode(
     return config.normalization_mapping.get(feature_type.value, NormalizationMode.IDENTITY)
 
 
-def _validate_stat_shape(key: str, feature_shape: tuple[int, ...], stat_name: str, value: Tensor) -> None:
-    if key.startswith("observation.images.") or key == "observation.image":
+def _validate_stat_shape(
+    key: str,
+    feature_type: FeatureType,
+    feature_shape: tuple[int, ...],
+    stat_name: str,
+    value: Tensor,
+) -> None:
+    if feature_type == FeatureType.VISUAL:
         try:
             broadcast_shape = torch.broadcast_shapes(tuple(value.shape), feature_shape)
         except RuntimeError as exc:
@@ -198,7 +208,13 @@ def _validate_normalizer_features(
                 raise ValueError(
                     f"{key} normalization statistic {stat_name!r} contains non-finite values"
                 )
-            _validate_stat_shape(key, tuple(expected_feature.shape), stat_name, value)
+            _validate_stat_shape(
+                key,
+                expected_feature.type,
+                tuple(expected_feature.shape),
+                stat_name,
+                value,
+            )
 
 
 def _validate_unnormalizer_features(
@@ -305,6 +321,7 @@ class CheckpointAdapter:
                 "action_range_tolerance must be nonnegative, "
                 f"got {action_range_tolerance!r}"
             )
+        processor_fingerprint = _processor_artifact_fingerprint(checkpoint)
         device = torch.device(device)
         device_name = str(device)
         config = PreTrainedConfig.from_pretrained(
@@ -350,7 +367,7 @@ class CheckpointAdapter:
             active_action_mask=active_action_mask,
             _normalizer=normalizer,
             _unnormalizer=unnormalizer,
-            _processor_fingerprint=_processor_artifact_fingerprint(checkpoint),
+            _processor_fingerprint=processor_fingerprint,
         )
 
     @property

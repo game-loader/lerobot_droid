@@ -50,7 +50,11 @@ def _image_keys(observation: ObservationBatch, *, state_key: str) -> list[str]:
     for key in observation.features:
         if key == state_key:
             continue
-        if key == "observation.image" or key.startswith("observation.images."):
+        if (
+            key == "observation.image"
+            or key.startswith("observation.image.")
+            or key.startswith("observation.images.")
+        ):
             keys.append(key)
     return sorted(keys)
 

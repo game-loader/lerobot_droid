@@ -125,6 +125,19 @@ def test_image_metadata_is_not_treated_as_an_image() -> None:
     assert output.shape == (2, 4)
 
 
+def test_observation_image_dot_key_requires_registered_encoder() -> None:
+    encoder = StateFeatureEncoder(state_dim=3, n_obs_steps=2, hidden_dims=(8,), output_dim=4)
+    observation = ObservationBatch(
+        {
+            "observation.state": torch.zeros(2, 2, 3),
+            "observation.image.front": torch.zeros(2, 2, 3, 8, 8),
+        }
+    )
+
+    with pytest.raises(ImageEncoderRequiredError, match=r"observation\.image\.front"):
+        encoder(observation)
+
+
 def test_state_encoder_rejects_wrong_history_shape() -> None:
     encoder = StateFeatureEncoder(state_dim=3, n_obs_steps=2, hidden_dims=(8,), output_dim=4)
 
