@@ -201,12 +201,33 @@ def _validate_normalizer_features(
             _validate_stat_shape(key, tuple(expected_feature.shape), stat_name, value)
 
 
+def _validate_unnormalizer_features(
+    config: DiffusionConfig, unnormalizer: UnnormalizerProcessorStep
+) -> None:
+    expected_features = config.output_features
+    actual_keys = set(unnormalizer.features)
+    expected_keys = set(expected_features)
+    if actual_keys != expected_keys:
+        raise ValueError(
+            "postprocessor feature keys disagree with the policy config, "
+            f"expected={sorted(expected_keys)} actual={sorted(actual_keys)}"
+        )
+    for key, expected_feature in expected_features.items():
+        processor_feature = unnormalizer.features[key]
+        if processor_feature != expected_feature:
+            raise ValueError(
+                f"{key} postprocessor feature must match the policy config, "
+                f"expected={expected_feature!r} actual={processor_feature!r}"
+            )
+
+
 def _validate_processor_compatibility(
     config: DiffusionConfig,
     normalizer: NormalizerProcessorStep,
     unnormalizer: UnnormalizerProcessorStep,
 ) -> tuple[Tensor, Tensor]:
     _validate_normalizer_features(config, normalizer)
+    _validate_unnormalizer_features(config, unnormalizer)
     action_feature = config.action_feature
     if action_feature is None or len(action_feature.shape) != 1:
         raise ValueError(f"policy must define a vector action feature, got {action_feature!r}")

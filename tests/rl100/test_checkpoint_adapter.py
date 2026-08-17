@@ -280,3 +280,37 @@ def test_checkpoint_rejects_missing_state_normalization_stats(
 
     with pytest.raises(ValueError, match=r"observation\.state.*statistics"):
         CheckpointAdapter.load(damaged, device="cpu")
+
+
+def test_checkpoint_rejects_mismatched_postprocessor_action_type(
+    tiny_checkpoint: Path, tmp_path: Path
+) -> None:
+    damaged = tmp_path / "postprocessor_action_type_mismatch"
+    shutil.copytree(tiny_checkpoint, damaged)
+    config_path = damaged / "policy_postprocessor.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    unnormalizer = next(
+        step for step in config["steps"] if step["registry_name"] == "unnormalizer_processor"
+    )
+    unnormalizer["config"]["features"]["action"]["type"] = "STATE"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="postprocessor feature"):
+        CheckpointAdapter.load(damaged, device="cpu")
+
+
+def test_checkpoint_rejects_extra_postprocessor_feature(
+    tiny_checkpoint: Path, tmp_path: Path
+) -> None:
+    damaged = tmp_path / "postprocessor_extra_feature"
+    shutil.copytree(tiny_checkpoint, damaged)
+    config_path = damaged / "policy_postprocessor.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    unnormalizer = next(
+        step for step in config["steps"] if step["registry_name"] == "unnormalizer_processor"
+    )
+    unnormalizer["config"]["features"]["extra"] = {"type": "STATE", "shape": [1]}
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="postprocessor feature keys"):
+        CheckpointAdapter.load(damaged, device="cpu")
