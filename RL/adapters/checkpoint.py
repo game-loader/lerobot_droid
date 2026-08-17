@@ -25,6 +25,7 @@ from pathlib import Path
 import torch
 from torch import Tensor
 
+from lerobot.configs import NormalizationMode
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import FeatureType
 from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
@@ -112,11 +113,100 @@ def _active_action_mask_from_ranges(
     return (action_max - action_min) > tolerance
 
 
+_REQUIRED_STATS = {
+    NormalizationMode.IDENTITY: (),
+    NormalizationMode.MEAN_STD: ("mean", "std"),
+    NormalizationMode.MIN_MAX: ("min", "max"),
+    NormalizationMode.QUANTILES: ("q01", "q99"),
+    NormalizationMode.QUANTILE10: ("q10", "q90"),
+}
+
+
+def _expected_normalization_mode(
+    config: DiffusionConfig, feature_type: FeatureType
+) -> NormalizationMode:
+    return config.normalization_mapping.get(feature_type.value, NormalizationMode.IDENTITY)
+
+
+def _validate_stat_shape(key: str, feature_shape: tuple[int, ...], stat_name: str, value: Tensor) -> None:
+    if key.startswith("observation.images.") or key == "observation.image":
+        try:
+            broadcast_shape = torch.broadcast_shapes(tuple(value.shape), feature_shape)
+        except RuntimeError as exc:
+            raise ValueError(
+                f"{key} normalization statistic {stat_name!r} with shape "
+                f"{tuple(value.shape)} cannot broadcast to feature shape {feature_shape}"
+            ) from exc
+        if broadcast_shape != feature_shape:
+            raise ValueError(
+                f"{key} normalization statistic {stat_name!r} must broadcast exactly to "
+                f"feature shape {feature_shape}, got {tuple(value.shape)}"
+            )
+        return
+    if tuple(value.shape) != feature_shape:
+        raise ValueError(
+            f"{key} normalization statistic {stat_name!r} must have shape {feature_shape}, "
+            f"got {tuple(value.shape)}"
+        )
+
+
+def _validate_normalizer_features(
+    config: DiffusionConfig, normalizer: NormalizerProcessorStep
+) -> None:
+    expected_features = {**config.input_features, **config.output_features}
+    actual_keys = set(normalizer.features)
+    expected_keys = set(expected_features)
+    if actual_keys != expected_keys:
+        raise ValueError(
+            "preprocessor feature keys disagree with the policy config, "
+            f"expected={sorted(expected_keys)} actual={sorted(actual_keys)}"
+        )
+
+    for key, expected_feature in expected_features.items():
+        processor_feature = normalizer.features[key]
+        if processor_feature != expected_feature:
+            raise ValueError(
+                f"{key} processor feature must match the policy config, "
+                f"expected={expected_feature!r} actual={processor_feature!r}"
+            )
+
+        expected_mode = _expected_normalization_mode(config, expected_feature.type)
+        actual_mode = normalizer.norm_map.get(expected_feature.type, NormalizationMode.IDENTITY)
+        if actual_mode != expected_mode:
+            raise ValueError(
+                f"{expected_feature.type.value} normalization mode disagrees with the policy config, "
+                f"expected={expected_mode.value} actual={actual_mode.value}"
+            )
+        try:
+            required_stats = _REQUIRED_STATS[expected_mode]
+        except KeyError as exc:
+            raise ValueError(
+                f"unsupported normalization mode for {key}: {expected_mode.value}"
+            ) from exc
+        if not required_stats:
+            continue
+
+        stats = normalizer._tensor_stats.get(key)
+        if not stats or any(stat_name not in stats for stat_name in required_stats):
+            raise ValueError(
+                f"{key} normalization statistics must contain {required_stats} "
+                f"for {expected_mode.value}"
+            )
+        for stat_name in required_stats:
+            value = stats[stat_name].detach().cpu()
+            if not torch.isfinite(value).all().item():
+                raise ValueError(
+                    f"{key} normalization statistic {stat_name!r} contains non-finite values"
+                )
+            _validate_stat_shape(key, tuple(expected_feature.shape), stat_name, value)
+
+
 def _validate_processor_compatibility(
     config: DiffusionConfig,
     normalizer: NormalizerProcessorStep,
     unnormalizer: UnnormalizerProcessorStep,
 ) -> tuple[Tensor, Tensor]:
+    _validate_normalizer_features(config, normalizer)
     action_feature = config.action_feature
     if action_feature is None or len(action_feature.shape) != 1:
         raise ValueError(f"policy must define a vector action feature, got {action_feature!r}")
@@ -128,9 +218,19 @@ def _validate_processor_compatibility(
                 f"{label} action feature must have shape {(expected_action_dim,)}, "
                 f"got {processor_feature!r}"
             )
-    if normalizer.norm_map.get(FeatureType.ACTION) != unnormalizer.norm_map.get(
-        FeatureType.ACTION
-    ):
+    expected_action_mode = _expected_normalization_mode(config, FeatureType.ACTION)
+    normalizer_action_mode = normalizer.norm_map.get(
+        FeatureType.ACTION, NormalizationMode.IDENTITY
+    )
+    unnormalizer_action_mode = unnormalizer.norm_map.get(
+        FeatureType.ACTION, NormalizationMode.IDENTITY
+    )
+    if normalizer_action_mode != expected_action_mode:
+        raise ValueError(
+            "ACTION normalization mode disagrees with the policy config, "
+            f"expected={expected_action_mode.value} actual={normalizer_action_mode.value}"
+        )
+    if normalizer_action_mode != unnormalizer_action_mode:
         raise ValueError("preprocessor and postprocessor action normalization modes disagree")
 
     pre_stats = normalizer._tensor_stats.get("action")

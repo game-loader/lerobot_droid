@@ -226,3 +226,57 @@ def test_checkpoint_rejects_mismatched_processor_stats(
 
     with pytest.raises(ValueError, match="processor action statistics disagree"):
         CheckpointAdapter.load(damaged, device="cpu")
+
+
+def test_checkpoint_rejects_mismatched_state_feature_descriptor(
+    tiny_checkpoint: Path, tmp_path: Path
+) -> None:
+    damaged = tmp_path / "state_feature_mismatch"
+    shutil.copytree(tiny_checkpoint, damaged)
+    config_path = damaged / "policy_preprocessor.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    normalizer = next(
+        step for step in config["steps"] if step["registry_name"] == "normalizer_processor"
+    )
+    normalizer["config"]["features"]["observation.state"]["shape"] = [4]
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"observation\.state.*feature"):
+        CheckpointAdapter.load(damaged, device="cpu")
+
+
+def test_checkpoint_rejects_mismatched_state_normalization_mode(
+    tiny_checkpoint: Path, tmp_path: Path
+) -> None:
+    damaged = tmp_path / "state_normalization_mismatch"
+    shutil.copytree(tiny_checkpoint, damaged)
+    config_path = damaged / "policy_preprocessor.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    normalizer = next(
+        step for step in config["steps"] if step["registry_name"] == "normalizer_processor"
+    )
+    normalizer["config"]["norm_map"]["STATE"] = "MEAN_STD"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"STATE.*normalization mode"):
+        CheckpointAdapter.load(damaged, device="cpu")
+
+
+def test_checkpoint_rejects_missing_state_normalization_stats(
+    tiny_checkpoint: Path, tmp_path: Path
+) -> None:
+    damaged = tmp_path / "missing_state_stats"
+    shutil.copytree(tiny_checkpoint, damaged)
+    config = json.loads((damaged / "policy_preprocessor.json").read_text(encoding="utf-8"))
+    normalizer = next(
+        step for step in config["steps"] if step["registry_name"] == "normalizer_processor"
+    )
+    state_path = damaged / normalizer["state_file"]
+    stats = load_file(state_path)
+    for key in tuple(stats):
+        if key.startswith("observation.state."):
+            stats.pop(key)
+    save_file(stats, state_path)
+
+    with pytest.raises(ValueError, match=r"observation\.state.*statistics"):
+        CheckpointAdapter.load(damaged, device="cpu")
