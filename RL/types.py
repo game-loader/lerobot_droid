@@ -17,9 +17,8 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Mapping
 from dataclasses import dataclass
-from types import MappingProxyType
+from typing import Never
 
 import torch
 from torch import Tensor
@@ -32,6 +31,20 @@ _INTEGER_DTYPES = {
     torch.int64,
 }
 _INDEX_DTYPES = {torch.int32, torch.int64}
+
+
+class _ReadOnlyFeatureDict(dict[str, Tensor]):
+    def _reject_mutation(self, *_args: object, **_kwargs: object) -> Never:
+        raise TypeError("features mapping is read-only")
+
+    __setitem__ = _reject_mutation
+    __delitem__ = _reject_mutation
+    __ior__ = _reject_mutation
+    clear = _reject_mutation
+    pop = _reject_mutation
+    popitem = _reject_mutation
+    setdefault = _reject_mutation
+    update = _reject_mutation
 
 
 def _nonfinite_value_summary(value: Tensor) -> str:
@@ -66,12 +79,12 @@ def _validate_floating_tensor(name: str, value: Tensor, *, ndim: int) -> None:
 class ObservationBatch:
     """A batch of named observation tensors sharing their leading dimension."""
 
-    features: Mapping[str, Tensor]
+    features: dict[str, Tensor]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.features, Mapping):
+        if not isinstance(self.features, dict):
             raise ValueError(
-                f"features must be a mapping, got {type(self.features).__name__}: "
+                f"features must be a dict, got {type(self.features).__name__}: "
                 f"actual={self.features!r}"
             )
         features = dict(self.features)
@@ -92,7 +105,7 @@ class ObservationBatch:
         batch_size = next(iter(batch_sizes))
         if batch_size == 0:
             raise ValueError("features batch size must be nonzero: actual=0")
-        object.__setattr__(self, "features", MappingProxyType(features))
+        object.__setattr__(self, "features", _ReadOnlyFeatureDict(features))
 
     def batch_size(self) -> int:
         return next(iter(self.features.values())).shape[0]

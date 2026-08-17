@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import dataclasses
 import json
 import pickle
 from collections.abc import Callable
 from pathlib import Path
+from typing import get_type_hints
 
 import pytest
 import torch
@@ -71,8 +73,28 @@ def test_observation_batch_defensively_copies_feature_mapping() -> None:
 def test_observation_batch_feature_mapping_is_read_only() -> None:
     observation = _observation()
 
+    assert isinstance(observation.features, dict)
+    assert get_type_hints(ObservationBatch)["features"] == dict[str, torch.Tensor]
     with pytest.raises(TypeError):
         observation.features["observation.extra"] = torch.zeros(2, 1)
+    with pytest.raises(TypeError):
+        del observation.features["observation.state"]
+    with pytest.raises(TypeError):
+        observation.features.update({"observation.extra": torch.zeros(2, 1)})
+    with pytest.raises(TypeError):
+        observation.features.clear()
+    with pytest.raises(TypeError):
+        observation.features.pop("observation.state")
+    with pytest.raises(TypeError):
+        observation.features.popitem()
+    with pytest.raises(TypeError):
+        observation.features.setdefault("observation.extra", torch.zeros(2, 1))
+    with pytest.raises(TypeError):
+        observation.features.__ior__({"observation.extra": torch.zeros(2, 1)})
+
+    replaced = dataclasses.replace(observation)
+    assert isinstance(replaced.features, dict)
+    assert set(replaced.features) == set(observation.features)
 
 
 def test_observation_batch_pickle_round_trip_preserves_features() -> None:
@@ -80,6 +102,7 @@ def test_observation_batch_pickle_round_trip_preserves_features() -> None:
 
     restored = pickle.loads(pickle.dumps(observation))
 
+    assert isinstance(restored.features, dict)
     assert set(restored.features) == set(observation.features)
     for key, tensor in observation.features.items():
         torch.testing.assert_close(restored.features[key], tensor)
