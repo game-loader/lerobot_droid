@@ -67,6 +67,21 @@ def _fake_episode(
     return episode
 
 
+def _add_rl_fields(
+    episode: dict[str, torch.Tensor], *, success: bool
+) -> dict[str, torch.Tensor]:
+    length = episode["action"].shape[0]
+    episode["next.reward"] = torch.zeros(length, 1, dtype=torch.float32)
+    episode["next.done"] = torch.zeros(length, 1, dtype=torch.bool)
+    episode["next.truncated"] = torch.zeros(length, 1, dtype=torch.bool)
+    episode["next.done"][-1] = True
+    if success:
+        episode["next.reward"][-1] = 1.0
+    else:
+        episode["next.truncated"][-1] = True
+    return episode
+
+
 def test_terminal_success_uses_fifteen_millimeters() -> None:
     assert terminal_success(_episode_metadata(final_lift_height_m=0.015))
     assert not terminal_success(_episode_metadata(final_lift_height_m=0.014999))
@@ -127,6 +142,92 @@ def test_build_decisions_adds_only_terminal_sparse_reward() -> None:
     assert decisions[1].done.item()
     assert decisions[0].discount.item() == pytest.approx(0.99**32)
     assert decisions[1].discount.item() == pytest.approx(0.99**3)
+
+
+def test_canonical_success_fields_drive_chunk_rewards_and_done_flags() -> None:
+    decisions = build_episode_decisions(
+        _add_rl_fields(_fake_episode(length=35), success=True),
+        success=True,
+        n_obs_steps=2,
+        chunk_size=32,
+        gamma=0.99,
+    )
+
+    assert [decision.reward.item() for decision in decisions] == [0.0, 1.0]
+    assert [decision.done.item() for decision in decisions] == [False, True]
+
+
+@pytest.mark.parametrize(
+    ("problem", "match"),
+    [
+        ("early_reward", "reward.*nonterminal"),
+        ("early_done", "final.*done|done.*final"),
+        ("success_truncated", "terminal tuple"),
+        ("failure_not_truncated", "terminal tuple"),
+        ("nonbinary_reward", "terminal tuple|binary"),
+        ("flat_reward", "next.reward.*shape"),
+        ("wide_done", "next.done.*shape"),
+        ("wrong_reward_dtype", "next.reward.*float32"),
+        ("wrong_done_dtype", "next.done.*bool"),
+    ],
+)
+def test_canonical_fields_reject_malformed_episode_rows(problem: str, match: str) -> None:
+    success = problem != "failure_not_truncated"
+    episode = _add_rl_fields(_fake_episode(length=3), success=success)
+    if problem == "early_reward":
+        episode["next.reward"][0] = 1.0
+    elif problem == "early_done":
+        episode["next.done"][0] = True
+    elif problem == "success_truncated":
+        episode["next.truncated"][-1] = True
+    elif problem == "failure_not_truncated":
+        episode["next.truncated"][-1] = False
+    elif problem == "nonbinary_reward":
+        episode["next.reward"][-1] = 0.5
+    elif problem == "flat_reward":
+        episode["next.reward"] = episode["next.reward"].squeeze(1)
+    elif problem == "wide_done":
+        episode["next.done"] = episode["next.done"].expand(-1, 2)
+    elif problem == "wrong_reward_dtype":
+        episode["next.reward"] = episode["next.reward"].to(torch.float64)
+    else:
+        episode["next.done"] = episode["next.done"].to(torch.uint8)
+
+    with pytest.raises(ValueError, match=match):
+        build_episode_decisions(
+            episode,
+            success=success,
+            n_obs_steps=2,
+            chunk_size=2,
+            gamma=0.99,
+        )
+
+
+def test_canonical_fields_must_be_all_or_none() -> None:
+    episode = _add_rl_fields(_fake_episode(length=3), success=True)
+    del episode["next.truncated"]
+
+    with pytest.raises(ValueError, match="partially present.*next.truncated"):
+        build_episode_decisions(
+            episode,
+            success=True,
+            n_obs_steps=2,
+            chunk_size=2,
+            gamma=0.99,
+        )
+
+
+def test_canonical_terminal_reward_must_match_summary_label() -> None:
+    episode = _add_rl_fields(_fake_episode(length=3), success=True)
+
+    with pytest.raises(ValueError, match="summary|disagree"):
+        build_episode_decisions(
+            episode,
+            success=False,
+            n_obs_steps=2,
+            chunk_size=2,
+            gamma=0.99,
+        )
 
 
 def test_failed_episode_keeps_terminal_reward_zero() -> None:
@@ -326,6 +427,38 @@ class _FakeLeRobotDataset:
         self.num_frames = sum(lengths)
 
 
+class _FakeCanonicalLeRobotDataset(_FakeLeRobotDataset):
+    last_instance: "_FakeCanonicalLeRobotDataset | None" = None
+
+    def __init__(self, repo_id: str, root: str | Path, **kwargs: object) -> None:
+        super().__init__(repo_id, root, **kwargs)
+        type(self).last_instance = self
+        self.features.update(
+            {
+                "next.reward": {"shape": [1], "dtype": "float32"},
+                "next.done": {"shape": [1], "dtype": "bool"},
+                "next.truncated": {"shape": [1], "dtype": "bool"},
+            }
+        )
+        for row in self.hf_dataset.rows:
+            row["next.reward"] = torch.zeros(1, dtype=torch.float32)
+            row["next.done"] = torch.zeros(1, dtype=torch.bool)
+            row["next.truncated"] = torch.zeros(1, dtype=torch.bool)
+        for episode_index, metadata in enumerate(self.meta.episodes):
+            final_row = self.hf_dataset.rows[metadata["dataset_to_index"] - 1]
+            final_row["next.done"][0] = True
+            if episode_index == 0:
+                final_row["next.reward"][0] = 1.0
+            else:
+                final_row["next.truncated"][0] = True
+
+
+class _FakePartialCanonicalLeRobotDataset(_FakeCanonicalLeRobotDataset):
+    def __init__(self, repo_id: str, root: str | Path, **kwargs: object) -> None:
+        super().__init__(repo_id, root, **kwargs)
+        del self.features["next.truncated"]
+
+
 class _FakeCameraLeRobotDataset(_FakeLeRobotDataset):
     last_instance: "_FakeCameraLeRobotDataset | None" = None
 
@@ -341,6 +474,115 @@ class _FakeCameraLeRobotDataset(_FakeLeRobotDataset):
         row = dict(self.hf_dataset[index])
         row["observation.image"] = torch.full((3, 2, 2), index, dtype=torch.uint8)
         return row
+
+
+def _write_complete_summary(path: Path, **overrides: object) -> None:
+    payload: dict[str, object] = {
+        "complete": True,
+        "episodes_saved": 2,
+        "episodes": [
+            _episode_metadata(episode_index=0),
+            _episode_metadata(episode_index=1, true_grasp_ever=False),
+        ],
+    }
+    payload.update(overrides)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_canonical_dataset_uses_raw_terminal_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    summary_path = tmp_path / "summary.json"
+    _write_complete_summary(summary_path)
+    monkeypatch.setattr(lerobot_v3, "LeRobotDataset", _FakeCanonicalLeRobotDataset)
+
+    dataset = LeRobotV3DecisionDataset.from_root(
+        dataset_root=tmp_path / "dataset",
+        repo_id="test/canonical",
+        summary_path=summary_path,
+        config=RLConfig(state_dim=3, action_dim=2, chunk_size=2),
+    )
+
+    assert [dataset[index].reward.item() for index in range(len(dataset))] == [0.0, 1.0, 0.0]
+    assert [dataset[index].done.item() for index in range(len(dataset))] == [False, True, True]
+
+
+def test_canonical_dataset_rejects_partial_feature_schema(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    summary_path = tmp_path / "summary.json"
+    _write_complete_summary(summary_path)
+    monkeypatch.setattr(lerobot_v3, "LeRobotDataset", _FakePartialCanonicalLeRobotDataset)
+
+    with pytest.raises(ValueError, match="partially present.*next.truncated"):
+        LeRobotV3DecisionDataset.from_root(
+            dataset_root=tmp_path / "dataset",
+            repo_id="test/partial",
+            summary_path=summary_path,
+            config=RLConfig(state_dim=3, action_dim=2, chunk_size=2),
+        )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"complete": False},
+        {"complete": 1},
+        {"episodes_saved": 1},
+    ],
+)
+def test_canonical_dataset_requires_completed_matching_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, overrides: dict[str, object]
+) -> None:
+    summary_path = tmp_path / "summary.json"
+    _write_complete_summary(summary_path, **overrides)
+    monkeypatch.setattr(lerobot_v3, "LeRobotDataset", _FakeCanonicalLeRobotDataset)
+
+    with pytest.raises(ValueError, match="complete|episodes_saved"):
+        LeRobotV3DecisionDataset.from_root(
+            dataset_root=tmp_path / "dataset",
+            repo_id="test/incomplete-summary",
+            summary_path=summary_path,
+            config=RLConfig(state_dim=3, action_dim=2, chunk_size=2),
+        )
+
+
+def test_canonical_dataset_rejects_staging_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    summary_path = tmp_path / "summary.json"
+    _write_complete_summary(summary_path)
+    monkeypatch.setattr(lerobot_v3, "LeRobotDataset", _FakeCanonicalLeRobotDataset)
+
+    with pytest.raises(ValueError, match="incomplete|staging"):
+        LeRobotV3DecisionDataset.from_root(
+            dataset_root=tmp_path / "run.incomplete" / "dataset",
+            repo_id="test/staging",
+            summary_path=summary_path,
+            config=RLConfig(state_dim=3, action_dim=2, chunk_size=2),
+        )
+
+
+def test_canonical_dataset_cross_checks_five_summary_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    summary_path = tmp_path / "summary.json"
+    _write_complete_summary(
+        summary_path,
+        episodes=[
+            _episode_metadata(episode_index=0, true_grasp_ever=False),
+            _episode_metadata(episode_index=1, true_grasp_ever=False),
+        ],
+    )
+    monkeypatch.setattr(lerobot_v3, "LeRobotDataset", _FakeCanonicalLeRobotDataset)
+
+    with pytest.raises(ValueError, match="summary|disagree"):
+        LeRobotV3DecisionDataset.from_root(
+            dataset_root=tmp_path / "dataset",
+            repo_id="test/disagreement",
+            summary_path=summary_path,
+            config=RLConfig(state_dim=3, action_dim=2, chunk_size=2),
+        )
 
 
 def test_decision_dataset_reports_label_and_chunk_statistics(

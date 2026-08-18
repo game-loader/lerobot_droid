@@ -42,6 +42,15 @@ _SUCCESS_FIELDS = {
     "final_hand_contacts",
 }
 _INTEGER_DTYPES = {torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64}
+_RL_FIELDS = ("next.reward", "next.done", "next.truncated")
+
+
+def _canonical_rl_fields(features: Mapping[str, Any]) -> tuple[str, ...]:
+    present = tuple(key for key in _RL_FIELDS if key in features)
+    if present and len(present) != len(_RL_FIELDS):
+        missing = sorted(set(_RL_FIELDS) - set(present))
+        raise ValueError(f"canonical RL fields are partially present; missing={missing}")
+    return present
 
 
 def _required_bool(metadata: Mapping[str, Any], key: str) -> bool:
@@ -103,7 +112,10 @@ def terminal_success(
 
 
 def load_episode_labels(
-    summary_path: Path | str, *, expected_episode_count: int
+    summary_path: Path | str,
+    *,
+    expected_episode_count: int,
+    require_complete: bool = False,
 ) -> dict[int, bool]:
     """Load and validate terminal success labels from a collection summary."""
 
@@ -125,6 +137,21 @@ def load_episode_labels(
         raise ValueError(f"failed to read collection summary {path}: {exc}") from exc
     if not isinstance(payload, dict):
         raise ValueError(f"collection summary must contain an object, got {payload!r}")
+    if not isinstance(require_complete, bool):
+        raise ValueError(f"require_complete must be a bool, got {require_complete!r}")
+    if require_complete:
+        if payload.get("complete") is not True:
+            raise ValueError("canonical collection summary must have complete=true")
+        episodes_saved = payload.get("episodes_saved")
+        if (
+            isinstance(episodes_saved, bool)
+            or not isinstance(episodes_saved, Integral)
+            or int(episodes_saved) != expected_episode_count
+        ):
+            raise ValueError(
+                "canonical collection summary episodes_saved must match the dataset: "
+                f"expected={expected_episode_count}, got={episodes_saved!r}"
+            )
     records = payload.get("episodes")
     if not isinstance(records, list):
         raise ValueError(f"collection summary episodes must be a list, got {records!r}")
@@ -237,6 +264,47 @@ def _select_history(tensor: Tensor, indices: Sequence[int]) -> Tensor:
     return tensor.index_select(0, index).unsqueeze(0)
 
 
+def _validate_canonical_rl_rows(
+    episode: Mapping[str, Tensor], *, length: int
+) -> tuple[Tensor, Tensor, bool]:
+    reward = episode["next.reward"]
+    done = episode["next.done"]
+    truncated = episode["next.truncated"]
+    for key, tensor, dtype in (
+        ("next.reward", reward, torch.float32),
+        ("next.done", done, torch.bool),
+        ("next.truncated", truncated, torch.bool),
+    ):
+        if not isinstance(tensor, Tensor):
+            raise ValueError(f"{key} must be a torch.Tensor, got {type(tensor).__name__}")
+        if tensor.shape != (length, 1):
+            raise ValueError(f"{key} must have shape [{length}, 1], got {tuple(tensor.shape)}")
+        if tensor.dtype != dtype:
+            raise ValueError(f"{key} must have dtype {dtype}, got {tensor.dtype}")
+    if not torch.isfinite(reward).all().item():
+        raise ValueError("next.reward must contain only finite values")
+
+    flat_reward = reward[:, 0]
+    flat_done = done[:, 0]
+    flat_truncated = truncated[:, 0]
+    if int(flat_done.sum().item()) != 1 or not bool(flat_done[-1].item()):
+        raise ValueError("next.done must be true exactly once on the final frame")
+    if bool(torch.any(flat_reward[:-1] != 0).item()):
+        raise ValueError("next.reward must be zero on every nonterminal frame")
+    if bool(flat_truncated[:-1].any().item()):
+        raise ValueError("next.truncated must be false on every nonterminal frame")
+
+    terminal_reward = float(flat_reward[-1].item())
+    terminal_truncated = bool(flat_truncated[-1].item())
+    terminal_tuple = (terminal_reward, True, terminal_truncated)
+    if terminal_tuple not in {(1.0, True, False), (0.0, True, True)}:
+        raise ValueError(
+            "canonical terminal tuple must be success=(1, true, false) or "
+            f"failure=(0, true, true), got={terminal_tuple}"
+        )
+    return reward, done, terminal_reward == 1.0
+
+
 def build_episode_decisions(
     episode: Mapping[str, Tensor],
     *,
@@ -260,8 +328,20 @@ def build_episode_decisions(
     if not isinstance(success, bool):
         raise ValueError(f"success must be a bool, got {success!r}")
 
+    canonical_fields = _canonical_rl_fields(episode)
     states, actions, observation_tensors = _validate_episode(episode, state_key=state_key)
     length = states.shape[0]
+    canonical_reward: Tensor | None = None
+    canonical_done: Tensor | None = None
+    if canonical_fields:
+        canonical_reward, canonical_done, canonical_success = _validate_canonical_rl_rows(
+            episode, length=length
+        )
+        if canonical_success != success:
+            raise ValueError(
+                "canonical terminal reward disagrees with the collection summary label: "
+                f"reward_success={canonical_success}, summary_success={success}"
+            )
     decisions: list[DecisionBatch] = []
     for start in range(0, length, chunk_size):
         stop = min(start + chunk_size, length)
@@ -288,15 +368,21 @@ def build_episode_decisions(
             action_chunk = torch.cat((action_chunk, padding), dim=0)
         action_valid = torch.arange(chunk_size, device=actions.device) < valid_steps
         terminal = stop == length
+        if canonical_reward is None or canonical_done is None:
+            decision_reward = torch.tensor(
+                [[float(success and terminal)]], dtype=torch.float32, device=actions.device
+            )
+            decision_done = torch.tensor([[terminal]], dtype=torch.bool, device=actions.device)
+        else:
+            decision_reward = canonical_reward[stop - 1].reshape(1, 1)
+            decision_done = canonical_done[stop - 1].reshape(1, 1)
         decision = DecisionBatch(
             observation=observation,
             next_observation=next_observation,
             action=action_chunk.unsqueeze(0),
             action_valid=action_valid.unsqueeze(0),
-            reward=torch.tensor(
-                [[float(success and terminal)]], dtype=torch.float32, device=actions.device
-            ),
-            done=torch.tensor([[terminal]], dtype=torch.bool, device=actions.device),
+            reward=decision_reward,
+            done=decision_done,
             discount=torch.tensor(
                 [[gamma**valid_steps]], dtype=torch.float32, device=actions.device
             ),
@@ -324,6 +410,15 @@ def _feature_shape(features: Mapping[str, Any], key: str) -> list[int]:
     return list(shape)
 
 
+def _feature_dtype(features: Mapping[str, Any], key: str) -> str:
+    if key not in features:
+        raise ValueError(f"dataset features are missing {key!r}")
+    feature = features[key]
+    if not isinstance(feature, Mapping) or not isinstance(feature.get("dtype"), str):
+        raise ValueError(f"dataset feature {key!r} has invalid dtype: {feature!r}")
+    return feature["dtype"]
+
+
 def _stack_values(values: Sequence[Any], *, key: str) -> Tensor:
     tensors: list[Tensor] = []
     for value in values:
@@ -343,8 +438,15 @@ def _load_episode_tensors(
     start: int,
     stop: int,
     observation_keys: Sequence[str],
+    additional_keys: Sequence[str] = (),
 ) -> dict[str, Tensor]:
-    keys = [*observation_keys, "action", "frame_index", "episode_index"]
+    keys = [
+        *observation_keys,
+        *additional_keys,
+        "action",
+        "frame_index",
+        "episode_index",
+    ]
     raw = dataset.hf_dataset[start:stop]
     if not isinstance(raw, Mapping):
         raise ValueError(f"dataset slice [{start}:{stop}] must be a mapping, got {type(raw).__name__}")
@@ -506,6 +608,9 @@ class LeRobotV3DecisionDataset(Dataset[DecisionBatch]):
             raise ValueError(f"config must be an RLConfig, got {type(config).__name__}")
         root = Path(dataset_root)
         dataset = LeRobotDataset(repo_id, root=root)
+        canonical_fields = _canonical_rl_fields(dataset.features)
+        if canonical_fields and any(".incomplete" in part for part in root.parts):
+            raise ValueError(f"canonical dataset staging paths are not loadable: {root}")
         state_shape = _feature_shape(dataset.features, config.state_key)
         action_shape = _feature_shape(dataset.features, "action")
         if state_shape != [config.state_dim]:
@@ -514,8 +619,21 @@ class LeRobotV3DecisionDataset(Dataset[DecisionBatch]):
             )
         if action_shape != [config.action_dim]:
             raise ValueError(f"action shape must be {[config.action_dim]}, got {action_shape}")
+        for key, expected_dtype in (
+            ("next.reward", "float32"),
+            ("next.done", "bool"),
+            ("next.truncated", "bool"),
+        ):
+            if canonical_fields and _feature_shape(dataset.features, key) != [1]:
+                raise ValueError(f"{key} shape must be [1]")
+            if canonical_fields and _feature_dtype(dataset.features, key) != expected_dtype:
+                raise ValueError(f"{key} dtype must be {expected_dtype}")
 
-        labels = load_episode_labels(summary_path, expected_episode_count=dataset.num_episodes)
+        labels = load_episode_labels(
+            summary_path,
+            expected_episode_count=dataset.num_episodes,
+            require_complete=bool(canonical_fields),
+        )
         camera_keys = _camera_keys(dataset)
         observation_keys = {config.state_key}
         observation_keys.update(
@@ -567,6 +685,7 @@ class LeRobotV3DecisionDataset(Dataset[DecisionBatch]):
                 start=start,
                 stop=stop,
                 observation_keys=raw_observation_keys,
+                additional_keys=canonical_fields,
             )
             observed_episode_index = _index_vector(
                 "episode_index", episode["episode_index"], length=length
