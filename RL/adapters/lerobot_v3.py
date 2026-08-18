@@ -43,6 +43,9 @@ _SUCCESS_FIELDS = {
 }
 _INTEGER_DTYPES = {torch.uint8, torch.int8, torch.int16, torch.int32, torch.int64}
 _RL_FIELDS = ("next.reward", "next.done", "next.truncated")
+# Match the simulator/collector's float32 comparison at the exact 15 mm
+# boundary.  Python's 0.015 is slightly larger than the float32 state value.
+SUCCESS_MIN_FINAL_LIFT_HEIGHT = float(torch.tensor(0.015, dtype=torch.float32).item())
 
 
 def _canonical_rl_fields(features: Mapping[str, Any]) -> tuple[str, ...]:
@@ -78,7 +81,7 @@ def _required_real(metadata: Mapping[str, Any], key: str) -> float:
 
 
 def terminal_success(
-    metadata: Mapping[str, Any], *, min_final_lift_height_m: float = 0.015
+    metadata: Mapping[str, Any], *, min_final_lift_height_m: float = SUCCESS_MIN_FINAL_LIFT_HEIGHT
 ) -> bool:
     """Apply the collection acceptance criterion to one episode summary."""
 
@@ -94,6 +97,11 @@ def terminal_success(
             "min_final_lift_height_m must be finite and nonnegative, "
             f"got {min_final_lift_height_m!r}"
         )
+    # Normalize caller-supplied thresholds to the simulator's float32
+    # precision as well as the default constant.
+    min_final_lift_height_m = float(
+        torch.tensor(float(min_final_lift_height_m), dtype=torch.float32).item()
+    )
     missing = sorted(_SUCCESS_FIELDS.difference(metadata))
     if missing:
         raise ValueError(f"episode metadata is missing {missing}")
@@ -456,11 +464,20 @@ def _load_episode_tensors(
             raise ValueError(f"dataset slice [{start}:{stop}] is missing {key!r}")
         value = raw[key]
         if isinstance(value, Tensor):
-            episode[key] = value
+            tensor = value
         elif isinstance(value, Sequence):
-            episode[key] = _stack_values(value, key=key)
+            tensor = _stack_values(value, key=key)
         else:
             raise ValueError(f"dataset slice value for {key!r} is invalid: {value!r}")
+        if key in additional_keys:
+            # The official v3 writer stores a declared shape-(1,) scalar
+            # column as a flat HF slice. Keep the logical adapter contract
+            # explicit by normalizing only at this dataset boundary.
+            if tensor.shape == (stop - start,):
+                tensor = tensor.reshape(stop - start, 1)
+            elif tensor.ndim == 0 and stop - start == 1:
+                tensor = tensor.reshape(1, 1)
+        episode[key] = tensor
     return episode
 
 
@@ -611,6 +628,17 @@ class LeRobotV3DecisionDataset(Dataset[DecisionBatch]):
         canonical_fields = _canonical_rl_fields(dataset.features)
         if canonical_fields and any(".incomplete" in part for part in root.parts):
             raise ValueError(f"canonical dataset staging paths are not loadable: {root}")
+        if canonical_fields:
+            dataset_fps = getattr(dataset, "fps", None)
+            if (
+                isinstance(dataset_fps, bool)
+                or not isinstance(dataset_fps, Integral)
+                or int(dataset_fps) != 60
+            ):
+                raise ValueError(
+                    "canonical Moya RL datasets must use the 60 Hz control rate, "
+                    f"got fps={dataset_fps!r}"
+                )
         state_shape = _feature_shape(dataset.features, config.state_key)
         action_shape = _feature_shape(dataset.features, "action")
         if state_shape != [config.state_dim]:

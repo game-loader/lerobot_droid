@@ -13,7 +13,7 @@ copy of the RL-100 workspace.
 | Point-cloud observation path | `RL/types.py`, `RL/policy/observation_encoder.py` | `observation.state` is complete for the 39D Moya task; image keys are retained and fail explicitly without an encoder. |
 | Environment runners | `RL/adapters/moya_newton.py` | Public `MoyaNewtonEnvConfig` and `make_env(..., use_async_envs=False)`; fused CUDA batching is preserved. |
 | Episode terminal handling | `RL/adapters/moya_newton.py` | Gymnasium `SAME_STEP` reset observations are never used as terminal next states; `final_obs` and `final_info["is_success"]` are authoritative. |
-| Reward | `RL/adapters/lerobot_v3.py`, Moya wrapper | Only the terminal decision receives a binary reward. Success requires the five acceptance conditions and a 15 mm lift. |
+| Reward | `RL/adapters/lerobot_v3.py`, `RL/collectors/moya_il.py`, Moya wrapper | Only the terminal decision receives a binary reward. Success requires the five acceptance conditions and a 15 mm lift compared in float32 precision. Missing sparse grasp/clear-table event keys are zero; malformed present values are rejected. |
 | Action representation | `RL/algorithms/iql.py`, `RL/algorithms/ppo.py` | Full 14D actions remain in the actor/environment contract; constant dimensions `3:12` are masked from critic and likelihood reductions. |
 | Workspace stages | `RL/cli/*.py` | Python 3.12 and `uv`; no Hydra launcher or vendored package assumptions. |
 | Checkpoint output | `RL/checkpointing.py` | Standard LeRobot `pretrained_model` plus hashed RL state, provenance, metrics, and atomic publication. |
@@ -24,6 +24,16 @@ The DP3/PointNet encoder, fixed `point_cloud` schema, flow policy, one-step
 distillation, old MuJoCo runners, real-robot drivers, and automatic image
 critic are not migrated. These assumptions do not match the current state
 checkpoint and would obscure the shared LeRobot observation contract.
+
+## Moya IL Collection Contract
+
+`RL.cli.collect_moya_il` runs the saved Diffusion Policy in the synchronous
+CUDA Moya environment and stores raw pre-action `(39,)` states plus the exact
+postprocessed `(14,)` actions passed to `env.step`. The final frame is always
+`next.done=True`; successful episodes use `(reward=1, truncated=False)` and
+failed horizons use `(reward=0, truncated=True)`. The summary is required for
+canonical datasets and must agree with all five terminal conditions. Dataset
+fps is fixed at 60 and the writer never records video.
 
 ## Provenance
 

@@ -265,6 +265,10 @@ def publish_collection(
 
 Reject an existing final path. Write to sibling `name.incomplete-UUID` with layout `dataset/` and `collection_summary.json`. Write an initial `complete=False` summary, use the official writer, finalize, reload/validate all rows, replace summary with `complete=True`, fsync it, and atomically rename staging to final. Preserve staging and never create final on failure.
 
+The reload validator reads the raw columns once and checks them in linear
+frame order. It also enforces the fixed 60 Hz rate, the float32 15 mm
+threshold semantics, and the five summary conditions before publication.
+
 - [ ] **Step 5: Implement the collection CLI**
 
 Expose:
@@ -417,4 +421,3 @@ UV_CACHE_DIR=.uv-cache uv run --with swanlab==0.9.4   python -m RL.cli.train_off
 ~~~
 
 Persist the PID, stdout/stderr log, resolved paths, and SwanLab URL. Do not claim completion until the final RL checkpoint reloads and its manifest and metric-row count validate.
-

@@ -425,6 +425,7 @@ class _FakeLeRobotDataset:
         self.meta = SimpleNamespace(episodes=episode_rows)
         self.num_episodes = len(lengths)
         self.num_frames = sum(lengths)
+        self.fps = 60
 
 
 class _FakeCanonicalLeRobotDataset(_FakeLeRobotDataset):

@@ -24,6 +24,14 @@ and final_table_contacts == 0
 and final_hand_contacts > 0
 ```
 
+The lift comparison uses the simulator's float32 representation, so the
+stored float32 value for exactly 15 mm is accepted consistently by the
+collector, summary validator, and v3 adapter. Moya may omit sparse
+`reward_components.true_grasp` or `reward_components.clear_table` on steps
+where those events did not fire; an omitted component is interpreted as zero.
+If a component key is present, its vector shape and finite numeric values are
+still validated strictly.
+
 Only the terminal transition receives a sparse reward. A successful terminal
 transition has reward `1`; every other transition, including a failed terminal
 transition, has reward `0`. No video is recorded.
@@ -99,6 +107,10 @@ Every active step must expose correctly shaped per-world values for
 `true_grasp`, `clear_table`, lift height, table contacts, and hand contacts.
 Missing values, malformed masks, or non-finite diagnostics fail immediately,
 not only at terminal time.
+
+The two sparse event components are the intentional exception to the missing
+value rule above: their absent keys mean zero, while malformed present values
+remain fatal.
 
 The terminal post-action simulator state is not written as another actionable
 frame. Its diagnostic values are retained in the episode summary, while

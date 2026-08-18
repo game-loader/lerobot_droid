@@ -7,18 +7,29 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pytest
 
+from RL.adapters.lerobot_v3 import (
+    SUCCESS_MIN_FINAL_LIFT_HEIGHT as ADAPTER_LIFT_THRESHOLD,
+    LeRobotV3DecisionDataset,
+    terminal_success,
+)
 from RL.collectors.moya_il import (
+    CollectedEpisode,
     EpisodeBatch,
     StepDiagnostics,
     batch_seeds,
+    collect_rollouts,
     extract_step_diagnostics,
+    publish_collection,
     recording_mask,
 )
+from RL.config import RLConfig
 
 
 def states(*values: float, num_envs: int | None = None) -> np.ndarray:
@@ -126,6 +137,10 @@ def test_exact_fifteen_millimetres_is_success() -> None:
     assert episode.metadata["success"] is True
     assert episode.rewards[-1, 0] == 1.0
     assert not episode.truncated[-1, 0]
+    assert terminal_success(episode.metadata)
+    assert pytest.approx(
+        float(np.float32(0.015)), abs=0.0
+    ) == ADAPTER_LIFT_THRESHOLD
 
 
 def test_horizon_success_takes_precedence_over_truncation() -> None:
@@ -256,6 +271,54 @@ def test_extract_diagnostics_accepts_per_environment_final_info() -> None:
     assert result.lift_height[0] == np.float32(0.015)
 
 
+def test_missing_sparse_reward_components_are_zero() -> None:
+    info = _collated_info()
+    info["reward_components"] = {}
+    result = extract_step_diagnostics(
+        info,
+        terminated=np.array([False, False]),
+        truncated=np.array([False, False]),
+        num_envs=2,
+    )
+    assert result.true_grasp.tolist() == [0.0, 0.0]
+    assert result.clear_table.tolist() == [0.0, 0.0]
+
+
+def test_missing_final_sparse_reward_components_replace_reset_values_with_zero() -> None:
+    info = _collated_info()
+    info.update(
+        {
+            "final_info": {
+                "reward_components": {},
+                "charger_lift_height": np.array([0.0, 0.0], dtype=np.float32),
+                "charger_table_contacts": np.array([1, 0], dtype=np.int32),
+                "right_hand_charger_contacts": np.array([0, 1], dtype=np.int32),
+            },
+            "_final_info": np.array([True, False], dtype=np.bool_),
+        }
+    )
+    result = extract_step_diagnostics(
+        info,
+        terminated=np.array([False, False]),
+        truncated=np.array([True, False]),
+        num_envs=2,
+    )
+    assert result.true_grasp.tolist() == [0.0, 1.0]
+    assert result.clear_table.tolist() == [0.0, 1.0]
+
+
+def test_present_sparse_reward_component_remains_strict() -> None:
+    info = _collated_info()
+    info["reward_components"]["true_grasp"] = np.ones((2, 1), dtype=np.float32)
+    with pytest.raises(ValueError, match="shape"):
+        extract_step_diagnostics(
+            info,
+            terminated=np.array([False, False]),
+            truncated=np.array([False, False]),
+            num_envs=2,
+        )
+
+
 def test_final_info_mask_must_match_native_done() -> None:
     info = _collated_info()
     info.update(
@@ -348,3 +411,185 @@ def test_state_and_action_contracts_are_validated() -> None:
                 native_done=(False,),
             ),
         )
+
+
+def test_collected_episode_requires_canonical_terminal_tuple() -> None:
+    kwargs = {
+        "states": states(0.0, num_envs=1),
+        "actions": actions(0.0, num_envs=1),
+        "dones": np.array([[True]], dtype=np.bool_),
+        "metadata": {"success": False},
+    }
+    with pytest.raises(ValueError, match="failed terminal transition"):
+        CollectedEpisode(
+            rewards=np.array([[0.0]], dtype=np.float32),
+            truncated=np.array([[False]], dtype=np.bool_),
+            **kwargs,
+        )
+    with pytest.raises(ValueError, match="successful terminal transition"):
+        CollectedEpisode(
+            rewards=np.array([[1.0]], dtype=np.float32),
+            truncated=np.array([[True]], dtype=np.bool_),
+            **{**kwargs, "metadata": {"success": True}},
+        )
+
+
+class _FakeRolloutPolicy:
+    def __init__(self) -> None:
+        self.reset_count = 0
+        self.calls = 0
+        self.returned_actions: list[np.ndarray] = []
+
+    def reset(self) -> None:
+        self.reset_count += 1
+
+    def select_action(self, raw_states: np.ndarray) -> np.ndarray:
+        self.calls += 1
+        action = np.full((raw_states.shape[0], 14), self.calls, dtype=np.float32)
+        self.returned_actions.append(action.copy())
+        return action
+
+
+class _FakeRolloutEnv:
+    num_envs = 4
+
+    def __init__(self) -> None:
+        self.step_count = 0
+        self.executed_actions: list[np.ndarray] = []
+        self.seeds: list[int] | int | None = None
+
+    def reset(self, *, seed: list[int] | int | None = None):
+        self.step_count = 0
+        self.seeds = seed
+        return np.zeros((self.num_envs, 39), dtype=np.float32), {}
+
+    def step(self, action: np.ndarray):
+        self.step_count += 1
+        self.executed_actions.append(action.copy())
+        lift = np.zeros(self.num_envs, dtype=np.float32)
+        lift[:2] = 0.015 if self.step_count >= 2 else 0.0
+        lift[2] = 0.015 if self.step_count >= 3 else 0.0
+        info = {
+            "reward_components": {
+                "true_grasp": np.ones(self.num_envs, dtype=np.float32),
+                "clear_table": np.ones(self.num_envs, dtype=np.float32),
+            },
+            "charger_lift_height": lift,
+            "charger_table_contacts": np.zeros(self.num_envs, dtype=np.int32),
+            "right_hand_charger_contacts": np.ones(self.num_envs, dtype=np.int32),
+        }
+        terminated = np.zeros(self.num_envs, dtype=np.bool_)
+        truncated = np.zeros(self.num_envs, dtype=np.bool_)
+        return (
+            np.full((self.num_envs, 39), self.step_count, dtype=np.float32),
+            np.zeros(self.num_envs, dtype=np.float32),
+            terminated,
+            truncated,
+            info,
+        )
+
+
+def test_collect_rollouts_keeps_tail_order_and_executed_actions() -> None:
+    env = _FakeRolloutEnv()
+    policy = _FakeRolloutPolicy()
+    result = collect_rollouts(
+        env,
+        policy,
+        target_episodes=3,
+        episode_length=3,
+        base_seed=100,
+    )
+    assert [episode.metadata["episode_index"] for episode in result.episodes] == [0, 1, 2]
+    assert [episode.metadata["world_index"] for episode in result.episodes] == [0, 1, 2]
+    assert policy.reset_count == 1
+    assert len(env.executed_actions) == policy.calls
+    for episode in result.episodes:
+        for row in episode.actions:
+            assert any(np.array_equal(row, action[0]) for action in env.executed_actions)
+    assert all(episode.metadata["success"] for episode in result.episodes)
+
+
+def _manual_episode(*, success: bool) -> CollectedEpisode:
+    return CollectedEpisode(
+        states=np.zeros((2, 39), dtype=np.float32),
+        actions=np.zeros((2, 14), dtype=np.float32),
+        rewards=np.array([[0.0], [1.0 if success else 0.0]], dtype=np.float32),
+        dones=np.array([[False], [True]], dtype=np.bool_),
+        truncated=np.array([[False], [not success]], dtype=np.bool_),
+        metadata={
+            "episode_index": 0 if success else 1,
+            "true_grasp_ever": success,
+            "clear_table_ever": success,
+            "final_lift_height_m": float(np.float32(0.015)) if success else 0.0,
+            "final_table_contacts": 0,
+            "final_hand_contacts": 1 if success else 0,
+            "success": success,
+            "terminal_reason": "success" if success else "horizon",
+        },
+    )
+
+
+def test_publish_collection_round_trips_canonical_v3_without_video(tmp_path: Path) -> None:
+    output = tmp_path / "collection"
+    success = _manual_episode(success=True)
+    failure = _manual_episode(success=False)
+    published = publish_collection(
+        output,
+        repo_id="local/moya-il-test",
+        episodes=(success, failure),
+        summary={"checkpoint_model_sha256": "a" * 64},
+        fps=60,
+    )
+    assert published == output
+    assert (output / "dataset" / "meta" / "info.json").is_file()
+    payload = json.loads((output / "collection_summary.json").read_text())
+    assert payload["complete"] is True
+    assert payload["episodes_saved"] == 2
+    assert terminal_success(payload["episodes"][0])
+    assert not (output / "dataset" / "videos").exists()
+    assert not (output / "dataset" / "images").exists()
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    loaded = LeRobotDataset(
+        "local/moya-il-test", root=output / "dataset", download_videos=False
+    )
+    assert loaded.meta.info.codebase_version == "v3.0"
+    assert loaded.num_episodes == 2
+    assert tuple(loaded.features["observation.state"]["shape"]) == (39,)
+    assert tuple(loaded.features["action"]["shape"]) == (14,)
+    assert tuple(loaded.features["next.reward"]["shape"]) == (1,)
+    row = loaded.get_raw_item(1)
+    assert np.asarray(row["next.reward"]).reshape(-1).tolist() == [1.0]
+    assert np.asarray(row["next.done"]).reshape(-1).tolist() == [True]
+    assert np.asarray(row["next.truncated"]).reshape(-1).tolist() == [False]
+
+    decisions = LeRobotV3DecisionDataset.from_root(
+        dataset_root=output / "dataset",
+        repo_id="local/moya-il-test",
+        summary_path=output / "collection_summary.json",
+        config=RLConfig(state_dim=39, action_dim=14, chunk_size=2),
+    )
+    assert len(decisions) == 2
+    assert [decisions[index].reward.item() for index in range(len(decisions))] == [1.0, 0.0]
+
+
+def test_publish_failure_leaves_only_incomplete_staging(tmp_path: Path, monkeypatch) -> None:
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    def fail_create(*_args, **_kwargs):
+        raise RuntimeError("writer failure")
+
+    monkeypatch.setattr(LeRobotDataset, "create", fail_create)
+    output = tmp_path / "collection"
+    with pytest.raises(RuntimeError, match="writer failure"):
+        publish_collection(
+            output,
+            repo_id="local/moya-il-failure",
+            episodes=(_manual_episode(success=True),),
+            summary={},
+        )
+    assert not output.exists()
+    staging = list(tmp_path.glob("collection.incomplete-*"))
+    assert len(staging) == 1
+    payload = json.loads((staging[0] / "collection_summary.json").read_text())
+    assert payload["complete"] is False

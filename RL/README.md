@@ -30,6 +30,29 @@ and final_table_contacts == 0
 and final_hand_contacts > 0
 ```
 
+The comparison is performed in the simulator's `float32` precision, so an
+exact stored value of `0.015 m` is accepted. During rollout, missing
+`reward_components.true_grasp` or `reward_components.clear_table` entries mean
+zero for that step; malformed present entries still fail validation. The
+collector stops a world on its first successful terminal step and keeps failed
+horizon episodes too. It writes only the canonical v3 fields
+`next.reward`, `next.done`, and `next.truncated` at the fixed 60 Hz rate.
+
+To collect the first 100 state-only episodes from the 080000 checkpoint:
+
+```bash
+uv run python -m RL.cli.collect_moya_il \
+  --checkpoint outputs/train/moya_diffusion_300k_20260815-093537/train/checkpoints/080000/pretrained_model \
+  --output-dir outputs/rl100/collections/moya_diffusion_080000_sparse_100 \
+  --repo-id local/moya-diffusion-080000-sparse-100 \
+  --episodes 100 --num-envs 16 --episode-length 930 \
+  --inference-steps 100 --device cuda --sim-device cuda:0
+```
+
+The writer stages data under a sibling `.incomplete-*` directory, reloads and
+checks every raw column, then atomically publishes `dataset/` and
+`collection_summary.json`. No image or video directory is created.
+
 ## Environment
 
 Install the locked project and optional runtime dependencies in the repository
