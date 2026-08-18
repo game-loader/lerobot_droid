@@ -20,7 +20,7 @@ from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 from lerobot.policies.factory import make_pre_post_processors
 from RL.adapters.checkpoint import CheckpointAdapter
 from RL.checkpointing import RLProvenance, load_rl_checkpoint
-from RL.cli.train_online import _checkpoint_root, _parser
+from RL.cli.train_online import _checkpoint_root, _parser, _restore_online_state
 from RL.config import RLConfig, TraceConfig
 from RL.policy.diffusion_adapter import DiffusionRLAdapter
 from RL.trainers.online import (
@@ -286,6 +286,26 @@ def test_online_checkpoint_contains_reloadable_policy_and_value_state(tmp_path: 
     saved_value = loaded.state.trainer_state["value_network"]
     for key, value in trainer.value_network.state_dict().items():
         torch.testing.assert_close(saved_value[key], value.cpu())
+
+    resumed_current = DiffusionRLAdapter(loaded.current, current.trace_config)
+    resumed_old = _adapter(tmp_path / "resumed-old")
+    resumed_old.policy.load_state_dict(resumed_current.policy.state_dict(), strict=True)
+    resumed = OnlineTrainer(
+        current_policy=resumed_current,
+        old_policy=resumed_old,
+        metrics_path=None,
+        gamma=0.9,
+        ppo_epochs=1,
+    )
+    _restore_online_state(loaded, resumed)
+    assert len(resumed._metrics_snapshot) == resumed.counters.metrics_rows == 1
+    reloaded = load_rl_checkpoint(
+        resumed.save_checkpoint(
+            tmp_path / "resumed-checkpoint", provenance=provenance, rl_config=config
+        ),
+        device="cpu",
+    )
+    assert reloaded.state.counters.metrics_rows == 1
 
 
 def test_nonfinite_value_loss_does_not_step_actor_or_value(tmp_path: Path) -> None:

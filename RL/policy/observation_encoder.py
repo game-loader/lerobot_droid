@@ -45,16 +45,26 @@ def _positive_int(name: str, value: int) -> None:
         raise ValueError(f"{name} must be a positive integer, got {value!r}")
 
 
+def is_image_feature(key: str, value: Tensor) -> bool:
+    """Recognize canonical and common Gym image keys without matching metadata."""
+
+    lowered = key.lower()
+    if "metadata" in lowered or value.ndim < 4:
+        return False
+    return (
+        key == "observation.image"
+        or key.startswith("observation.image.")
+        or key.startswith("observation.images.")
+        or any(token in lowered for token in ("pixel", "rgb", "camera", "front", "rear"))
+    )
+
+
 def _image_keys(observation: ObservationBatch, *, state_key: str) -> list[str]:
     keys: list[str] = []
     for key in observation.features:
         if key == state_key:
             continue
-        if (
-            key == "observation.image"
-            or key.startswith("observation.image.")
-            or key.startswith("observation.images.")
-        ):
+        if is_image_feature(key, observation.features[key]):
             keys.append(key)
     return sorted(keys)
 

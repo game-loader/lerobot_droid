@@ -64,6 +64,19 @@ def test_images_require_registered_feature_encoder() -> None:
         encoder(observation)
 
 
+def test_generic_pixels_require_registered_feature_encoder() -> None:
+    encoder = StateFeatureEncoder(state_dim=39, n_obs_steps=2, hidden_dims=(64,), output_dim=32)
+    observation = ObservationBatch(
+        {
+            "observation.state": torch.zeros(1, 2, 39),
+            "pixels": torch.zeros(1, 2, 3, 16, 16),
+        }
+    )
+
+    with pytest.raises(ImageEncoderRequiredError, match="pixels"):
+        encoder(observation)
+
+
 class _MeanImageEncoder(ObservationFeatureEncoder):
     @property
     def output_dim(self) -> int:

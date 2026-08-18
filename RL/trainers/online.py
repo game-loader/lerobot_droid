@@ -36,6 +36,7 @@ from RL.policy.diffusion_adapter import DiffusionRLAdapter
 from RL.policy.observation_encoder import (
     ObservationFeatureEncoder,
     StateFeatureEncoder,
+    is_image_feature,
 )
 from RL.types import DenoisingTrace, ObservationBatch
 
@@ -119,21 +120,6 @@ def _validate_env_action(env: Any, action: np.ndarray, *, num_envs: int) -> None
         raise ValueError("policy action is outside the environment action space")
 
 
-def _is_image_key(key: str) -> bool:
-    return (
-        key == "observation.image"
-        or key.startswith("observation.image.")
-        or key.startswith("observation.images.")
-    )
-
-
-def _is_image_like_key(key: str) -> bool:
-    lowered = key.lower()
-    return _is_image_key(key) or any(
-        token in lowered for token in ("image", "pixel", "rgb", "camera")
-    )
-
-
 def _raw_feature_mapping(raw: Any, *, num_envs: int) -> dict[str, Tensor]:
     """Convert common Gym/Moya observation forms into named tensors.
 
@@ -159,10 +145,10 @@ def _raw_feature_mapping(raw: Any, *, num_envs: int) -> dict[str, Tensor]:
         for key, value in raw.items():
             if key == state_key or key in _STATE_ALIASES:
                 continue
-            if isinstance(key, str) and (
-                _is_image_like_key(key) or key.startswith("observation.")
-            ):
-                result[key] = _as_tensor(value)
+            if isinstance(key, str):
+                tensor_value = _as_tensor(value)
+                if key.startswith("observation.") or is_image_feature(key, tensor_value):
+                    result[key] = tensor_value
         if not result:
             raise ValueError(
                 "observation mapping must contain one of "
@@ -191,7 +177,7 @@ def _reset_history(features: Mapping[str, Tensor], n_obs_steps: int) -> dict[str
         # unambiguous; images need an additional channel axis, so a single
         # RGB frame [N,3,H,W] is never confused with [N,T,C,H,W].
         is_state_history = key == "observation.state" and value.ndim == 3
-        is_image_history = _is_image_like_key(key) and value.ndim >= 5
+        is_image_history = is_image_feature(key, value) and value.ndim >= 5
         if (is_state_history or is_image_history) and value.shape[1] == n_obs_steps:
             result[key] = value.clone()
         else:
@@ -516,6 +502,7 @@ class OnlineTrainer:
         self.seed = seed
         self.logger = logger
         self._generator = old_policy.make_generator(seed)
+        self._runtime_contract: dict[str, str | int | float | bool | None] = {}
 
         if value_network is not None and value_encoder is not None:
             raise ValueError("provide either value_network or value_encoder, not both")
@@ -573,13 +560,45 @@ class OnlineTrainer:
 
         return {"generator": self._generator.get_state().detach().cpu().clone()}
 
+    def set_runtime_contract(self, contract: Mapping[str, Any]) -> None:
+        if not isinstance(contract, Mapping):
+            raise ValueError("online runtime contract must be a mapping")
+        normalized: dict[str, str | int | float | bool | None] = {}
+        for key, value in contract.items():
+            if not isinstance(key, str) or not key:
+                raise ValueError("online runtime contract keys must be nonempty strings")
+            if value is None or isinstance(value, (str, int, bool)) or (
+                isinstance(value, float) and math.isfinite(value)
+            ):
+                normalized[key] = value
+            else:
+                raise ValueError(
+                    f"online runtime contract value {key!r} must be a finite scalar"
+                )
+        self._runtime_contract = normalized
+
+    def training_contract(self) -> dict[str, str | int | float | bool | None]:
+        return {
+            "actor_clip_ratio": self.actor_clip_ratio,
+            "value_clip_ratio": self.value_clip_ratio,
+            "gradient_clip_norm": self.gradient_clip_norm,
+            "gamma": self.gamma,
+            "gae_lambda": self.gae_lambda,
+            "ppo_epochs": self.ppo_epochs,
+            "minibatch_size": self.minibatch_size,
+            "seed": self.seed,
+            **self._runtime_contract,
+        }
+
     def restore_sampler_state(self, state: Mapping[str, Any]) -> None:
         if not isinstance(state, Mapping) or "generator" not in state:
             raise ValueError("online sampler state must contain a generator state")
         generator_state = state["generator"]
         if not isinstance(generator_state, Tensor) or generator_state.dtype != torch.uint8:
             raise ValueError("online sampler generator state must be a uint8 tensor")
-        self._generator.set_state(generator_state.to(device=self._generator.device))
+        # PyTorch's CUDA generator implementation accepts a strided CPU
+        # ByteTensor for set_state, even though samples are generated on CUDA.
+        self._generator.set_state(generator_state.detach().cpu().contiguous())
 
     def _value(self, observation: ObservationBatch) -> Tensor:
         normalized = self.current_policy.checkpoint.normalize_observation(
@@ -733,6 +752,16 @@ class OnlineTrainer:
                 next_frames["observation.state"] = torch.as_tensor(
                     next_state, dtype=torch.float32, device=self.device
                 )
+                image_keys = [
+                    key
+                    for key, value in reset_frames.items()
+                    if key != "observation.state" and is_image_feature(key, value)
+                ]
+                if np.any(newly_done) and image_keys:
+                    raise ValueError(
+                        "terminal image observations require a final_obs image adapter; "
+                        f"cannot safely use SAME_STEP reset images for {image_keys}"
+                    )
 
                 # Build one terminal-aware history for the stored transition,
                 # while continuing the next policy history from SAME_STEP's
@@ -1007,6 +1036,9 @@ class OnlineTrainer:
             "gae/advantage_mean": float(advantage.mean().item()),
             "gae/return_mean": float(returns.mean().item()),
             "rollout/environment_steps": float(rollout.executed_steps.sum().item()),
+            "rollout/reward_mean": float(rollout.reward.float().mean().item()),
+            "rollout/success_rate": float(rollout.success.float().mean().item()),
+            "rollout/terminal_count": float(rollout.done.float().sum().item()),
         }
         return self._write_metrics(metrics)
 
@@ -1069,7 +1101,10 @@ class OnlineTrainer:
                 provenance=provenance,
                 rl_config=rl_config,
                 metrics_path=metrics_path,
-                trainer_state={"value_network": dict(self.value_network.state_dict())},
+                trainer_state={
+                    "value_network": dict(self.value_network.state_dict()),
+                    "online_contract": self.training_contract(),
+                },
                 sampler_state=self.sampler_state(),
             )
         finally:

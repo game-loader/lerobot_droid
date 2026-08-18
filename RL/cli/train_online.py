@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import shutil
 import subprocess
 from collections.abc import Callable, Mapping
@@ -166,6 +167,9 @@ def _restore_online_state(loaded: LoadedRLCheckpoint, trainer: OnlineTrainer) ->
     value_state = loaded.state.trainer_state.get("value_network")
     if not isinstance(value_state, Mapping):
         raise ValueError("online checkpoint is missing trainer.value_network state")
+    saved_contract = loaded.state.trainer_state.get("online_contract")
+    if not isinstance(saved_contract, Mapping) or dict(saved_contract) != trainer.training_contract():
+        raise ValueError("online checkpoint training contract does not match the requested resume")
     expected_value = trainer.value_network.state_dict()
     if set(value_state) != set(expected_value):
         raise ValueError("online checkpoint value network keys disagree")
@@ -186,9 +190,7 @@ def _restore_online_state(loaded: LoadedRLCheckpoint, trainer: OnlineTrainer) ->
         raise ValueError("online checkpoint is missing a valid sampler generator state")
     sampler_probe = torch.Generator(device=trainer._generator.device)
     try:
-        sampler_probe.set_state(
-            sampler_state["generator"].to(device=trainer._generator.device)
-        )
+        sampler_probe.set_state(sampler_state["generator"].detach().cpu().contiguous())
     except RuntimeError as exc:
         raise ValueError("online checkpoint sampler generator state is malformed") from exc
 
@@ -200,6 +202,18 @@ def _restore_online_state(loaded: LoadedRLCheckpoint, trainer: OnlineTrainer) ->
     )
     trainer.value_network.load_state_dict(dict(value_state), strict=True)
     trainer.restore_sampler_state(sampler_state)
+    historical_metrics: list[dict[str, float]] = []
+    for line in loaded.metrics_path.read_text(encoding="utf-8").splitlines():
+        row = json.loads(line)
+        if not isinstance(row, Mapping):
+            raise ValueError("online checkpoint metric rows must be JSON objects")
+        converted = {str(key): float(value) for key, value in row.items()}
+        if not all(math.isfinite(value) for value in converted.values()):
+            raise ValueError("online checkpoint metric rows must be finite")
+        historical_metrics.append(converted)
+    if len(historical_metrics) != counters.metrics_rows:
+        raise ValueError("online checkpoint metric history disagrees with its counters")
+    trainer._metrics_snapshot = historical_metrics
     trainer.counters = counters
 
 
@@ -280,6 +294,18 @@ def run(args: argparse.Namespace) -> Path:
         )
         for group in trainer.value_optimizer.param_groups:
             group["lr"] = args.value_lr
+        trainer.set_runtime_contract(
+            {
+                "num_envs": args.num_envs,
+                "rollout_decisions": args.rollout_decisions,
+                "episode_length": args.episode_length,
+                "sim_device": args.sim_device,
+                "policy_device": args.device,
+                "actor_lr": args.actor_lr,
+                "value_lr": args.value_lr,
+                "headless": True,
+            }
+        )
         if loaded is not None:
             _restore_online_state(loaded, trainer)
 
