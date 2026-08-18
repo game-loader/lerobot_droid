@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import math
+from collections.abc import Mapping
 from pathlib import Path
 
 import torch
@@ -22,6 +23,7 @@ from RL.algorithms.ppo import denoising_ppo_loss
 from RL.checkpointing import RLCounters, RLProvenance, save_rl_checkpoint
 from RL.config import RLConfig
 from RL.policy.diffusion_adapter import DiffusionRLAdapter
+from RL.tracking import ScalarTracker
 from RL.types import DecisionBatch
 
 
@@ -55,6 +57,7 @@ class OfflineTrainer:
         gradient_clip_norm: float = 1.0,
         old_policy_sync_interval: int = 0,
         dynamics: StateDynamicsEnsemble | None = None,
+        tracker: ScalarTracker | None = None,
     ) -> None:
         if not isinstance(current_policy, DiffusionRLAdapter) or not isinstance(
             old_policy, DiffusionRLAdapter
@@ -99,6 +102,7 @@ class OfflineTrainer:
         self.gradient_clip_norm = float(gradient_clip_norm)
         self.old_policy_sync_interval = old_policy_sync_interval
         self.dynamics = dynamics
+        self.tracker = tracker
         self.counters = RLCounters()
         self.metrics_path.parent.mkdir(parents=True, exist_ok=True)
         self.old_policy.policy.eval()
@@ -126,19 +130,46 @@ class OfflineTrainer:
             action=normalized_action,
         )
 
-    def _append_metrics(self, metrics: dict[str, float]) -> None:
-        metrics = _finite_metrics(metrics)
+    def _write_metrics_row(self, row: Mapping[str, float]) -> None:
         with self.metrics_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(metrics, sort_keys=True, allow_nan=False) + "\n")
+            handle.write(json.dumps(dict(row), sort_keys=True, allow_nan=False) + "\n")
             handle.flush()
-        self.counters = dataclasses.replace(
-            self.counters, metrics_rows=self.counters.metrics_rows + 1
+
+    @staticmethod
+    def _validate_phase_id(phase_id: int) -> int:
+        if isinstance(phase_id, bool) or not isinstance(phase_id, int) or phase_id < 0:
+            raise ValueError(f"phase_id must be a nonnegative integer, got {phase_id!r}")
+        return phase_id
+
+    def record_metrics(
+        self, metrics: Mapping[str, float], phase_id: int = 2
+    ) -> dict[str, float]:
+        """Persist one post-update row, then mirror it remotely.
+
+        The local row and counter are committed before a tracker is called so
+        strict remote failures leave an auditable partial run.
+        """
+
+        finite = _finite_metrics(dict(metrics))
+        phase_id = self._validate_phase_id(phase_id)
+        row_number = self.counters.metrics_rows + 1
+        row: dict[str, float] = dict(finite)
+        row.update(
+            {
+                "progress/metrics_rows": float(row_number),
+                "progress/iql_updates": float(self.counters.iql_updates),
+                "progress/actor_updates": float(self.counters.actor_updates),
+                "progress/samples_seen": float(self.counters.samples_seen),
+                "progress/decisions_seen": float(self.counters.decisions_seen),
+                "progress/phase_id": float(phase_id),
+            }
         )
-
-    def record_metrics(self, metrics: dict[str, float]) -> None:
-        """Append one finite scalar row to the run log."""
-
-        self._append_metrics(metrics)
+        row = _finite_metrics(row)
+        self._write_metrics_row(row)
+        self.counters = dataclasses.replace(self.counters, metrics_rows=row_number)
+        if self.tracker is not None:
+            self.tracker.log(row, step=row_number)
+        return row
 
     def train_iql_step(self, batch: DecisionBatch) -> dict[str, float]:
         normalized = self.normalized_batch(batch)
@@ -253,7 +284,7 @@ class OfflineTrainer:
         self.counters = dataclasses.replace(
             self.counters, global_updates=self.counters.global_updates + 1
         )
-        self._append_metrics(metrics)
+        self.record_metrics(metrics, phase_id=2)
         return _finite_metrics(metrics)
 
     def save_checkpoint(

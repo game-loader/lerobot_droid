@@ -25,6 +25,7 @@ from RL.checkpointing import RLProvenance
 from RL.config import RLConfig, TraceConfig
 from RL.policy.diffusion_adapter import DiffusionRLAdapter
 from RL.policy.observation_encoder import StateFeatureEncoder
+from RL.tracking import SwanLabConfig, create_swanlab_tracker
 from RL.trainers.offline import OfflineTrainer
 from RL.types import DecisionBatch
 
@@ -59,6 +60,14 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--inference-steps", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--swanlab-project")
+    parser.add_argument("--swanlab-run-name")
+    parser.add_argument(
+        "--swanlab-mode",
+        choices=("online", "offline", "local", "disabled"),
+        default="disabled",
+    )
+    parser.add_argument("--swanlab-strict", action="store_true")
     parser.add_argument("--smoke", action="store_true")
     return parser
 
@@ -117,7 +126,37 @@ def _build_provenance(
     )
 
 
+def _validate_output_dir(output_dir: Path) -> None:
+    if not output_dir.exists():
+        return
+    if not output_dir.is_dir():
+        raise ValueError(f"output_dir must be a directory: {output_dir}")
+    if next(output_dir.iterdir(), None) is not None:
+        raise FileExistsError(f"output_dir must be empty: {output_dir}")
+
+
+def _tracking_run_config(
+    args: argparse.Namespace,
+    *,
+    dataset_summary: dict[str, object],
+) -> dict[str, object]:
+    resolved_args = {
+        key: str(value) if isinstance(value, Path) else value
+        for key, value in vars(args).items()
+    }
+    return {
+        "arguments": resolved_args,
+        "dataset": dict(dataset_summary),
+        "hashes": {
+            "checkpoint_model_sha256": _sha256(args.checkpoint / "model.safetensors"),
+            "checkpoint_config_sha256": _sha256(args.checkpoint / "config.json"),
+            "dataset_summary_sha256": _sha256(args.summary),
+        },
+    }
+
+
 def run(args: argparse.Namespace) -> Path:
+    _validate_output_dir(args.output_dir)
     if args.smoke:
         args.iql_steps = 1
         args.actor_steps = 1
@@ -149,7 +188,8 @@ def run(args: argparse.Namespace) -> Path:
         summary_path=args.summary,
         config=rl_config,
     )
-    print(json.dumps(dataset.inspection_summary(), sort_keys=True))
+    dataset_summary = dataset.inspection_summary()
+    print(json.dumps(dataset_summary, sort_keys=True))
     batches = _batches(dataset, batch_size=args.batch_size)
     encoder = StateFeatureEncoder(
         state_dim=state_dim,
@@ -169,33 +209,48 @@ def run(args: argparse.Namespace) -> Path:
         v_lr=3e-4,
     ).to(next(current.policy.parameters()).device)
     actor_optimizer = torch.optim.Adam(current.policy.parameters(), lr=1e-5)
-    trainer = OfflineTrainer(
-        current_policy=current,
-        old_policy=old,
-        iql=iql,
-        actor_optimizer=actor_optimizer,
-        metrics_path=args.output_dir / "metrics.jsonl",
-        actor_clip_ratio=0.2,
+    tracker = create_swanlab_tracker(
+        SwanLabConfig(
+            project=args.swanlab_project or "",
+            run_name=args.swanlab_run_name,
+            mode=args.swanlab_mode,
+            log_dir=args.output_dir / "swanlog",
+            strict=args.swanlab_strict,
+        ),
+        _tracking_run_config(args, dataset_summary=dataset_summary),
     )
-    for _ in range(args.iql_steps):
-        trainer.record_metrics(trainer.train_iql_step(next(batches)))
-    for index in range(args.actor_steps):
-        metrics = trainer.train_actor_step(
-            next(batches), generator=current.make_generator(args.seed + index + 1)
+    try:
+        trainer = OfflineTrainer(
+            current_policy=current,
+            old_policy=old,
+            iql=iql,
+            actor_optimizer=actor_optimizer,
+            metrics_path=args.output_dir / "metrics.jsonl",
+            actor_clip_ratio=0.2,
+            tracker=tracker,
         )
-        trainer.record_metrics(metrics)
-    provenance = _build_provenance(
-        adapter=current_checkpoint,
-        checkpoint=args.checkpoint,
-        dataset_root=args.dataset_root,
-        repo_id=args.repo_id,
-        summary=args.summary,
-        config=rl_config,
-    )
-    destination = args.output_dir / "checkpoints" / "final"
-    saved = trainer.save_checkpoint(destination, provenance=provenance, rl_config=rl_config)
-    print(f"saved={saved}")
-    return saved
+        for _ in range(args.iql_steps):
+            trainer.record_metrics(trainer.train_iql_step(next(batches)), 0)
+        for index in range(args.actor_steps):
+            metrics = trainer.train_actor_step(
+                next(batches), generator=current.make_generator(args.seed + index + 1)
+            )
+            trainer.record_metrics(metrics, 1)
+        provenance = _build_provenance(
+            adapter=current_checkpoint,
+            checkpoint=args.checkpoint,
+            dataset_root=args.dataset_root,
+            repo_id=args.repo_id,
+            summary=args.summary,
+            config=rl_config,
+        )
+        destination = args.output_dir / "checkpoints" / "final"
+        saved = trainer.save_checkpoint(destination, provenance=provenance, rl_config=rl_config)
+        print(f"saved={saved}")
+        return saved
+    finally:
+        if tracker is not None:
+            tracker.finish()
 
 
 def main() -> None:
