@@ -210,8 +210,20 @@ def _contract_from_env(env: Any) -> dict[str, Any]:
         raise RuntimeError("Moya environment contract payload/hash is malformed")
     try:
         int(digest, 16)
-        return json.loads(json.dumps(contract, sort_keys=True))
-    except (TypeError, ValueError) as exc:
+        normalized = json.loads(json.dumps(contract, sort_keys=True, allow_nan=False))
+        canonical = json.dumps(
+            {"schema_version": int(schema_version), "payload": normalized["payload"]},
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        expected_digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        if digest != expected_digest:
+            raise RuntimeError(
+                "Moya environment contract sha256 does not match schema_version/payload"
+            )
+        return normalized
+    except (TypeError, ValueError, KeyError) as exc:
         raise RuntimeError("Moya environment contract must be strict JSON with a hex SHA-256") from exc
 
 
@@ -227,9 +239,12 @@ def _summary(
     config_path = checkpoint / "config.json"
     if not config_path.is_file():
         raise ValueError(f"checkpoint is missing config.json: {config_path}")
+    payload = environment_contract.get("payload")
+    contract_task = payload.get("task", {}).get("task") if isinstance(payload, Mapping) else None
+    task = contract_task if isinstance(contract_task, str) and contract_task.strip() else "moya_charger_grasp"
     return {
         "collector": "RL.cli.collect_moya_il",
-        "task": "moya_charger_grasp",
+        "task": task,
         "checkpoint": str(checkpoint),
         "checkpoint_model_sha256": _sha256(model_path),
         "checkpoint_config_sha256": _sha256(config_path),
