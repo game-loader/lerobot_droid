@@ -75,6 +75,8 @@ class PromotionDecision:
     relative_margin: float
     dynamics_validation_loss: float
     max_validation_loss: float
+    rollout_disagreement: float | None
+    max_rollout_disagreement: float | None
     promote: bool
     reason: str
 
@@ -176,6 +178,25 @@ class StateDynamicsEnsemble(nn.Module):
     @property
     def device(self) -> torch.device:
         return next(self.members.parameters()).device
+
+    @torch.no_grad()
+    def sync_feature_encoder(self, source: ObservationFeatureEncoder) -> None:
+        """Refresh the frozen dynamics feature copy from a trained encoder.
+
+        The dynamics heads remain independently optimized, but their feature
+        projection can follow IQL's representation after critic warm-up. This
+        avoids silently freezing a random pre-IQL encoder snapshot when the
+        ensemble is constructed before the offline loop starts.
+        """
+
+        if not isinstance(source, ObservationFeatureEncoder):
+            raise ValueError("source must be an ObservationFeatureEncoder")
+        if source.output_dim != self.feature_encoder.output_dim:
+            raise ValueError(
+                "source and dynamics feature encoders must have matching output_dim"
+            )
+        self.feature_encoder.load_state_dict(source.state_dict(), strict=True)
+        self.feature_encoder.eval()
 
     def train(self, mode: bool = True) -> StateDynamicsEnsemble:
         super().train(mode)
@@ -284,7 +305,14 @@ class StateDynamicsEnsemble(nn.Module):
         predicted_state = output[..., :state_values].reshape_as(state_delta)
         predicted_reward = output[..., state_values : state_values + 1]
         predicted_done = output[..., state_values + 1 : state_values + 2]
-        state_loss = functional.mse_loss(predicted_state, state_delta)
+        # The terminal next observation in the LeRobot decision adapter is a
+        # repeated final frame.  It is a bookkeeping value, not a learned
+        # physical transition, so terminal samples do not contribute to the
+        # state-delta regression. Reward and done heads still train on them.
+        nonterminal = (~done.bool()).view(-1, 1, 1)
+        state_squared_error = (predicted_state - state_delta).square()
+        state_loss = torch.where(nonterminal, state_squared_error, 0.0).sum()
+        state_loss = state_loss / nonterminal.expand_as(state_squared_error).sum().clamp_min(1)
         reward_loss = functional.binary_cross_entropy_with_logits(predicted_reward, reward)
         done_loss = functional.binary_cross_entropy_with_logits(predicted_done, done)
         total = (
@@ -400,17 +428,39 @@ class PolicyPromotionGate:
         *,
         relative_margin: float,
         max_validation_loss: float,
+        max_rollout_disagreement: float | None = None,
+        use_critic_reference: bool = True,
+        inclusive_margin: bool = False,
         epsilon: float = 1e-6,
     ) -> None:
         self.relative_margin = _finite_float("relative_margin", relative_margin)
         self.max_validation_loss = _finite_float(
             "max_validation_loss", max_validation_loss
         )
+        if max_rollout_disagreement is not None:
+            max_rollout_disagreement = _finite_float(
+                "max_rollout_disagreement", max_rollout_disagreement
+            )
+            if max_rollout_disagreement < 0:
+                raise ValueError("max_rollout_disagreement must be nonnegative")
+        self.max_rollout_disagreement = max_rollout_disagreement
+        if not isinstance(use_critic_reference, bool):
+            raise ValueError("use_critic_reference must be a bool")
+        self.use_critic_reference = use_critic_reference
+        if not isinstance(inclusive_margin, bool):
+            raise ValueError("inclusive_margin must be a bool")
+        self.inclusive_margin = inclusive_margin
         self.epsilon = _finite_float("epsilon", epsilon)
         if self.relative_margin < 0 or self.max_validation_loss < 0 or self.epsilon <= 0:
             raise ValueError(
                 "relative_margin/max_validation_loss must be nonnegative and epsilon positive"
             )
+
+    @property
+    def delta_threshold_floor(self) -> float:
+        """Smallest absolute margin used by the legacy epsilon-safe mode."""
+
+        return self.epsilon
 
     def decide(
         self,
@@ -419,6 +469,7 @@ class PolicyPromotionGate:
         behavior_return: float,
         critic_return: float,
         dynamics_validation_loss: float,
+        rollout_disagreement: float | None = None,
     ) -> PromotionDecision:
         values = {
             "candidate_return": _finite_float("candidate_return", candidate_return),
@@ -428,14 +479,43 @@ class PolicyPromotionGate:
                 "dynamics_validation_loss", dynamics_validation_loss
             ),
         }
-        reference = max(values["behavior_return"], values["critic_return"])
-        required = reference + self.relative_margin * max(abs(reference), self.epsilon)
+        if rollout_disagreement is not None:
+            rollout_disagreement = _finite_float(
+                "rollout_disagreement", rollout_disagreement
+            )
+            if rollout_disagreement < 0:
+                raise ValueError("rollout_disagreement must be nonnegative")
+        reference = (
+            max(values["behavior_return"], values["critic_return"])
+            if self.use_critic_reference
+            else values["behavior_return"]
+        )
+        margin_scale = (
+            abs(reference)
+            if self.inclusive_margin and not self.use_critic_reference
+            else max(abs(reference), self.epsilon)
+        )
+        required = reference + self.relative_margin * margin_scale
         if values["dynamics_validation_loss"] < 0:
             raise ValueError("dynamics_validation_loss must be nonnegative")
         if values["dynamics_validation_loss"] > self.max_validation_loss:
             promote = False
             reason = "dynamics_validation_loss"
-        elif values["candidate_return"] <= required:
+        elif self.max_rollout_disagreement is not None and rollout_disagreement is None:
+            promote = False
+            reason = "missing_rollout_disagreement"
+        elif (
+            self.max_rollout_disagreement is not None
+            and rollout_disagreement is not None
+            and rollout_disagreement > self.max_rollout_disagreement
+        ):
+            promote = False
+            reason = "rollout_disagreement"
+        elif (
+            values["candidate_return"] < required
+            if self.inclusive_margin
+            else values["candidate_return"] <= required
+        ):
             promote = False
             reason = "insufficient_return"
         else:
@@ -450,6 +530,8 @@ class PolicyPromotionGate:
             relative_margin=self.relative_margin,
             dynamics_validation_loss=values["dynamics_validation_loss"],
             max_validation_loss=self.max_validation_loss,
+            rollout_disagreement=rollout_disagreement,
+            max_rollout_disagreement=self.max_rollout_disagreement,
             promote=promote,
             reason=reason,
         )

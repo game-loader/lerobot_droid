@@ -28,7 +28,9 @@ from torch import Tensor
 class DDIMStepOutput:
     previous_sample: Tensor
     mean: Tensor
+    raw_std: Tensor
     std: Tensor
+    probability_std: Tensor
     log_prob: Tensor
 
 
@@ -73,6 +75,15 @@ def _validate_generator_device(
         raise ValueError(
             f"generator device {generator_device} does not match sample device {device}"
         )
+    if (
+        generator_device.type == "cuda"
+        and generator_device.index is not None
+        and device.index is not None
+        and generator_device.index != device.index
+    ):
+        raise ValueError(
+            f"generator device {generator_device} does not match sample device {device}"
+        )
 
 
 def stochastic_ddim_step(
@@ -85,11 +96,16 @@ def stochastic_ddim_step(
     eta: float,
     sigma_min: float,
     sigma_max: float,
+    probability_sigma_min: float | None = None,
     previous_sample: Tensor | None = None,
     generator: torch.Generator | None = None,
     check_finite: bool = True,
 ) -> DDIMStepOutput:
-    """Sample or replay one explicit stochastic DDIM schedule transition."""
+    """Sample or replay one explicit stochastic DDIM schedule transition.
+
+    ``std`` controls the transition mean and sampled exploration noise.
+    ``probability_std`` is independently floored for the PPO likelihood only.
+    """
 
     if not isinstance(scheduler, DDIMScheduler):
         raise ValueError(f"scheduler must be a DDIMScheduler, got {type(scheduler).__name__}")
@@ -122,6 +138,13 @@ def stochastic_ddim_step(
         raise ValueError(
             f"sigma_max must be at least sigma_min ({sigma_min}), got {sigma_max}"
         )
+    probability_sigma_min = (
+        sigma_min
+        if probability_sigma_min is None
+        else _finite_number(
+            "probability_sigma_min", probability_sigma_min, positive=True
+        )
+    )
     if bool(getattr(scheduler.config, "thresholding", False)):
         raise ValueError("DDIM thresholding is not supported by the RL transition")
 
@@ -146,7 +169,9 @@ def stochastic_ddim_step(
         predicted_clean = predicted_clean.clamp(-clip_range, clip_range)
 
     variance = ((1.0 - alpha_previous) / beta_t) * (1.0 - alpha_t / alpha_previous)
-    std = (eta * variance.clamp_min(0).sqrt()).clamp(min=sigma_min, max=sigma_max)
+    raw_std = eta * variance.clamp_min(0).sqrt()
+    std = raw_std.clamp(min=sigma_min, max=sigma_max)
+    probability_std = std.clamp_min(probability_sigma_min)
     direction_scale = (1.0 - alpha_previous - std.square()).clamp_min(0).sqrt()
     mean = alpha_previous.sqrt() * predicted_clean + direction_scale * predicted_noise
     if previous_sample is None:
@@ -170,13 +195,21 @@ def stochastic_ddim_step(
             raise ValueError("previous_sample must contain only finite values")
     if previous_sample is None:
         raise AssertionError("previous_sample must be populated before log-probability evaluation")
-    residual = (previous_sample.detach() - mean) / std
-    log_prob = -0.5 * residual.square() - std.log() - 0.5 * math.log(2.0 * math.pi)
+    # DPPO-style surrogate likelihood: preserve rollout noise while preventing
+    # near-deterministic tail transitions from dominating the policy ratio.
+    residual = (previous_sample.detach() - mean) / probability_std
+    log_prob = (
+        -0.5 * residual.square()
+        - probability_std.log()
+        - 0.5 * math.log(2.0 * math.pi)
+    )
     if check_finite:
         for name, value in (
             ("previous_sample", previous_sample),
             ("mean", mean),
+            ("raw_std", raw_std),
             ("std", std),
+            ("probability_std", probability_std),
             ("log_prob", log_prob),
         ):
             if not torch.isfinite(value).all().item():
@@ -184,6 +217,8 @@ def stochastic_ddim_step(
     return DDIMStepOutput(
         previous_sample=previous_sample,
         mean=mean,
+        raw_std=raw_std,
         std=std,
+        probability_std=probability_std,
         log_prob=log_prob,
     )

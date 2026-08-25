@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import json
+import subprocess
 import sys
 import warnings
 from pathlib import Path
@@ -14,7 +16,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from RL.cli.train_offline import _parser
+from RL.cli import train_offline
+from RL.cli.train_offline import _parse_newton_eval_info, _parser, _run_newton_eval
 from RL.tracking import SwanLabConfig, create_swanlab_tracker
 
 
@@ -92,9 +95,7 @@ def test_tracker_uses_swanlab_094_names_and_explicit_one_based_step(
     assert fake.log_calls == [({"train/loss": 0.25}, 1)]
 
 
-def test_disabled_tracker_does_not_import_swanlab(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_disabled_tracker_does_not_import_swanlab(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sentinel = SimpleNamespace()
     monkeypatch.setitem(sys.modules, "swanlab", sentinel)
 
@@ -137,9 +138,7 @@ def test_non_strict_initialization_failure_warns_and_disables(
     assert len(fake.init_calls) == 1
 
 
-def test_strict_initialization_failure_propagates(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_strict_initialization_failure_propagates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeSwanLab(init_error=RuntimeError("init failed"))
     _install_fake(monkeypatch, fake)
 
@@ -225,8 +224,9 @@ def test_finish_failure_is_warning_only_and_does_not_mask_training_exception(
     tracker = create_swanlab_tracker(_config(tmp_path, strict=True), {})
     assert tracker is not None
 
-    with pytest.raises(ValueError, match="training failed"), pytest.warns(
-        RuntimeWarning, match="finish failed"
+    with (
+        pytest.raises(ValueError, match="training failed"),
+        pytest.warns(RuntimeWarning, match="finish failed"),
     ):
         try:
             raise ValueError("training failed")
@@ -264,3 +264,108 @@ def test_offline_cli_parser_exposes_swanlab_controls(tmp_path: Path) -> None:
     assert args.swanlab_run_name == "offline-run"
     assert args.swanlab_mode == "local"
     assert args.swanlab_strict is True
+    assert args.actor_lr == pytest.approx(1e-6)
+    assert args.old_policy_sync_interval == 1
+    assert args.old_policy_sync_target == 0
+    assert args.probability_sigma_min == pytest.approx(0.1)
+    assert args.ppo_epochs == 1
+    assert args.amq_enabled is False
+    assert args.dynamics_steps == 0
+    assert args.eval_every_actor_updates == 0
+    assert args.eval_every_old_policy_syncs == 0
+    assert args.eval_episodes == 100
+    assert args.eval_batch_size == 16
+    assert args.eval_inference_steps is None
+
+
+def test_parse_newton_eval_info_extracts_finite_overall_scalars(tmp_path: Path) -> None:
+    path = tmp_path / "eval_info.json"
+    path.write_text(
+        json.dumps(
+            {
+                "overall": {
+                    "pc_success": 75.0,
+                    "avg_sum_reward": 0.75,
+                    "avg_max_reward": 1.0,
+                    "n_episodes": 4,
+                    "eval_s": 1.5,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _parse_newton_eval_info(path) == {
+        "eval/pc_success": 75.0,
+        "eval/successes": 3.0,
+        "eval/avg_sum_reward": 0.75,
+        "eval/avg_max_reward": 1.0,
+        "eval/n_episodes": 4.0,
+        "eval/eval_seconds": 1.5,
+        "eval/eval_s": 1.5,
+    }
+
+
+def test_run_newton_eval_invokes_headless_lerobot_eval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy = tmp_path / "policy"
+    policy.mkdir()
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> SimpleNamespace:
+        calls.append((command, kwargs))
+        output_dir = Path(next(item.split("=", 1)[1] for item in command if item.startswith("--output_dir=")))
+        output_dir.mkdir(parents=True)
+        (output_dir / "eval_info.json").write_text(
+            json.dumps({"overall": {"pc_success": 50.0, "n_episodes": 2}}),
+            encoding="utf-8",
+        )
+        return SimpleNamespace(stdout="", stderr="")
+
+    monkeypatch.setattr(train_offline.subprocess, "run", fake_run)
+    metrics = _run_newton_eval(
+        policy_path=policy,
+        output_dir=tmp_path / "result",
+        episodes=2,
+        batch_size=2,
+        inference_steps=3,
+        policy_device="cuda",
+        env_device="cuda:0",
+        seed=19,
+    )
+
+    assert metrics["eval/pc_success"] == 50.0
+    assert metrics["eval/successes"] == 1.0
+    assert metrics["eval/n_episodes"] == 2.0
+    assert metrics["eval/eval_seconds"] >= 0.0
+    assert len(calls) == 1
+    command, kwargs = calls[0]
+    assert kwargs == {"check": True, "capture_output": True, "text": True}
+    assert command[:3] == [sys.executable, "-m", "lerobot.scripts.lerobot_eval"]
+    assert "--eval.use_async_envs=false" in command
+    assert "--policy.num_inference_steps=3" in command
+    assert "--env.type=moya_newton" in command
+
+
+def test_run_newton_eval_failure_includes_subprocess_output_tail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    policy = tmp_path / "policy"
+    policy.mkdir()
+
+    def fake_run(*args: object, **kwargs: object) -> None:
+        raise subprocess.CalledProcessError(9, ["lerobot-eval"], output="stdout tail", stderr="stderr tail")
+
+    monkeypatch.setattr(train_offline.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match=r"stdout tail[\s\S]*stderr tail"):
+        _run_newton_eval(
+            policy_path=policy,
+            output_dir=tmp_path / "result",
+            episodes=2,
+            batch_size=2,
+            inference_steps=3,
+            policy_device="cuda",
+            env_device="cuda:0",
+            seed=19,
+        )

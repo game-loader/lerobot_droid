@@ -64,21 +64,31 @@ class TraceConfig:
     eta: float = 1.0
     sigma_min: float = 0.0067
     sigma_max: float = 0.1
+    probability_sigma_min: float = 0.1
 
     def __post_init__(self) -> None:
         _positive_int("num_inference_steps", self.num_inference_steps)
         eta = _finite_float("eta", self.eta)
         sigma_min = _finite_float("sigma_min", self.sigma_min)
         sigma_max = _finite_float("sigma_max", self.sigma_max)
+        probability_sigma_min = _finite_float(
+            "probability_sigma_min", self.probability_sigma_min
+        )
         if eta < 0:
             raise ValueError(f"eta must be nonnegative, got {self.eta!r}")
         if sigma_min <= 0:
             raise ValueError(f"sigma_min must be positive, got {self.sigma_min!r}")
         if sigma_max < sigma_min:
             raise ValueError(f"sigma_max must be at least sigma_min ({sigma_min}), got {self.sigma_max!r}")
+        if probability_sigma_min <= 0:
+            raise ValueError(
+                "probability_sigma_min must be positive, "
+                f"got {self.probability_sigma_min!r}"
+            )
         object.__setattr__(self, "eta", eta)
         object.__setattr__(self, "sigma_min", sigma_min)
         object.__setattr__(self, "sigma_max", sigma_max)
+        object.__setattr__(self, "probability_sigma_min", probability_sigma_min)
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), allow_nan=False, separators=(",", ":"), sort_keys=True)
@@ -91,7 +101,58 @@ class TraceConfig:
 
 
 @dataclass(frozen=True)
+class AMQConfig:
+    """Optional RL-100 model-based promotion settings."""
+
+    enabled: bool = False
+    dynamics_steps: int = 0
+    rollout_horizon: int = 20
+    eval_interval: int = 50
+    min_dynamics_updates: int = 1
+    relative_margin: float = 0.05
+    max_validation_loss: float = 1.0
+    ensemble_size: int = 5
+    max_disagreement: float | None = None
+    discounted: bool = False
+    use_critic_reference: bool = False
+    inclusive_margin: bool = True
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.enabled, bool):
+            raise ValueError("AMQConfig.enabled must be a bool")
+        if not isinstance(self.discounted, bool):
+            raise ValueError("AMQConfig.discounted must be a bool")
+        if not isinstance(self.use_critic_reference, bool):
+            raise ValueError("AMQConfig.use_critic_reference must be a bool")
+        if not isinstance(self.inclusive_margin, bool):
+            raise ValueError("AMQConfig.inclusive_margin must be a bool")
+        for name in (
+            "dynamics_steps",
+            "rollout_horizon",
+            "eval_interval",
+            "min_dynamics_updates",
+            "ensemble_size",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"AMQConfig.{name} must be a nonnegative integer")
+            if name != "dynamics_steps" and value == 0:
+                raise ValueError(f"AMQConfig.{name} must be positive")
+        for name in ("relative_margin", "max_validation_loss"):
+            value = _finite_float(f"AMQConfig.{name}", getattr(self, name))
+            if value < 0:
+                raise ValueError(f"AMQConfig.{name} must be nonnegative")
+            object.__setattr__(self, name, value)
+        if self.max_disagreement is not None:
+            value = _finite_float("AMQConfig.max_disagreement", self.max_disagreement)
+            if value < 0:
+                raise ValueError("AMQConfig.max_disagreement must be nonnegative")
+            object.__setattr__(self, "max_disagreement", value)
+
+
+@dataclass(frozen=True)
 class RLConfig:
+    amq: AMQConfig = field(default_factory=AMQConfig)
     trace: TraceConfig = field(default_factory=TraceConfig)
     state_key: str = "observation.state"
     n_obs_steps: int = 2
@@ -101,6 +162,10 @@ class RLConfig:
     gamma: float = 0.99
 
     def __post_init__(self) -> None:
+        if not isinstance(self.amq, AMQConfig):
+            raise ValueError(
+                f"amq must be an AMQConfig, got {type(self.amq).__name__}: actual={self.amq!r}"
+            )
         if not isinstance(self.trace, TraceConfig):
             raise ValueError(
                 f"trace must be a TraceConfig, got {type(self.trace).__name__}: "
@@ -133,6 +198,15 @@ class RLConfig:
                 )
             _reject_unknown_fields(trace_data, TraceConfig)
             data["trace"] = TraceConfig(**trace_data)
+        amq_data = data.get("amq")
+        if amq_data is not None:
+            if not isinstance(amq_data, dict):
+                raise ValueError(
+                    f"amq must be a JSON object, got {type(amq_data).__name__}: "
+                    f"actual={amq_data!r}"
+                )
+            _reject_unknown_fields(amq_data, AMQConfig)
+            data["amq"] = AMQConfig(**amq_data)
         return cls(**data)
 
     def save_json(self, path: str | Path) -> None:

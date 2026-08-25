@@ -1,0 +1,94 @@
+session:
+  id: "2026-08-20_001"
+  date: "2026-08-20"
+  started: "2026-08-20T10:30:00+08:00"
+  last_turn: "2026-08-20T11:41:26+08:00"
+  turn_count: 1
+  summary: Repaired a false IL normalizer-integrity failure caused by scalar versus length-one auxiliary-stat serialization, safely claimed the completed 50000-step IL output, and resumed the AM-Q offline RL stage on CUDA.
+
+events_logged:
+  - turn: 1
+    type: dead_end
+    id: N43
+    routing: direct
+    provenance: ai-executed
+    summary: Raw processor-artifact bytes are not a valid IL warm-start semantic fingerprint because LeRobot may serialize unused auxiliary count statistics with representation-only shape changes.
+    evidence:
+      - outputs/rl100/iterative-moya-il2-20260819-204553/round_001/il/attempt_001/orchestrator.log
+      - outputs/rl100/iterative-moya-il2-20260819-204553/round_001/il/attempt_001/train/checkpoints/050000/pretrained_model
+  - turn: 1
+    type: experiment
+    id: N44
+    routing: direct
+    provenance: ai-executed
+    summary: Runtime-normalization fingerprinting accepted the source and 50000-step IL output as equivalent while still rejecting a changed required action bound and an unknown normalization mode; focused IL/outer-loop tests passed 22 tests.
+    evidence:
+      - RL/cli/train_il_warmstart.py
+      - tests/rl100/test_il_warmstart.py
+  - turn: 1
+    type: experiment
+    id: N45
+    routing: direct
+    provenance: ai-executed
+    summary: The resumable orchestrator claimed the verified existing IL output, wrote il_stage.json, and skipped duplicate rollout, merge, and IL work.
+    evidence:
+      - RL/cli/train_iterative_offline.py
+      - outputs/rl100/iterative-moya-il2-20260819-204553/round_001/round_manifest.json
+  - turn: 1
+    type: experiment
+    id: N46
+    routing: direct
+    provenance: ai-executed
+    summary: Offline RL resumed on CUDA with IQL updates complete at 100000 and actor updates at 15699; the process remained alive with finite KL and ratio quantiles.
+    evidence:
+      - ara/evidence/tables/iterative-il2-resume.md
+      - outputs/rl100/iterative-moya-il2-20260819-204553/round_001/offline/attempt_001/run/metrics.jsonl
+  - turn: 1
+    type: experiment
+    id: N47
+    routing: direct
+    provenance: ai-executed
+    summary: "The probability sigma floor is active only for PPO likelihood: terminal denoising diagnostics report sigma_probability=0.1 while rollout sigma_sample remains the scheduled sample value; this separates exploration noise from likelihood stabilization."
+    evidence:
+      - outputs/rl100/iterative-moya-il2-20260819-204553/round_001/offline/attempt_001/run/metrics.jsonl
+  - turn: 1
+    type: experiment
+    id: N48
+    routing: direct
+    provenance: ai-executed
+    summary: Full RL regression verification after the recovery changes passed 299 tests with one expected skip; Ruff and git diff checks passed while the production offline process continued independently.
+    evidence:
+      - tests/rl100
+      - RL/cli/train_il_warmstart.py
+      - RL/cli/train_iterative_offline.py
+  - turn: 1
+    type: observation
+    id: N49
+    routing: direct
+    provenance: ai-executed
+    summary: "The live offline process continued to 17056 actor updates with one accepted behavior synchronization; approx_kl remained 0.0373 and ratio q05/q50/q95/max remained finite at 0.603/0.972/1.380/3.202."
+    evidence:
+      - outputs/rl100/iterative-moya-il2-20260819-204553/round_001/offline/attempt_001/run/metrics.jsonl
+
+ai_actions:
+  - turn: 1
+    action: Replaced raw processor-state hashing in the IL warm-start wrapper with a runtime-normalization semantic fingerprint and added regression coverage for auxiliary-shape equivalence, required-stat changes, unknown modes, and visual-stat runtime reshaping.
+    provenance: ai-executed
+    files_changed:
+      - RL/cli/train_il_warmstart.py
+      - tests/rl100/test_il_warmstart.py
+  - turn: 1
+    action: Added strict completed-output recovery checks for IL train_config, dataset/source provenance, checkpoint step, and existing stage-manifest consistency.
+    provenance: ai-executed
+    files_changed:
+      - RL/cli/train_iterative_offline.py
+  - turn: 1
+    action: Resumed the existing round with the original CUDA AM-Q command and monitored SwanLab, metrics, process, and GPU state without starting duplicate stages.
+    provenance: ai-executed
+    files_changed: []
+
+claims_touched: []
+logic_revisions: []
+key_context:
+  - turn: 1
+    excerpt: Offline RL has not yet reached the 50 accepted old-policy synchronizations; the process remains active and the final rollout-merge tail is therefore pending.

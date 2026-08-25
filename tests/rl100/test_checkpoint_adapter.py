@@ -232,6 +232,39 @@ def test_checkpoint_rejects_mismatched_processor_stats(
         CheckpointAdapter.load(damaged, device="cpu")
 
 
+def test_checkpoint_ignores_auxiliary_stat_shape_mismatch(
+    tiny_checkpoint: Path, tmp_path: Path
+) -> None:
+    checkpoint = tmp_path / "auxiliary_stat_shape"
+    shutil.copytree(tiny_checkpoint, checkpoint)
+    pre_config = json.loads(
+        (checkpoint / "policy_preprocessor.json").read_text(encoding="utf-8")
+    )
+    post_config = json.loads(
+        (checkpoint / "policy_postprocessor.json").read_text(encoding="utf-8")
+    )
+    pre_step = next(
+        step for step in pre_config["steps"] if step["registry_name"] == "normalizer_processor"
+    )
+    post_step = next(
+        step
+        for step in post_config["steps"]
+        if step["registry_name"] == "unnormalizer_processor"
+    )
+    pre_path = checkpoint / pre_step["state_file"]
+    post_path = checkpoint / post_step["state_file"]
+    pre_stats = load_file(pre_path)
+    post_stats = load_file(post_path)
+    pre_stats["action.count"] = torch.tensor(100.0)
+    post_stats["action.count"] = torch.tensor([100.0])
+    save_file(pre_stats, pre_path)
+    save_file(post_stats, post_path)
+
+    adapter = CheckpointAdapter.load(checkpoint, device="cpu")
+
+    assert adapter.active_action_mask.tolist() == [True, False]
+
+
 def test_checkpoint_rejects_mismatched_state_feature_descriptor(
     tiny_checkpoint: Path, tmp_path: Path
 ) -> None:

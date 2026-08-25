@@ -142,6 +142,32 @@ def test_dynamics_update_is_finite_and_keeps_encoder_frozen(
         torch.testing.assert_close(previous, current)
 
 
+def test_dynamics_feature_encoder_can_follow_trained_iql_encoder() -> None:
+    source = StateFeatureEncoder(
+        state_dim=3, n_obs_steps=2, hidden_dims=(16,), output_dim=8
+    )
+    dynamics = StateDynamicsEnsemble(
+        feature_encoder=StateFeatureEncoder(
+            state_dim=3, n_obs_steps=2, hidden_dims=(16,), output_dim=8
+        ),
+        state_dim=3,
+        n_obs_steps=2,
+        action_dim=14,
+        chunk_size=4,
+        active_action_mask=_active_mask(),
+        hidden_dims=(16,),
+        ensemble_size=2,
+    )
+    with torch.no_grad():
+        next(source.parameters()).add_(0.25)
+    dynamics.sync_feature_encoder(source)
+    for expected, actual in zip(
+        source.parameters(), dynamics.feature_encoder.parameters(), strict=True
+    ):
+        torch.testing.assert_close(expected, actual)
+    assert all(not parameter.requires_grad for parameter in dynamics.feature_encoder.parameters())
+
+
 def test_dynamics_update_is_transactional_when_later_member_loss_overflows(
     decision_batch: DecisionBatch,
 ) -> None:
@@ -351,3 +377,37 @@ def test_promotion_gate_rejects_negative_validation_loss() -> None:
             critic_return=0.4,
             dynamics_validation_loss=-0.1,
         )
+
+
+def test_paper_amq_gate_uses_behavior_reference_and_inclusive_margin() -> None:
+    gate = PolicyPromotionGate(
+        relative_margin=0.05,
+        max_validation_loss=1.0,
+        use_critic_reference=False,
+        inclusive_margin=True,
+    )
+    decision = gate.decide(
+        candidate_return=0.525,
+        behavior_return=0.5,
+        critic_return=100.0,
+        dynamics_validation_loss=0.1,
+    )
+    assert decision.promote
+    assert decision.reference_return == pytest.approx(0.5)
+
+
+def test_paper_amq_gate_zero_baseline_has_zero_required_margin() -> None:
+    gate = PolicyPromotionGate(
+        relative_margin=0.05,
+        max_validation_loss=1.0,
+        use_critic_reference=False,
+        inclusive_margin=True,
+    )
+    decision = gate.decide(
+        candidate_return=0.0,
+        behavior_return=0.0,
+        critic_return=100.0,
+        dynamics_validation_loss=0.1,
+    )
+    assert decision.required_return == pytest.approx(0.0)
+    assert decision.promote

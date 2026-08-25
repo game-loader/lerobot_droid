@@ -106,6 +106,11 @@ class TrainPipelineConfig(HubMixin):
     save_checkpoint: bool = True
     # Checkpoint is saved every `save_freq` training iterations and after the last training step.
     save_freq: int = 20_000
+    # Keep the normalization state stored in --policy.path instead of replacing
+    # it with statistics from the current dataset. This is intended for
+    # iterative IL where the policy coordinate system must remain fixed across
+    # dataset expansion rounds.
+    preserve_pretrained_processor_stats: bool = False
     use_policy_training_preset: bool = True
     optimizer: OptimizerConfig | None = None
     scheduler: LRSchedulerConfig | None = None
@@ -177,6 +182,19 @@ class TrainPipelineConfig(HubMixin):
             )
 
         active_cfg = self.trainable_config
+        if self.preserve_pretrained_processor_stats:
+            if self.resume:
+                raise ValueError(
+                    "preserve_pretrained_processor_stats is incompatible with resume=true"
+                )
+            if self.is_reward_model_training:
+                raise ValueError(
+                    "preserve_pretrained_processor_stats is only supported for policy training"
+                )
+            if active_cfg.pretrained_path is None:
+                raise ValueError(
+                    "preserve_pretrained_processor_stats requires a pretrained --policy.path"
+                )
         if not self.job_name:
             if self.env is None:
                 self.job_name = f"{active_cfg.type}"

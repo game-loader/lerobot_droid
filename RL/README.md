@@ -115,11 +115,57 @@ uv run python -m RL.cli.train_offline \
   --summary /path/to/collection_summary.json \
   --output-dir outputs/rl100/offline \
   --device cuda --batch-size 32 \
-  --iql-steps 100000 --actor-steps 300000 --inference-steps 10
+  --iql-steps 100000 --actor-steps 0 --old-policy-sync-target 50 --inference-steps 10 \
+  --actor-lr 1e-6 --ppo-epochs 4 --probability-sigma-min 0.1 \
+  --amq-enabled --dynamics-steps 10000 --amq-rollout-horizon 20 \
+  --amq-eval-interval 50 \
+  --old-policy-sync-interval 0 \
+  --eval-every-old-policy-syncs 5 --eval-episodes 100 --eval-batch-size 16 \
+  --swanlab-project moya-rl100 --swanlab-mode online
 ```
 
-The output is an atomic RL bundle at `<output-dir>/checkpoints/final`; its
-`pretrained_model/` remains loadable by standard LeRobot tools.
+With `--old-policy-sync-target 50`, training is measured in completed
+behavior-policy synchronizations rather than actor-loop iterations. Every five
+syncs, an atomic checkpoint is written under
+`<output-dir>/checkpoints/sync_005`, `sync_010`, ..., each containing a
+standard LeRobot `pretrained_model/` bundle used for the headless Newton
+evaluation. The final full RL bundle is at
+`<output-dir>/checkpoints/final` and remains loadable by standard LeRobot tools.
+
+The compact training metrics (`actor/loss`, `actor/ratio_mean`,
+`actor/clip_fraction`, and `actor/approx_kl`) stay at the top level of each
+`metrics.jsonl` row. Aggregate diagnostics are isolated under `info/actor/`:
+`ratio_q05/q50/q95/max`, aggregate `delta_logprob`, event counts, old-policy
+replay error, and post-update KL. Per-denoising-step `denoise_*` diagnostics
+are disabled by default to keep metrics compact; pass `--debug` to
+`RL.cli.train_offline` (or `--offline-debug` to the iterative orchestrator)
+to emit the full per-step ratios, delta log-probabilities, and DDIM sigma
+statistics.
+The ratio is computed as `exp(sum(T_action x D_active delta_logprob))` for each
+denoising transition; it is not an average over action events.
+Rollout sampling continues to use `sigma_sample` from the DDIM schedule and
+the existing sample floor. PPO likelihood alone uses
+`sigma_probability=max(sigma_sample, probability_sigma_min)`, reported as
+`sigma_sample_effective` and `sigma_probability` under each denoising step.
+`info/actor/post_update/*` is computed after the optimizer step on the exact
+stored old-policy transition, before any behavior synchronization. Thus a
+nonzero KL is a real candidate/behavior difference rather than a logging
+artifact. `ppo_epochs` controls how many candidate updates reuse one behavior
+snapshot; when AM-Q is enabled, the snapshot is promoted only by the gate.
+
+AM-Q is separate from the actor advantage: it uses the raw conservative
+`min(Q1,Q2)` estimate on paired state-dynamics rollouts. A candidate is
+promoted only when its modeled return reaches the behavior AM-Q plus the
+configured relative margin (default 5%), and the
+dynamics validation loss and ensemble disagreement pass their limits. Rejected
+candidates leave `old_policy` unchanged; `info/amq/*` and the promotion
+counters are logged to SwanLab and `metrics.jsonl`.
+The default AM-Q score is the batch mean of the horizon-summed modeled Q
+values used by RL-100; `--amq-discounted` is an explicit experiment-only
+alternative.
+`--amq-use-critic-reference` enables the optional stricter critic baseline.
+For state-only AM-Q, image-conditioned checkpoints and image-bearing datasets
+are rejected explicitly until an imagined-image encoder is implemented.
 
 ## Online Training
 
@@ -136,7 +182,12 @@ uv run python -m RL.cli.train_online \
 Smoke mode fixes a short one-decision rollout, two DDIM steps, one PPO epoch,
 headless execution, and no video output. The online buffer stores decisions in
 `[time, environment]` order. A partial action chunk uses a contiguous validity
-mask and a discount of `gamma ** executed_steps`.
+mask and a discount of `gamma ** executed_steps`. Moya terminates a world on
+the first frame that satisfies the five acceptance conditions above; the
+terminal success history is kept in `final_info` before SAME_STEP autoreset.
+`rollout/success_rate` is episode-level (successful terminal episodes divided
+by terminal episodes); `rollout/chunk_success_rate` is the raw decision-row
+ratio for diagnostics.
 
 A longer run can record metrics to SwanLab when the package is installed in
 the active uv environment:
@@ -146,10 +197,62 @@ uv run python -m RL.cli.train_online \
   --checkpoint outputs/rl100/offline/checkpoints/final \
   --output-dir outputs/rl100/online \
   --device cuda --sim-device cuda:0 --num-envs 16 \
-  --updates 1000 --rollout-decisions 4 --ppo-epochs 4 \
-  --inference-steps 10 --minibatch-size 32 \
+  --updates 1000 --rollout-decisions 30 --ppo-epochs 1 \
+  --inference-steps 10 --minibatch-size 32 --actor-lr 1e-6 \
+  --probability-sigma-min 0.1 \
   --swanlab-project moya-rl100 --swanlab-run-name online-ppo
 ```
+
+## Iterative Offline Loop
+
+`RL.cli.train_iterative_offline` runs the resumable RL-100-style outer loop:
+
+```text
+highest sync checkpoint by real Newton pc_success
+-> collect 100 episodes
+-> merge with the accumulated IL dataset
+-> warm-start IL with the previous IL weights and fixed normalizer
+-> retrain IQL, dynamics, AM-Q, and the diffusion actor
+```
+
+The initial historical run used 100-episode evaluations. Each new offline run
+also evaluates 100 episodes every five accepted old-policy synchronizations and
+the next round scans all `sync_*` results instead of using a fixed label.
+
+```bash
+uv run python -m RL.cli.train_iterative_offline \
+  --output-root outputs/rl100/iterative-moya \
+  --base-dataset-root /home/droid/project/Moya_newton_sim/.worktrees/feat-fused-batched-env/runs/lerobot/randomized_grasp_100_20260813-230331/dataset \
+  --base-repo-id local/moya-randomized-grasp-100 \
+  --base-summary /home/droid/project/Moya_newton_sim/.worktrees/feat-fused-batched-env/runs/lerobot/randomized_grasp_100_20260813-230331/collection_summary.json \
+  --il-checkpoint outputs/train/moya_diffusion_300k_20260815-093537/train/checkpoints/080000/pretrained_model \
+  --source-offline-run outputs/rl100/offline-moya-il-amq-sync50-20260819-143809 \
+  --source-eval-episodes 100 \
+  --canonical-task moya_charger_grasp \
+  --rounds 1 --episodes 100 --num-envs 16 \
+  --device cuda --sim-device cuda:0 \
+  --il-steps 50000 --il-batch-size 256 \
+  --offline-iql-steps 100000 --offline-dynamics-steps 10000 \
+  --offline-sync-target 50 --offline-eval-every-syncs 5 \
+  --offline-eval-episodes 100 --offline-eval-batch-size 16 \
+  --final-rollout-merge \
+  --swanlab-project moya-rl100 --swanlab-mode online
+```
+
+No rollout or evaluation video is requested. Each round writes
+`round_XXX/round_manifest.json` plus separate `rollout/`, `merge/`, `il/`, and
+`offline/` attempt directories. Resume reuses a stage only after its artifacts,
+source hashes, dependency hashes, checkpoint manifest, and offline provenance
+still match. A replaced rollout therefore forces merge, IL, and offline RL to
+run again. `--dry-run` records the first pending stage without executing it;
+repeating the same dry-run is idempotent. `--smoke` bounds the workflow and
+uses direct one-update policy synchronization instead of waiting on an AM-Q
+promotion gate. `--final-rollout-merge` adds one final dataset-only round: it
+selects the highest measured `sync_*` checkpoint from the newly completed
+offline run, collects another 100 episodes, merges them into the cumulative
+dataset, and stops before another IL/offline stage. With a 100-episode base and
+one full round, this publishes the requested 300-episode dataset under
+`round_002/merge/`.
 
 ## Checkpoints And Resumption
 
@@ -172,7 +275,7 @@ uv run python -m RL.cli.train_online \
   --checkpoint outputs/rl100/online/checkpoints/final \
   --output-dir outputs/rl100/online-resumed \
   --device cuda --sim-device cuda:0 --num-envs 16 \
-  --updates 1000 --rollout-decisions 4 --ppo-epochs 4 \
+  --updates 1000 --rollout-decisions 30 --ppo-epochs 4 \
   --gamma 0.99 --inference-steps 10
 ```
 

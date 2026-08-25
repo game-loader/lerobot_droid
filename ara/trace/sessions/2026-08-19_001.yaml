@@ -1,0 +1,303 @@
+session:
+  id: "2026-08-19_001"
+  date: "2026-08-19"
+  started: "2026-08-19T09:00:00+08:00"
+  last_turn: "2026-08-19T21:04:27+08:00"
+  turn_count: 5
+  summary: Launched iterative IL round two after a 59%-success production rollout and canonical 200-episode merge; fixed-normalizer IL is active on CUDA.
+
+events_logged:
+  - turn: 1
+    type: decision
+    id: N15
+    routing: direct
+    provenance: ai-suggested
+    summary: Keep behavior snapshots fixed across candidate epochs and let AM-Q, not periodic sync, control promotion.
+  - turn: 1
+    type: experiment
+    id: N16
+    routing: direct
+    provenance: ai-executed
+    summary: Added post-update same-transition ratio/KL probes, PPO epoch replay, IQL min-Q evaluation, state AM-Q rollout, validation split, and conditional promotion wiring.
+  - turn: 1
+    type: experiment
+    id: N17
+    routing: direct
+    provenance: ai-executed
+    summary: Fixed normalized-state inverse transformation, terminal Q/health masking, image-policy/dataset guards, replay reset on snapshot promotion, and dynamics encoder synchronization.
+  - turn: 1
+    type: experiment
+    id: N18
+    routing: direct
+    provenance: ai-executed
+    summary: RL test suite passed 266 tests with 1 expected CUDA-dependent skip; Ruff, mypy, and diff checks passed.
+  - turn: 1
+    type: experiment
+    id: N19
+    routing: direct
+    provenance: ai-executed
+    summary: CUDA AM-Q smoke saved an RL checkpoint with dynamics state and reported non-unit post-update ratio/KL plus finite AM-Q gate diagnostics.
+  - turn: 1
+    type: experiment
+    id: N20
+    routing: direct
+    provenance: ai-executed
+    summary: Final CUDA smoke after encoder-sync ordering fix saved a checkpoint with actor/approx_kl=0.106991, post-update ratio q95=1.844369, and a correctly rejected AM-Q promotion because return delta 0.000105 was below threshold 0.002110.
+  - turn: 1
+    type: decision
+    id: N21
+    routing: direct
+    provenance: user
+    summary: Start a fresh 50000-actor-update offline run from the original IL checkpoint.
+  - turn: 1
+    type: experiment
+    id: N22
+    routing: direct
+    provenance: ai-executed
+    summary: Launched the background CUDA run with 100000 IQL updates, 10000 dynamics warm-up updates, ppo_epochs=1, AM-Q evaluation every 50 actor updates, and SwanLab online tracking.
+  - turn: 1
+    type: experiment
+    id: N23
+    routing: direct
+    provenance: ai-executed
+    summary: Early actor monitoring reached 2304 actor updates with finite metrics, approx_kl=0.030865, post-update ratio q95=1.406522, and clip fraction=0.2875; no runtime errors were observed.
+  - turn: 1
+    type: question
+    id: N24
+    routing: direct
+    provenance: user
+    summary: Clarify the meaning of the old_policy_sync_count training metric.
+  - turn: 1
+    type: experiment
+    id: N25
+    routing: direct
+    provenance: ai-executed
+    summary: The offline run reached 50000 actor updates and wrote checkpoints/final; Newton state-only evaluation over 100 episodes produced 36 successes and pc_success=36.0% with no video output.
+  - turn: 1
+    type: decision
+    id: N26
+    routing: direct
+    provenance: user
+    summary: Restart the 50000-update offline actor stage and run 100 Newton rollouts every 5000 actor updates, recording success metrics in SwanLab.
+  - turn: 1
+    type: experiment
+    id: N27
+    routing: direct
+    provenance: ai-executed
+    summary: Added periodic headless LeRobot Newton evaluation, policy/processor snapshots, finite eval_info parsing, subprocess failure tails, and eval scalars merged into actor metrics rows.
+  - turn: 1
+    type: experiment
+    id: N28
+    routing: direct
+    provenance: ai-executed
+    summary: Focused and full RL test suites passed (270 passed, 1 expected CUDA-dependent skip); Ruff, mypy, and diff checks passed.
+  - turn: 2
+    type: decision
+    id: N29
+    routing: direct
+    provenance: user
+    summary: Evaluate saved, independently loadable policy checkpoints rather than the live in-memory model.
+  - turn: 2
+    type: decision
+    id: N30
+    routing: direct
+    provenance: user
+    summary: Stop actor training at 50 old-policy synchronizations and run 100 Newton episodes every five synchronizations, without an actor-update cap.
+  - turn: 2
+    type: experiment
+    id: N31
+    routing: direct
+    provenance: ai-executed
+    summary: Sync-target and sync-eval smoke tests saved loadable policy bundles, completed headless Newton rollout, and passed 270 RL tests with one skip plus Ruff and mypy.
+  - turn: 2
+    type: experiment
+    id: N32
+    routing: direct
+    provenance: ai-executed
+    summary: Production run completed 50 behavior synchronizations, 24250 actor updates, 485 promotion attempts, ten 100-episode Newton evaluations, and a reloadable final RL checkpoint.
+  - turn: 2
+    type: experiment
+    id: N33
+    routing: direct
+    provenance: ai-executed
+    summary: Periodic Newton success peaked at 65% on sync 10 and ended at 43% on sync 50, demonstrating non-monotonic real-environment performance across accepted AM-Q promotions in this run.
+  - turn: 3
+    type: question
+    id: N34
+    routing: direct
+    provenance: user
+    summary: Clarify exactly which checkpoint, optimizer state, and normalization statistics are used for imitation-learning warm-start in the iterative offline loop.
+  - turn: 3
+    type: experiment
+    id: N35
+    routing: direct
+    provenance: ai-executed
+    summary: RL-100's off2off/use_pre_norm path reuses the previous dataset normalizer; current LeRobot pretrained training instead overrides processor statistics with merged-dataset stats, so exact warm-start requires an explicit preserve-pretrained-stats option.
+  - turn: 4
+    type: question
+    id: N36
+    routing: direct
+    provenance: user
+    summary: Determine whether a reused old normalizer gradually changes toward the expanded dataset normalizer during imitation-learning updates.
+  - turn: 4
+    type: experiment
+    id: N37
+    routing: direct
+    provenance: ai-executed
+    summary: LeRobot normalization statistics are fixed processor tensors initialized outside the policy optimizer; MIN_MAX transforms do not clip out-of-range samples, so reused statistics remain unchanged unless explicitly hot-swapped or reconstructed.
+  - turn: 5
+    type: decision
+    id: N38
+    routing: direct
+    provenance: user
+    summary: Execute one complete 200-episode IL/offline round, then collect from its best sync checkpoint and publish the next cumulative dataset without entering another IL stage.
+  - turn: 5
+    type: experiment
+    id: N39
+    routing: direct
+    provenance: ai-executed
+    summary: Added and verified the resumable final collection-merge tail stage.
+  - turn: 5
+    type: dead_end
+    id: N40
+    routing: direct
+    provenance: ai-executed
+    summary: Strict equality across unused processor auxiliary statistics rejected the independently evaluated sync snapshot because count used scalar versus length-one serialization.
+  - turn: 5
+    type: experiment
+    id: N41
+    routing: direct
+    provenance: ai-executed
+    summary: Required-stat compatibility validation restored real sync-checkpoint CUDA loading and passed a two-episode Newton collection smoke.
+  - turn: 5
+    type: experiment
+    id: N42
+    routing: direct
+    provenance: ai-executed
+    summary: Production rollout saved 59 successes and 41 failures, canonical merge published 200 episodes, and 50000-step fixed-normalizer IL started with SwanLab online tracking.
+  - turn: 5
+    type: observation
+    id: O07
+    routing: crystallized
+    provenance: ai-suggested
+    summary: Crystallized outcome-driven real-environment checkpoint selection as C05 via production artifact commitment.
+  - turn: 5
+    type: observation
+    id: O08
+    routing: crystallized
+    provenance: ai-suggested
+    summary: Crystallized normalization-mode-required processor validation as H02 via verified code commitment.
+
+ai_actions:
+  - turn: 1
+    action: Implemented RL-100-style offline candidate epochs and explicit behavior promotion in RL/trainers/offline.py.
+    provenance: ai-executed
+    files_changed:
+      - RL/trainers/offline.py
+      - RL/algorithms/ppo.py
+      - tests/rl100/test_offline_trainer.py
+  - turn: 1
+    action: Added raw min-Q evaluation, terminal-safe dynamics loss, state AM-Q evaluator, normalization inverse, episode split, and AMQConfig/CLI controls.
+    provenance: ai-executed
+    files_changed:
+      - RL/algorithms/iql.py
+      - RL/algorithms/dynamics.py
+      - RL/algorithms/amq.py
+      - RL/adapters/checkpoint.py
+      - RL/adapters/lerobot_v3.py
+      - RL/config.py
+      - RL/cli/train_offline.py
+  - turn: 1
+    action: Ran full RL tests, Ruff, mypy, diff check, CUDA smoke, and checkpoint reload verification.
+    provenance: ai-executed
+    files_changed: []
+  - turn: 1
+    action: Added scheduled Newton evaluation and SwanLab eval metric plumbing to RL/cli/train_offline.py with parser/subprocess/snapshot tests.
+    provenance: ai-executed
+    files_changed:
+      - RL/cli/train_offline.py
+      - tests/rl100/test_tracking.py
+      - tests/rl100/test_offline_trainer.py
+  - turn: 2
+    action: Changed offline actor termination and periodic evaluation from actor-update cadence to old-policy synchronization cadence.
+    provenance: ai-executed
+    files_changed:
+      - RL/cli/train_offline.py
+      - RL/trainers/offline.py
+      - RL/README.md
+      - tests/rl100/test_tracking.py
+  - turn: 2
+    action: Ran sync-target smoke tests, launched and monitored the full CUDA run, validated all ten eval artifacts, reloaded the final RL checkpoint, and verified no process remained.
+    provenance: ai-executed
+    files_changed:
+      - ara/evidence/tables/sync-count-newton-eval.md
+  - turn: 5
+    action: Added a resumable final-rollout-merge stage and regression tests that stop after publishing the next cumulative dataset.
+    provenance: ai-executed
+    files_changed:
+      - RL/cli/train_iterative_offline.py
+      - tests/rl100/test_iterative_offline.py
+      - RL/README.md
+  - turn: 5
+    action: Narrowed processor compatibility validation to normalization-mode-required statistics and verified the real sync checkpoint on CUDA.
+    provenance: ai-executed
+    files_changed:
+      - RL/adapters/checkpoint.py
+      - tests/rl100/test_checkpoint_adapter.py
+  - turn: 5
+    action: Collected 100 production Newton episodes, materialized the canonical 200-episode dataset, and launched fixed-normalizer IL with SwanLab tracking.
+    provenance: ai-executed
+    files_changed:
+      - ara/evidence/tables/iterative-il2-launch.md
+
+claims_touched:
+  - id: C05
+    action: crystallized
+    turn: 5
+logic_revisions: []
+key_context:
+  - turn: 1
+    excerpt: AM-Q is implemented as a separate OPE gate using batch mean horizon-summed min-Q, not as the actor advantage.
+  - turn: 1
+    excerpt: The smoke checkpoint reported actor/approx_kl=0.107485 and info/actor/post_update/ratio_q95=1.845903, confirming post-update diagnostics are no longer structurally zero.
+  - turn: 1
+    excerpt: The smoke gate reported candidate AM-Q -0.042088, behavior AM-Q -0.042194, return delta 0.000106 below threshold 0.002110, and rejected promotion.
+  - turn: 2
+    excerpt: The user selected old_policy_sync_count as the training clock, with evaluation every five synchronizations and termination at synchronization 50.
+  - turn: 2
+    excerpt: Checkpoint-based Newton success was 65% at sync 10 and 43% at sync 50; all evaluations used 100 episodes and produced no videos.
+  - turn: 3
+    excerpt: The best RL checkpoint is reserved for rollout collection; IL warm-start loads the previous IL policy weights with a fresh optimizer while rebuilding processors from the expanded dataset statistics.
+  - turn: 3
+    excerpt: A direct audit of RL-100 train.py shows off2off/use_pre_norm selects norm_dataset.get_normalizer() from the pre-dataset; this supersedes the provisional plan to use merged-dataset statistics for the IL policy processor.
+  - turn: 4
+    excerpt: Reusing the old normalizer keeps a fixed coordinate system for the full IL run; policy weights adapt, while new samples outside old min/max map beyond the nominal [-1, 1] interval.
+  - turn: 5
+    excerpt: The selected sync 10 checkpoint produced 59 successful and 41 failed production rollouts; merging them with the base dataset produced a canonical 200-episode training set.
+  - turn: 5
+    excerpt: The second IL stage uses the previous IL checkpoint, a fresh optimizer/scheduler, preserve_pretrained_processor_stats=true, and SwanLab online tracking.
+open_threads:
+  - Compare the 36% final-checkpoint Newton success rate against the original IL checkpoint.
+  - Evaluate long-horizon Newton success rate after the corrected offline checkpoint.
+  - Decide whether to make dynamics validation loss optional for strict paper Eq.9 parity.
+  - Decide whether to implement rejected-candidate rollback and outer dataset expansion/IL retraining for full RL-100 parity.
+  - Monitor the active 50000-step IL warm-start, verify its fixed processor fingerprint, complete the next offline AM-Q run, and publish the final cumulative dataset from the best sync checkpoint.
+closed_threads:
+  - turn: 1
+    thread: Wire state dynamics, AM-Q rollout scoring, validation checks, and conditional behavior-policy promotion into the offline CLI.
+    reason: Implemented and verified by full tests and CUDA smoke.
+  - turn: 1
+    thread: Monitor the active 50000-actor-update CUDA run and validate its final checkpoint.
+    reason: Run reached 50000 actor updates, final checkpoint was written, and 100-episode Newton evaluation completed.
+  - turn: 2
+    thread: Evaluate long-horizon Newton success rate after the corrected offline checkpoint.
+    reason: Ten independent 100-episode Newton evaluations completed from sync-count checkpoints, including the final sync 50 checkpoint.
+  - turn: 3
+    thread: Clarify iterative IL warm-start checkpoint and optimizer semantics.
+    reason: Distinguished the rollout policy from the previous-round IL initialization and verified LeRobot's pretrained-weight plus merged-statistics loading path.
+  - turn: 4
+    thread: Clarify whether reused normalization statistics update during IL.
+    reason: Verified the processor statistics are static and outside optimizer updates; only explicit reconstruction or hot-swapping changes them.
+  - turn: 5
+    thread: Decide whether to implement outer dataset expansion and IL retraining for RL-100 parity.
+    reason: Implemented and launched a resumable rollout, canonical merge, fixed-normalizer IL, offline RL, best-checkpoint rollout, and merge-only tail workflow.

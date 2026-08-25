@@ -1,0 +1,69 @@
+session:
+  id: "2026-08-25_001"
+  date: "2026-08-25"
+  started: "2026-08-25T01:02:22+08:00"
+  last_turn: "2026-08-25T01:02:22+08:00"
+  turn_count: 1
+  summary: Diagnosed the online update-005 metric denominator, replayed its checkpoint, and found 34/34 failed episodes statically IK-reachable across two CUDA 100-episode rollouts.
+
+events_logged:
+  - turn: 1
+    type: experiment
+    id: N77
+    routing: direct
+    provenance: ai-executed
+    summary: >-
+      Audited the online success metric and found update 5 is 13 terminal
+      successes divided by 16 environments times 30 action decisions; the
+      stored run maximum is 0.0291667 at other updates.
+    evidence:
+      - RL/trainers/online.py
+      - outputs/rl100/online-moya-sync165-3m-20260824-2002/metrics.jsonl
+      - ara/evidence/tables/online-update005-ik-analysis.md
+  - turn: 1
+    type: experiment
+    id: N78
+    routing: direct
+    provenance: ai-executed
+    summary: >-
+      Reconstructed update-005 from offline sync_165 and evaluated 100 CUDA
+      Newton episodes: 81 successes and 19 failures; every failure passed the
+      2 mm static wrist-IK reachability check.
+    evidence:
+      - outputs/rl100/online-moya-sync165-update005-replay/checkpoints/final/pretrained_model
+      - outputs/rl100/online-moya-sync165-update005-analysis-100/summary.json
+      - outputs/rl100/online-moya-sync165-update005-analysis-100/episodes.jsonl
+  - turn: 1
+    type: experiment
+    id: N79
+    routing: direct
+    provenance: ai-executed
+    summary: >-
+      Independent CUDA rerun measured 85/100 success; combined with the first
+      run, all 34 failures remained statically IK-reachable. Dynamic target
+      probing found no clear out-of-workspace trajectory pattern.
+    evidence:
+      - outputs/rl100/online-moya-sync165-update005-analysis-100-rerun/summary.json
+      - outputs/rl100/online-moya-sync165-update005-analysis-100-rerun/episodes.jsonl
+      - ara/evidence/tables/online-update005-ik-analysis.md
+
+ai_actions:
+  - turn: 1
+    action: Audited metric code and persisted logs, reconstructed the unsaved fifth-update checkpoint, ran two 100-episode CUDA rollouts, performed static and sampled dynamic native-IK probes, and verified checkpoint hashes plus focused tests.
+    provenance: ai-executed
+    files_changed:
+      - RL/cli/analyze_online_rollout.py
+      - ara/evidence/tables/online-update005-ik-analysis.md
+      - ara/trace/exploration_tree.yaml
+      - ara/trace/sessions/2026-08-25_001.yaml
+      - ara/trace/sessions/session_index.yaml
+
+claims_touched: []
+logic_revisions: []
+key_context:
+  - turn: 1
+    excerpt: The literal 0.2916 value is not present in the persisted online metrics; the fifth row is 0.0270833 and is diluted by action-chunk decisions.
+open_threads:
+  - Add a separately named episode_success_rate metric to future online runs so chunk-level sparse rewards are not mistaken for episode success.
+  - Investigate the single dynamic target sample at approximately 2.001 mm residual if future runs show failures concentrated at the same target boundary.
+ai_suggestions_pending: []

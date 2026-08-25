@@ -1,0 +1,85 @@
+session:
+  id: "2026-08-23_001"
+  date: "2026-08-23"
+  started: "2026-08-23T09:54:27+08:00"
+  last_turn: "2026-08-23T10:47:00+08:00"
+  turn_count: 2
+  summary: Completed the IL5 100-sync offline stage, merged the IL6 rollout, and continued fixed-normalizer IL toward the 150-promotion offline stage.
+
+events_logged:
+  - turn: 1
+    type: experiment
+    id: N62
+    routing: direct
+    provenance: ai-executed
+    summary: Completed the 100-promotion IL5 offline run; the best Newton-evaluated checkpoint was sync_005 at 74% success.
+    evidence:
+      - ara/evidence/tables/iterative-il6-launch.md
+      - outputs/rl100/iterative-moya-il5-20260822-225800/round_001/round_manifest.json
+  - turn: 1
+    type: decision
+    id: N63
+    routing: direct
+    provenance: user
+    summary: Launch the next iterative IL and offline cycle with a target of 150 AM-Q behavior-policy promotions.
+    evidence:
+      - RL/cli/train_iterative_offline.py
+      - ara/evidence/tables/iterative-il6-launch.md
+  - turn: 1
+    type: experiment
+    id: N64
+    routing: direct
+    provenance: ai-executed
+    summary: Started IL6 CUDA rollout from the latest outcome-selected offline checkpoint and locked the downstream target to 150 promotions.
+    evidence:
+      - ara/evidence/tables/iterative-il6-launch.md
+      - outputs/rl100/iterative-moya-il6-20260823-101000/round_001/round_manifest.json
+  - turn: 2
+    type: experiment
+    id: N65
+    routing: direct
+    provenance: ai-executed
+    summary: Completed the selected offline-checkpoint rollout and canonical merge; the IL6 base now contains 600 episodes with 447 successes and 153 failures.
+    evidence:
+      - ara/evidence/tables/iterative-il6-launch.md
+      - outputs/rl100/iterative-moya-il6-20260823-101000/round_001/merge/attempt_001/merged/collection_summary.json
+  - turn: 2
+    type: experiment
+    id: N66
+    routing: direct
+    provenance: ai-executed
+    summary: Fixed-normalizer IL6 reached the first 5000-step checkpoint; the 100-episode CUDA Newton evaluation measured 71% success and emitted no video.
+    evidence:
+      - ara/evidence/tables/iterative-il6-launch.md
+      - outputs/rl100/iterative-moya-il6-20260823-101000/round_001/il/attempt_001/il_train.log
+
+ai_actions:
+  - turn: 1
+    action: Audited completed IL5 artifacts, selected its highest measured offline checkpoint, and launched the next resumable CUDA outer-loop run with a 150-sync offline target.
+    provenance: ai-executed
+    files_changed:
+      - ara/evidence/tables/iterative-il6-launch.md
+      - ara/trace/exploration_tree.yaml
+      - ara/trace/sessions/2026-08-23_001.yaml
+      - ara/trace/sessions/session_index.yaml
+      - ara/trace/pm_reasoning_log.yaml
+  - turn: 2
+    action: Resumed monitoring of the already-running IL6 orchestrator after verifying the rollout and merge, stopped a duplicate recovery attempt, and restored the active orchestrator PID metadata.
+    provenance: ai-executed
+    files_changed:
+      - outputs/rl100/iterative-moya-il6-20260823-101000/orchestrator.pid
+      - ara/evidence/tables/iterative-il6-launch.md
+      - ara/trace/exploration_tree.yaml
+      - ara/trace/sessions/2026-08-23_001.yaml
+
+claims_touched: []
+logic_revisions: []
+key_context:
+  - turn: 1
+    excerpt: The new outer-loop run must use the prior round's highest real-Newton-success checkpoint for collection and extend only the downstream offline promotion budget to 150.
+  - turn: 2
+    excerpt: IL6's selected rollout merged into 600 episodes with 447 successes; the first periodic IL checkpoint measured 71% and the downstream 150-promotion offline stage remains pending.
+open_threads:
+  - Complete the active 50000-step fixed-normalizer IL6 stage and select its highest 100-episode Newton-success checkpoint.
+  - Start and complete the downstream AM-Q offline stage with 150 behavior-policy promotions and periodic Newton evaluations.
+ai_suggestions_pending: []

@@ -1,0 +1,81 @@
+session:
+  id: "2026-08-25_003"
+  date: "2026-08-25"
+  started: "2026-08-25T11:03:40+08:00"
+  last_turn: "2026-08-25T11:03:40+08:00"
+  turn_count: 1
+  summary: >-
+    Evaluated the offline-RL sync_165 checkpoint with the repaired Moya
+    success latch using the canonical LeRobot evaluator, and reproduced a
+    matched old-submodule baseline to separate semantic changes from rollout
+    variance.
+
+events_logged:
+  - turn: 1
+    type: experiment
+    id: N84
+    routing: direct
+    provenance: ai-executed
+    summary: >-
+      The sync_165 checkpoint achieved 86/100 (86%) in the current Moya
+      environment with seed 800000, batch size 16, 10 denoising steps, and a
+      930-step horizon; success terminates the world immediately.
+    evidence:
+      - ara/evidence/tables/sync165-new-env-evaluation.md
+      - outputs/rl100/sync165-new-env-standard-eval-seed800000/eval_info.json
+  - turn: 1
+    type: experiment
+    id: N85
+    routing: direct
+    provenance: ai-executed
+    summary: >-
+      The same checkpoint and canonical evaluator achieved 88/100 (88%) when
+      run against an archived copy of the unmodified Moya submodule, while the
+      historical sync_165 artifact records 91/100; this establishes several
+      percentage points of single-run variation and bounds the immediate
+      semantic delta at approximately -2 points for this reproduction.
+    evidence:
+      - ara/evidence/tables/sync165-new-env-evaluation.md
+      - outputs/rl100/sync165-old-env-standard-eval-seed800000/eval_info.json
+      - outputs/rl100/iterative-moya-il7-20260824-000250/round_001/offline/attempt_001/run/eval/sync_165/eval_info.json
+  - turn: 1
+    type: experiment
+    id: N86
+    routing: direct
+    provenance: ai-executed
+    summary: >-
+      The new-environment binary success result is the appropriate comparison
+      metric; reward sums fall because accepted episodes now end early. A
+      separate stochastic-DDIM diagnostic found all sampled failures IK
+      reachable at the 2 mm probe threshold, so broad static IK infeasibility
+      is not established as the cause.
+    evidence:
+      - ara/evidence/tables/sync165-new-env-evaluation.md
+      - outputs/rl100/sync165-new-env-analysis-seed800000/summary.json
+
+ai_actions:
+  - turn: 1
+    action: >-
+      Ran canonical CUDA evaluation on the repaired environment, archived and
+      evaluated the old submodule in /tmp for a matched baseline, and recorded
+      exact checkpoint/config hashes and output paths.
+    provenance: ai-executed
+    files_changed:
+      - ara/evidence/tables/sync165-new-env-evaluation.md
+      - ara/trace/sessions/2026-08-25_003.yaml
+      - ara/trace/sessions/session_index.yaml
+
+claims_touched: []
+logic_revisions: []
+key_context:
+  - turn: 1
+    excerpt: >-
+      Current canonical result is 86%, not an improvement over the historical
+      91% record; the old-submodule reproduction is 88%, so exact causal
+      attribution requires repeated matched seeds.
+
+open_threads:
+  - >-
+    Repeat matched old/new evaluations over multiple seeds if a confidence
+    interval for the terminal-semantics effect is required.
+ai_suggestions_pending: []

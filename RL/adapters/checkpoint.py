@@ -274,9 +274,13 @@ def _validate_processor_compatibility(
     post_stats = unnormalizer._tensor_stats.get("action")
     if not pre_stats or not post_stats:
         raise ValueError("processors are missing action normalization statistics")
-    if set(pre_stats) != set(post_stats):
-        raise ValueError("processor action statistic fields disagree")
-    for key in sorted(pre_stats):
+    required_action_stats = _REQUIRED_STATS[normalizer_action_mode]
+    if any(key not in pre_stats or key not in post_stats for key in required_action_stats):
+        raise ValueError(
+            "processors are missing required action normalization statistics: "
+            f"{required_action_stats}"
+        )
+    for key in required_action_stats:
         pre_value = pre_stats[key].detach().cpu()
         post_value = post_stats[key].detach().cpu()
         if pre_value.shape != post_value.shape or not torch.equal(pre_value, post_value):
@@ -394,6 +398,33 @@ class CheckpointAdapter:
             if not torch.isfinite(value).all().item():
                 raise ValueError(f"normalized observation {key!r} contains non-finite values")
         return ObservationBatch(normalized)
+
+    def unnormalize_observation(self, observation: ObservationBatch) -> ObservationBatch:
+        """Invert checkpoint observation normalization for imagined rollouts.
+
+        Dynamics models operate in normalized state space, while the diffusion
+        policy's public adapter accepts raw observations and applies the
+        checkpoint preprocessor itself.  Keeping this inverse here prevents a
+        model-predicted state from being normalized twice during AM-Q rollout.
+        """
+
+        if not isinstance(observation, ObservationBatch):
+            raise ValueError(
+                f"observation must be an ObservationBatch, got {type(observation).__name__}"
+            )
+        prepared = {
+            key: value.float() if value.is_floating_point() else value
+            for key, value in observation.features.items()
+        }
+        # The postprocessor intentionally stores output/action statistics only
+        # for DiffusionPolicy checkpoints.  The preprocessor carries the
+        # complete observation statistics, and its normalization mixin also
+        # supports the inverse transform.
+        raw = self._normalizer._normalize_observation(prepared, inverse=True)
+        for key, value in raw.items():
+            if not torch.isfinite(value).all().item():
+                raise ValueError(f"unnormalized observation {key!r} contains non-finite values")
+        return ObservationBatch(raw)
 
     def normalize_action(self, action: Tensor) -> Tensor:
         self._validate_action(action)

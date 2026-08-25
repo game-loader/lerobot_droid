@@ -22,7 +22,7 @@ from typing import get_type_hints
 import pytest
 import torch
 
-from RL.config import RLConfig, TraceConfig
+from RL.config import AMQConfig, RLConfig, TraceConfig
 from RL.types import DecisionBatch, DenoisingTrace, ObservationBatch
 
 
@@ -277,8 +277,30 @@ def test_trace_config_rejects_non_positive_sigma_min() -> None:
         TraceConfig(sigma_min=0.0)
 
 
+def test_trace_config_uses_separate_probability_sigma_floor() -> None:
+    config = TraceConfig(sigma_min=0.0067, probability_sigma_min=0.1)
+
+    assert config.sigma_min == pytest.approx(0.0067)
+    assert config.probability_sigma_min == pytest.approx(0.1)
+    assert TraceConfig.from_json(config.to_json()) == config
+
+    with pytest.raises(ValueError, match="probability_sigma_min"):
+        TraceConfig(probability_sigma_min=0.0)
+
+
 def test_rl_config_json_round_trip_is_deterministic(tmp_path: Path) -> None:
     config = RLConfig(
+        amq=AMQConfig(
+            enabled=True,
+            dynamics_steps=10,
+            rollout_horizon=3,
+            eval_interval=5,
+            min_dynamics_updates=10,
+            relative_margin=0.05,
+            max_validation_loss=0.2,
+            ensemble_size=3,
+            max_disagreement=0.1,
+        ),
         trace=TraceConfig(num_inference_steps=8, eta=0.75, sigma_min=0.01, sigma_max=0.2),
         state_key="observation.state",
         n_obs_steps=2,
@@ -300,6 +322,7 @@ def test_rl_config_json_round_trip_is_deterministic(tmp_path: Path) -> None:
     assert loaded.to_json() == payload
     assert path.read_text(encoding="utf-8") == f"{payload}\n"
     assert json.loads(payload)["trace"]["num_inference_steps"] == 8
+    assert json.loads(payload)["amq"]["enabled"] is True
 
 
 def test_rl_config_json_rejects_unknown_fields() -> None:

@@ -1,0 +1,100 @@
+session:
+  id: "2026-08-21_001"
+  date: "2026-08-21"
+  started: "2026-08-21T20:43:31+08:00"
+  last_turn: "2026-08-21T21:48:07+08:00"
+  turn_count: 3
+  summary: Added exact resumable IL eval provenance, selected the prior best IL checkpoint, and launched the 400-episode CUDA IL/offline cycle with periodic Newton success tracking.
+
+events_logged:
+  - turn: 1
+    type: experiment
+    id: N57
+    routing: direct
+    provenance: ai-executed
+    summary: Bound reusable IL evaluations to checkpoint content and complete Newton settings, with safe stale-point recovery and focused regressions.
+    evidence:
+      - RL/cli/train_iterative_offline.py
+      - RL/cli/eval_il_checkpoints.py
+      - tests/rl100/test_iterative_offline.py
+  - turn: 2
+    type: experiment
+    id: N58
+    routing: direct
+    provenance: ai-executed
+    summary: Shared one provenance schema between LeRobot training and the RL selector; verified direct reuse without subprocess and no sidecar at eval-only steps.
+    evidence:
+      - src/lerobot/utils/eval_provenance.py
+      - src/lerobot/scripts/lerobot_train.py
+      - tests/rl100/test_iterative_offline.py
+  - turn: 3
+    type: decision
+    id: N59
+    routing: direct
+    provenance: user
+    summary: Require 100-episode Newton evaluation every 5000 IL steps and initialize offline RL from the highest-success IL checkpoint.
+    evidence:
+      - RL/cli/train_iterative_offline.py
+      - src/lerobot/scripts/lerobot_train.py
+  - turn: 3
+    type: experiment
+    id: N60
+    routing: direct
+    provenance: ai-executed
+    summary: Evaluated all ten prior IL checkpoints and selected step 50000 at 63% success.
+    evidence:
+      - ara/evidence/tables/iterative-il4-launch.md
+  - turn: 3
+    type: experiment
+    id: N61
+    routing: direct
+    provenance: ai-executed
+    summary: Collected 70 successful episodes, merged a 400-episode dataset, and verified the first periodic IL eval at 60% with exact provenance.
+    evidence:
+      - ara/evidence/tables/iterative-il4-launch.md
+
+ai_actions:
+  - turn: 1
+    action: Implemented atomic eval provenance, exact resume validation, checkpoint-mutation invalidation, and symlink-safe stale-point cleanup for orchestrator and retrofit IL evaluation.
+    provenance: ai-executed
+    files_changed:
+      - RL/cli/train_iterative_offline.py
+      - RL/cli/eval_il_checkpoints.py
+      - tests/rl100/test_iterative_offline.py
+  - turn: 2
+    action: Extracted shared provenance hashing and atomic writing, then emitted it only for successful periodic evaluations paired with a checkpoint saved at the same update.
+    provenance: ai-executed
+    files_changed:
+      - src/lerobot/utils/eval_provenance.py
+      - src/lerobot/scripts/lerobot_train.py
+      - RL/cli/train_iterative_offline.py
+      - tests/rl100/test_iterative_offline.py
+  - turn: 3
+    action: Retrospectively evaluated ten IL checkpoints, selected the highest measured Newton-success checkpoint, and launched the next resumable rollout-merge-IL-offline cycle.
+    provenance: ai-executed
+    files_changed:
+      - RL/cli/train_iterative_offline.py
+      - RL/cli/train_il_warmstart.py
+      - RL/cli/eval_il_checkpoints.py
+      - src/lerobot/scripts/lerobot_train.py
+      - src/lerobot/utils/eval_provenance.py
+      - tests/rl100/test_il_warmstart.py
+      - tests/rl100/test_iterative_offline.py
+
+claims_touched: []
+logic_revisions: []
+key_context:
+  - turn: 1
+    excerpt: Evaluation results without matching provenance are stale even when their episode count is correct; recovery removes and reruns only the expected step directory.
+  - turn: 2
+    excerpt: The checkpoint is saved after the update and before the blocking in-memory eval; no optimizer step occurs before the matching sidecar is written.
+  - turn: 3
+    excerpt: The new cycle uses the prior highest-success offline checkpoint for collection, the retrospectively highest-success IL checkpoint for warm-start, and will use this cycle's highest periodic IL success to initialize offline RL.
+open_threads:
+  - Complete the active 50000-step IL run and select its highest 100-episode Newton-success checkpoint.
+  - Complete the downstream 50-promotion offline RL stage and select its highest periodic Newton-success checkpoint.
+ai_suggestions_pending: []
+resolved_threads:
+  - turn: 2
+    thread: Trainer-side sidecar emission for zero-duplicate post-training selection.
+    resolution: Shared-schema sidecars are now emitted and directly reused.

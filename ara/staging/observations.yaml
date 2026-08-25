@@ -1,0 +1,89 @@
+observations:
+  - id: O01
+    timestamp: "2026-08-18T19:01:40+08:00"
+    provenance: ai-suggested
+    content: The final two DDIM transitions appear disproportionately ratio-sensitive because their effective sigmas are much smaller than the preceding transitions; changing the sigma floor may alter both exploration and final action quality and therefore needs evaluation before adoption.
+    context: The fixed-old CUDA comparison localized the widest ratio upper tails to the penultimate and final denoising transitions.
+    potential_type: claim
+    bound_to: [N05]
+    promoted: false
+    promoted_to: null
+    crystallized_via: null
+    stale: false
+  - id: O02
+    timestamp: "2026-08-18T19:01:40+08:00"
+    provenance: ai-suggested
+    content: A full action-chunk ratio multiplies likelihood contributions from every valid action time and active action dimension, so its log-ratio variance grows with the joint event count.
+    context: The production checkpoint used 32 valid action steps and 5 active dimensions, producing 160 joint events per complete chunk.
+    potential_type: architecture
+    bound_to: [N05, N06]
+    promoted: false
+    promoted_to: null
+    crystallized_via: null
+    stale: false
+  - id: O03
+    timestamp: "2026-08-18T19:37:56+08:00"
+    provenance: user
+    content: Separating DDIM rollout sampling variance from PPO surrogate likelihood variance can preserve fixed-policy rollout actions while preventing near-zero tail variance from dominating likelihood ratios.
+    context: The user prescribed a DPPO-style probability floor independent of rollout noise; matched CUDA and deterministic regression tests validated the implementation.
+    potential_type: claim
+    bound_to: [N07, N08]
+    promoted: true
+    promoted_to: logic/claims.md:C02
+    crystallized_via: empirical-resolution-and-verbal-affirmation
+    stale: false
+  - id: O04
+    timestamp: "2026-08-18T19:37:56+08:00"
+    provenance: user
+    content: Sample stored DDIM transitions with sigma_sample, but compute both old and new Gaussian log likelihoods on that same transition with sigma_prob=max(sigma_sample, probability_sigma_min).
+    context: This is the implementation rule selected to stabilize diffusion PPO without changing exploration noise.
+    potential_type: heuristic
+    bound_to: [N07, N08]
+    promoted: true
+    promoted_to: logic/solution/heuristics.md:H01
+    crystallized_via: artifact-commitment
+    stale: false
+  - id: O05
+    timestamp: "2026-08-18T21:07:13+08:00"
+    provenance: ai-suggested
+    content: When the old snapshot is synchronized after every single actor update and PPO likelihood statistics are captured only before that update, ratio and KL diagnostics are structurally trivial and clipping is inactive for the only optimization evaluation.
+    context: The user observed that all actor diagnostics stayed constant; a full-run metric audit and code-path trace localized the cause to evaluation and synchronization order.
+    potential_type: claim
+    bound_to: [N11, N12]
+    promoted: true
+    promoted_to: logic/claims.md:C03
+    crystallized_via: empirical-resolution
+    stale: false
+  - id: O06
+    timestamp: "2026-08-18T21:30:34+08:00"
+    provenance: ai-suggested
+    content: RL-100 uses IQL Q-minus-V for actor advantages and AM-Q as a separate learned-dynamics OPE gate for behavior-policy promotion; implementing the former does not imply that AM-Q is active.
+    context: A paper, original-code, and migrated-code audit followed the user's question about the unexpectedly trivial KL and missing AM-Q behavior.
+    potential_type: claim
+    bound_to: [N13, N14]
+    promoted: true
+    promoted_to: logic/claims.md:C04
+    crystallized_via: empirical-resolution
+    stale: false
+  - id: O07
+    timestamp: "2026-08-19T17:05:00+08:00"
+    provenance: ai-suggested
+    content: Accepted AM-Q behavior-policy promotions did not produce monotonic Newton success in the completed sync-count run; the highest measured checkpoint occurred at sync 10, while the final sync 50 checkpoint was lower.
+    context: Ten checkpoint-based 100-episode Newton evaluations measured 65% success at sync 10 and 43% at sync 50 while all 50 behavior synchronizations were accepted through the modeled AM-Q gate.
+    potential_type: claim
+    bound_to: [N32, N33]
+    promoted: true
+    promoted_to: logic/claims.md:C05
+    crystallized_via: artifact-commitment
+    stale: false
+  - id: O08
+    timestamp: "2026-08-19T21:04:27+08:00"
+    provenance: ai-suggested
+    content: Processor compatibility checks should compare the statistics consumed by the configured normalization mode and tolerate representation-only differences in unused auxiliary metadata such as count.
+    context: The first production rollout from sync 10 failed because scalar versus length-one count serialization was compared even though MIN_MAX action min/max were identical; a focused repair and real CUDA collector smoke resolved the failure.
+    potential_type: heuristic
+    bound_to: [N40, N41]
+    promoted: true
+    promoted_to: logic/solution/heuristics.md:H02
+    crystallized_via: artifact-commitment
+    stale: false

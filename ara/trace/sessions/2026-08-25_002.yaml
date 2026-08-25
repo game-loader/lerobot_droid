@@ -1,0 +1,98 @@
+session:
+  id: "2026-08-25_002"
+  date: "2026-08-25"
+  started: "2026-08-25T10:09:26+08:00"
+  last_turn: "2026-08-25T10:09:26+08:00"
+  turn_count: 1
+  summary: >-
+    Repaired Moya success-event latching and immediate termination, corrected
+    online episode-level success reporting, and validated the path with focused
+    tests plus a real CUDA smoke rollout.
+
+events_logged:
+  - turn: 1
+    type: decision
+    id: N80
+    routing: direct
+    provenance: user
+    summary: >-
+      Treat the first frame satisfying the five acceptance conditions as the
+      successful terminal event; do not recompute success from a later frame.
+    evidence:
+      - RL/README.md
+      - third_party/moya_newton_sim/moya_batched_env.py
+  - turn: 1
+    type: experiment
+    id: N81
+    routing: direct
+    provenance: ai-executed
+    summary: >-
+      Added simulator-side true_grasp_ever, clear_table_ever, and success_ever
+      latches, immediate terminated=True on acceptance, terminal-success
+      precedence over horizon truncation, and final_info propagation through
+      the LeRobot Moya wrapper.
+    evidence:
+      - third_party/moya_newton_sim/moya_batched_env.py
+      - src/lerobot/envs/moya_newton.py
+      - third_party/moya_newton_sim/tests/test_batched_newton_env.py
+  - turn: 1
+    type: experiment
+    id: N82
+    routing: direct
+    provenance: ai-executed
+    summary: >-
+      Changed online rollout/success_rate to successful terminal episodes over
+      terminal episodes, retained the raw decision-row ratio as
+      rollout/chunk_success_rate, added success and terminal counts, and set
+      the Moya CLI default to 30 action-chunk decisions for a full horizon.
+    evidence:
+      - RL/trainers/online.py
+      - RL/cli/train_online.py
+      - tests/rl100/test_online_trainer.py
+  - turn: 1
+    type: experiment
+    id: N83
+    routing: direct
+    provenance: ai-executed
+    summary: >-
+      Focused RL and environment tests passed; a real CUDA checkpoint smoke
+      with one environment and 30 decisions completed 925 physics steps, two
+      terminal episodes, and reported rollout/success_rate=1.0.
+    evidence:
+      - outputs/rl100/online-early-stop-smoke-final/metrics.jsonl
+      - tests/rl100
+      - tests/envs/test_moya_newton.py
+      - third_party/moya_newton_sim/tests/test_batched_newton_env.py
+
+ai_actions:
+  - turn: 1
+    action: >-
+      Implemented and tested the success latch, wrapper terminal-history
+      handling, episode-level online metrics, CLI horizon default, and README
+      contract notes; ran CUDA smoke validation.
+    provenance: ai-executed
+    files_changed:
+      - third_party/moya_newton_sim/moya_batched_env.py
+      - third_party/moya_newton_sim/tests/test_batched_newton_env.py
+      - src/lerobot/envs/moya_newton.py
+      - RL/trainers/online.py
+      - RL/cli/train_online.py
+      - tests/rl100/test_online_trainer.py
+      - RL/README.md
+      - ara/trace/exploration_tree.yaml
+      - ara/trace/sessions/2026-08-25_002.yaml
+      - ara/trace/sessions/session_index.yaml
+
+claims_touched: []
+logic_revisions: []
+key_context:
+  - turn: 1
+    excerpt: >-
+      The success latch is intentionally based on the five acceptance fields;
+      native 50 mm/hold success remains exposed as native_success for diagnostics.
+open_threads:
+  - >-
+    Existing long online runs and checkpoints were produced with the previous
+    non-terminating environment semantics and should be restarted for clean
+    sparse-reward comparisons.
+ai_suggestions_pending: []

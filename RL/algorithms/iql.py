@@ -357,6 +357,42 @@ class IQL(nn.Module):
         return metrics
 
     @torch.no_grad()
+    def q_value(
+        self,
+        observation: ObservationBatch,
+        action: Tensor,
+        action_valid: Tensor,
+    ) -> Tensor:
+        """Evaluate the conservative (minimum) Q estimate for an action chunk.
+
+        This is intentionally the raw ``min(Q1, Q2)`` value.  It is the
+        critic used by AM-Q model rollouts and must not be replaced by the
+        normalized IQL actor advantage ``Q - V``.
+        """
+
+        prepared = _float_observation(observation, self.device)
+        packed_action = self.action_packer(
+            action.to(self.device), action_valid.to(self.device)
+        )
+        features = self.feature_encoder(prepared)
+        q_input = self._q_input(features, packed_action)
+        result = torch.minimum(self.q1(q_input), self.q2(q_input))
+        if result.ndim != 2 or result.shape[-1] != 1 or not torch.isfinite(result).all().item():
+            raise ValueError("IQL q_value must be finite with shape [batch,1]")
+        return result
+
+    @torch.no_grad()
+    def min_q(
+        self,
+        observation: ObservationBatch,
+        action: Tensor,
+        action_valid: Tensor,
+    ) -> Tensor:
+        """Compatibility name used by the RL-100 AM-Q evaluator."""
+
+        return self.q_value(observation, action, action_valid)
+
+    @torch.no_grad()
     def advantage(
         self,
         observation: ObservationBatch,

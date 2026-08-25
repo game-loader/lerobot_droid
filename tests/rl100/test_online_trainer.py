@@ -25,6 +25,7 @@ from RL.config import RLConfig, TraceConfig
 from RL.policy.diffusion_adapter import DiffusionRLAdapter
 from RL.trainers.online import (
     OnlineTrainer,
+    _clip_env_action,
     _raw_feature_mapping,
     _reset_history,
     _validate_env_action,
@@ -179,6 +180,7 @@ def test_online_update_is_finite_and_syncs_rollout_policy(tmp_path: Path) -> Non
         gamma=0.9,
         ppo_epochs=1,
         minibatch_size=2,
+        debug=True,
     )
     rollout = trainer.collect(_AsyncDoneEnv(), decisions=2, seed=11)
 
@@ -186,6 +188,13 @@ def test_online_update_is_finite_and_syncs_rollout_policy(tmp_path: Path) -> Non
 
     assert math.isfinite(metrics["actor/loss"])
     assert math.isfinite(metrics["value/loss"])
+    assert "info/actor/ratio_q05" in metrics
+    assert "info/actor/denoise_00/ratio_q95" in metrics
+    assert "info/actor/denoise_00/sigma_effective" in metrics
+    assert "info/actor/old_replay_abs_delta_max" in metrics
+    assert "rollout/chunk_success_rate" in metrics
+    assert "rollout/success_count" in metrics
+    assert "actor/ratio_q05" not in metrics
     assert trainer.counters.global_updates == 1
     assert trainer.counters.old_policy_syncs == 1
     for current_parameter, old_parameter in zip(
@@ -218,6 +227,22 @@ def test_online_cli_parser_exposes_smoke_controls(tmp_path: Path) -> None:
     assert args.rollout_decisions == 99
     assert args.ppo_epochs == 7
     assert args.inference_steps == 50
+
+
+def test_online_cli_uses_conservative_actor_defaults(tmp_path: Path) -> None:
+    args = _parser().parse_args(
+        [
+            "--checkpoint",
+            str(tmp_path / "checkpoint"),
+            "--output-dir",
+            str(tmp_path / "output"),
+        ]
+    )
+
+    assert args.actor_lr == pytest.approx(1e-6)
+    assert args.ppo_epochs == 1
+    assert args.rollout_decisions == 30
+    assert args.probability_sigma_min == pytest.approx(0.1)
 
 
 def test_online_cli_resolves_run_directory_to_final_checkpoint(tmp_path: Path) -> None:
@@ -372,6 +397,23 @@ def test_action_space_bounds_are_checked_before_environment_step() -> None:
 
     with pytest.raises(ValueError, match="outside"):
         _validate_env_action(Env(), np.full((2, 2), 2.0, dtype=np.float32), num_envs=2)
+
+
+def test_action_clipping_projects_to_box_bounds() -> None:
+    class Space:
+        shape = (2,)
+        low = np.full(2, -1.0, dtype=np.float32)
+        high = np.full(2, 1.0, dtype=np.float32)
+
+    class Env:
+        single_action_space = Space()
+
+    clipped = _clip_env_action(
+        Env(), np.asarray([[-1.5, 0.25], [0.5, 2.0]], dtype=np.float32), num_envs=2
+    )
+    np.testing.assert_array_equal(
+        clipped, np.asarray([[-1.0, 0.25], [0.5, 1.0]], dtype=np.float32)
+    )
 
 
 def test_failed_metric_logger_rolls_back_new_metrics_file(tmp_path: Path) -> None:

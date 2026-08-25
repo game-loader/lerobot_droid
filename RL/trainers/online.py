@@ -29,7 +29,11 @@ import torch
 from torch import Tensor, nn
 
 from RL.algorithms.gae import compute_vector_gae
-from RL.algorithms.ppo import denoising_ppo_loss
+from RL.algorithms.ppo import (
+    denoising_ppo_loss,
+    denoising_ppo_reduced_metrics,
+    reduce_event_log_prob,
+)
 from RL.checkpointing import RLCounters, RLProvenance, save_rl_checkpoint
 from RL.config import RLConfig
 from RL.policy.diffusion_adapter import DiffusionRLAdapter
@@ -53,6 +57,10 @@ def _finite_metrics(metrics: Mapping[str, float]) -> dict[str, float]:
     return result
 
 
+def _info_metrics(prefix: str, metrics: Mapping[str, float]) -> dict[str, float]:
+    return {f"info/{prefix}/{name}": float(value) for name, value in metrics.items()}
+
+
 def _validate_optimizer_parameters(
     optimizer: torch.optim.Optimizer, module: nn.Module, *, name: str, device: torch.device
 ) -> None:
@@ -60,9 +68,9 @@ def _validate_optimizer_parameters(
     optimizer_parameters = [
         parameter for group in optimizer.param_groups for parameter in group["params"]
     ]
-    if {id(parameter) for parameter in optimizer_parameters} != {
-        id(parameter) for parameter in module_parameters
-    }:
+    optimizer_ids = [id(parameter) for parameter in optimizer_parameters]
+    module_ids = [id(parameter) for parameter in module_parameters]
+    if len(optimizer_ids) != len(set(optimizer_ids)) or set(optimizer_ids) != set(module_ids):
         raise ValueError(f"{name} optimizer parameters must exactly match the module parameters")
     if any(parameter.device != device for parameter in optimizer_parameters):
         raise ValueError(f"{name} optimizer parameters must be on {device}")
@@ -84,8 +92,10 @@ def _as_tensor(value: Any, *, device: torch.device | str | None = None) -> Tenso
     return tensor
 
 
-def _validate_env_action(env: Any, action: np.ndarray, *, num_envs: int) -> None:
-    """Fail before stepping when a policy action violates the environment contract."""
+def _env_action_bounds(
+    env: Any, action: np.ndarray, *, num_envs: int
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Return broadcastable finite action bounds for a vector environment."""
 
     space = getattr(env, "single_action_space", None)
     if space is None:
@@ -96,7 +106,7 @@ def _validate_env_action(env: Any, action: np.ndarray, *, num_envs: int) -> None
     high = getattr(space, "high", None)
     shape = getattr(space, "shape", None)
     if low is None or high is None or shape is None:
-        return
+        return None
     low_array = np.asarray(low, dtype=np.float32)
     high_array = np.asarray(high, dtype=np.float32)
     if action.shape == (num_envs, *tuple(shape)):
@@ -115,9 +125,29 @@ def _validate_env_action(env: Any, action: np.ndarray, *, num_envs: int) -> None
             f"got {action.shape}"
         )
     if not np.all(np.isfinite(low_array)) or not np.all(np.isfinite(high_array)):
+        return None
+    return low_array, high_array
+
+
+def _validate_env_action(env: Any, action: np.ndarray, *, num_envs: int) -> None:
+    """Fail before stepping when a policy action violates the environment contract."""
+
+    bounds = _env_action_bounds(env, action, num_envs=num_envs)
+    if bounds is None:
         return
+    low_array, high_array = bounds
     if np.any(action < low_array) or np.any(action > high_array):
         raise ValueError("policy action is outside the environment action space")
+
+
+def _clip_env_action(env: Any, action: np.ndarray, *, num_envs: int) -> np.ndarray:
+    """Project a finite policy action onto a finite environment Box boundary."""
+
+    bounds = _env_action_bounds(env, action, num_envs=num_envs)
+    if bounds is None:
+        return action
+    low_array, high_array = bounds
+    return np.clip(action, low_array, high_array).astype(np.float32, copy=False)
 
 
 def _raw_feature_mapping(raw: Any, *, num_envs: int) -> dict[str, Tensor]:
@@ -441,6 +471,7 @@ class OnlineTrainer:
         minibatch_size: int | None = None,
         seed: int = 0,
         logger: Callable[[Mapping[str, float]], Any] | None = None,
+        debug: bool = False,
         image_encoder: ObservationFeatureEncoder | None = None,
         value_hidden_dims: Sequence[int] = (128, 128),
     ) -> None:
@@ -456,8 +487,7 @@ class OnlineTrainer:
             raise ValueError("old_policy must be a DiffusionRLAdapter")
         if current_policy.policy is old_policy.policy:
             raise ValueError("current and old policies must be independent modules")
-        if current_policy.timesteps != old_policy.timesteps:
-            raise ValueError("current and old policies must use the same DDIM schedule")
+        current_policy.assert_transition_compatible(old_policy)
         if not torch.equal(current_policy.checkpoint.active_action_mask, old_policy.checkpoint.active_action_mask):
             raise ValueError("current and old policies must use the same active action mask")
         for name, value in (("actor_clip_ratio", actor_clip_ratio), ("value_clip_ratio", value_clip_ratio)):
@@ -482,7 +512,7 @@ class OnlineTrainer:
         self.current_policy = current_policy
         self.old_policy = old_policy
         self.actor_optimizer = actor_optimizer or torch.optim.Adam(
-            current_policy.policy.parameters(), lr=1e-5
+            current_policy.policy.parameters(), lr=1e-6
         )
         if not isinstance(self.actor_optimizer, torch.optim.Optimizer):
             raise ValueError("actor_optimizer must be a torch optimizer")
@@ -501,8 +531,17 @@ class OnlineTrainer:
         self.minibatch_size = minibatch_size
         self.seed = seed
         self.logger = logger
+        if not isinstance(debug, bool):
+            raise ValueError("debug must be a bool")
+        self.debug = debug
         self._generator = old_policy.make_generator(seed)
         self._runtime_contract: dict[str, str | int | float | bool | None] = {}
+        self._replay_verified = False
+        self._replay_info = {
+            "old_replay_abs_delta_max": 0.0,
+            "old_replay_abs_delta_mean": 0.0,
+        }
+        self._transition_info = current_policy.denoising_step_diagnostics()
 
         if value_network is not None and value_encoder is not None:
             raise ValueError("provide either value_network or value_encoder, not both")
@@ -703,6 +742,9 @@ class OnlineTrainer:
             observation_batch = _history_batch(policy_history, device=self.device)
             with torch.no_grad():
                 trace = self.old_policy.sample_trace(observation_batch, generator=self._generator)
+                if not self._replay_verified:
+                    self._replay_info = self.old_policy.verify_trace_replay(observation_batch, trace)
+                    self._replay_verified = True
                 raw_chunk = self.old_policy.executable_actions(trace).detach()
                 value = self._value(observation_batch).detach()
             chunk_size = raw_chunk.shape[1]
@@ -723,6 +765,11 @@ class OnlineTrainer:
                 previously_done = term_row | trunc_row
                 if previously_done.any():
                     action_np[previously_done] = 0.0
+                # Diffusion sampling can produce tiny out-of-Box excursions
+                # after unnormalization. Project only the command sent to the
+                # environment; PPO likelihoods remain those of the latent DDIM
+                # transition stored in ``trace``.
+                action_np = _clip_env_action(env, action_np, num_envs=num_envs)
                 _validate_env_action(env, action_np, num_envs=num_envs)
                 action_row[:, action_index] = torch.as_tensor(
                     action_np, dtype=torch.float32, device=self.device
@@ -950,10 +997,8 @@ class OnlineTrainer:
         permutation_generator = torch.Generator(device="cpu").manual_seed(self.seed + self.counters.global_updates)
 
         actor_losses: list[float] = []
-        ratios: list[float] = []
-        clips: list[float] = []
-        kls: list[float] = []
         value_losses: list[float] = []
+        diagnostic_chunks: dict[int, list[tuple[Tensor, Tensor, Tensor]]] = {}
         for _epoch in range(self.ppo_epochs):
             permutation = torch.randperm(batch_size, generator=permutation_generator)
             for start in range(0, batch_size, minibatch):
@@ -969,12 +1014,11 @@ class OnlineTrainer:
                 self.actor_optimizer.zero_grad(set_to_none=True)
                 self.value_optimizer.zero_grad(set_to_none=True)
                 losses: list[Tensor] = []
-                local_metrics: list[dict[str, float]] = []
                 try:
                     for step_index, new_log_prob in enumerate(self.current_policy.iter_recomputed_log_prob(obs_mb, trace_mb)):
                         old_log_prob = self.current_policy.executable_log_prob(trace_mb.old_log_prob[step_index : step_index + 1])
                         new_executable = self.current_policy.executable_log_prob(new_log_prob)
-                        loss, metrics = denoising_ppo_loss(
+                        loss, _metrics = denoising_ppo_loss(
                             new_executable,
                             old_log_prob,
                             adv_mb,
@@ -984,7 +1028,23 @@ class OnlineTrainer:
                         )
                         (loss / len(self.current_policy.timesteps)).backward()
                         losses.append(loss.detach())
-                        local_metrics.append(metrics)
+                        new_joint_log_prob = reduce_event_log_prob(
+                            new_executable.detach(),
+                            step_mask=valid_mb,
+                            action_dim_mask=self.current_policy.checkpoint.active_action_mask,
+                        )
+                        old_joint_log_prob = reduce_event_log_prob(
+                            old_log_prob.detach(),
+                            step_mask=valid_mb,
+                            action_dim_mask=self.current_policy.checkpoint.active_action_mask,
+                        )
+                        diagnostic_chunks.setdefault(step_index, []).append(
+                            (
+                                new_joint_log_prob.cpu(),
+                                old_joint_log_prob.cpu(),
+                                valid_mb.detach().cpu(),
+                            )
+                        )
                     gradient_norm = torch.nn.utils.clip_grad_norm_(self.current_policy.policy.parameters(), self.gradient_clip_norm)
                     if not torch.isfinite(gradient_norm).item():
                         raise ValueError("actor gradients must be finite")
@@ -1016,9 +1076,6 @@ class OnlineTrainer:
                 if not all(torch.isfinite(parameter).all().item() for parameter in self.value_network.parameters()):
                     raise ValueError("value optimizer produced non-finite parameters")
                 actor_losses.append(float(torch.stack(losses).mean().item()))
-                ratios.extend(item["ratio_mean"] for item in local_metrics)
-                clips.extend(item["clip_fraction"] for item in local_metrics)
-                kls.extend(item["approx_kl"] for item in local_metrics)
                 self.counters = dataclasses.replace(self.counters, actor_updates=self.counters.actor_updates + 1)
                 value_losses.append(float(value_loss.detach().item()))
 
@@ -1026,20 +1083,77 @@ class OnlineTrainer:
         # A rollout/update cycle is the natural on-policy synchronization
         # point. This keeps the next rollout's behavior policy current.
         self.sync_old_policy()
+        per_step_metrics: dict[int, dict[str, float]] = {}
+        per_step_new: list[Tensor] = []
+        per_step_old: list[Tensor] = []
+        per_step_masks: list[Tensor] = []
+        for step_index in range(len(self.current_policy.timesteps)):
+            chunks = diagnostic_chunks.get(step_index)
+            if not chunks:
+                raise ValueError(f"missing PPO diagnostics for denoising step {step_index}")
+            new_step = torch.cat([item[0] for item in chunks], dim=1)
+            old_step = torch.cat([item[1] for item in chunks], dim=1)
+            mask_step = torch.cat([item[2] for item in chunks], dim=0)
+            summary = denoising_ppo_reduced_metrics(
+                new_step,
+                old_step,
+                step_mask=mask_step,
+                action_dim_mask=self.current_policy.checkpoint.active_action_mask.detach().cpu(),
+                clip_ratio=self.actor_clip_ratio,
+            )
+            per_step_metrics[step_index] = summary
+            per_step_new.append(new_step)
+            per_step_old.append(old_step)
+            per_step_masks.append(mask_step)
+        if any(not torch.equal(per_step_masks[0], mask) for mask in per_step_masks[1:]):
+            raise ValueError("PPO diagnostic masks disagree across denoising steps")
+        step_count = len(per_step_new)
+        overall_new = torch.cat(per_step_new, dim=0).reshape(1, -1)
+        overall_old = torch.cat(per_step_old, dim=0).reshape(1, -1)
+        overall_mask = per_step_masks[0].repeat((step_count, 1))
+        aggregate = denoising_ppo_reduced_metrics(
+            overall_new,
+            overall_old,
+            step_mask=overall_mask,
+            action_dim_mask=self.current_policy.checkpoint.active_action_mask.detach().cpu(),
+            clip_ratio=self.actor_clip_ratio,
+        )
+        terminal_count = rollout.done.float().sum()
+        success_count = rollout.success.float().sum()
+        # ``success`` is populated only on terminal transitions. Normalize by
+        # completed episodes rather than by decision rows; a world can finish
+        # early and be autoreset several times within one collection window.
+        episode_success_rate = success_count / terminal_count.clamp_min(1.0)
+        chunk_success_rate = success_count / float(rollout.success.numel())
         metrics = {
             "actor/loss": sum(actor_losses) / len(actor_losses),
-            "actor/ratio_mean": sum(ratios) / len(ratios),
-            "actor/clip_fraction": sum(clips) / len(clips),
-            "actor/approx_kl": sum(kls) / len(kls),
+            "actor/ratio_mean": aggregate["ratio_mean"],
+            "actor/clip_fraction": aggregate["clip_fraction"],
+            "actor/approx_kl": aggregate["approx_kl"],
             "value/loss": sum(value_losses) / len(value_losses),
             "value/mean": float(flat_old_values.mean().item()),
             "gae/advantage_mean": float(advantage.mean().item()),
             "gae/return_mean": float(returns.mean().item()),
             "rollout/environment_steps": float(rollout.executed_steps.sum().item()),
             "rollout/reward_mean": float(rollout.reward.float().mean().item()),
-            "rollout/success_rate": float(rollout.success.float().mean().item()),
-            "rollout/terminal_count": float(rollout.done.float().sum().item()),
+            "rollout/success_rate": float(episode_success_rate.item()),
+            "rollout/chunk_success_rate": float(chunk_success_rate.item()),
+            "rollout/success_count": float(success_count.item()),
+            "rollout/terminal_count": float(terminal_count.item()),
+            "info/actor/ppo_epochs": float(self.ppo_epochs),
+            "info/actor/old_policy_sync_age_updates": float(
+                self.counters.actor_updates - self.counters.last_old_policy_sync_actor_update
+            ),
+            "info/actor/old_policy_sync_count": float(self.counters.old_policy_syncs),
         }
+        metrics.update(_info_metrics("actor", aggregate))
+        metrics.update(_info_metrics("actor", self._replay_info))
+        if self.debug:
+            for step_index, summary in per_step_metrics.items():
+                metrics.update(_info_metrics(f"actor/denoise_{step_index:02d}", summary))
+            for diagnostic in self._transition_info:
+                step_index = int(diagnostic["step"])
+                metrics.update(_info_metrics(f"actor/denoise_{step_index:02d}", diagnostic))
         return self._write_metrics(metrics)
 
     @staticmethod

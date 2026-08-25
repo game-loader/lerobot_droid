@@ -663,13 +663,15 @@ class LeRobotV3DecisionDataset(Dataset[DecisionBatch]):
             require_complete=bool(canonical_fields),
         )
         camera_keys = _camera_keys(dataset)
-        observation_keys = {config.state_key}
+        observation_keys: set[str] = {config.state_key}
         observation_keys.update(
             key for key in dataset.features if key.startswith("observation.")
         )
         observation_keys.update(camera_keys)
-        observation_keys = sorted(observation_keys)
-        raw_observation_keys = [key for key in observation_keys if key not in camera_keys]
+        sorted_observation_keys = sorted(observation_keys)
+        raw_observation_keys = [
+            key for key in sorted_observation_keys if key not in camera_keys
+        ]
         parsed_episode_rows: list[tuple[int, int, int, int, dict[str, Any]]] = []
         for raw_row in dataset.meta.episodes:
             if not isinstance(raw_row, Mapping):
@@ -817,6 +819,65 @@ class LeRobotV3DecisionDataset(Dataset[DecisionBatch]):
     @staticmethod
     def collate_fn(batch: Sequence[DecisionBatch]) -> DecisionBatch:
         return collate_decision_batches(batch)
+
+    def split_by_episode(
+        self, *, validation_fraction: float = 0.1
+    ) -> tuple[LeRobotV3DecisionDataset, LeRobotV3DecisionDataset]:
+        """Create deterministic train/validation views without history leakage."""
+
+        if (
+            isinstance(validation_fraction, bool)
+            or not isinstance(validation_fraction, (int, float))
+            or not math.isfinite(float(validation_fraction))
+            or not 0 < float(validation_fraction) < 1
+        ):
+            raise ValueError("validation_fraction must be finite and lie in (0, 1)")
+        episode_starts: list[int] = []
+        for location in self._locations:
+            if location.episode_start not in episode_starts:
+                episode_starts.append(location.episode_start)
+        if len(episode_starts) < 2:
+            raise ValueError("episode split requires at least two episodes")
+        validation_count = max(1, int(round(len(episode_starts) * float(validation_fraction))))
+        validation_starts = set(episode_starts[-validation_count:])
+        train_indices = [
+            index
+            for index, location in enumerate(self._locations)
+            if location.episode_start not in validation_starts
+        ]
+        validation_indices = [
+            index
+            for index, location in enumerate(self._locations)
+            if location.episode_start in validation_starts
+        ]
+        if not train_indices or not validation_indices:
+            raise ValueError("episode split produced an empty partition")
+
+        def view(indices: Sequence[int]) -> LeRobotV3DecisionDataset:
+            records = [self._records[index] for index in indices]
+            locations = [self._locations[index] for index in indices]
+            summary = copy.deepcopy(self._summary)
+            summary["decisions"] = len(records)
+            starts = {location.episode_start for location in locations}
+            length_by_start = {
+                location.episode_start: location.episode_length
+                for location in self._locations
+            }
+            summary["episodes"] = len(starts)
+            summary["frames"] = sum(
+                length_by_start[start] for start in starts
+            )
+            return type(self)(
+                records,
+                summary,
+                source_dataset=self._source_dataset,
+                camera_keys=self._camera_keys,
+                locations=locations,
+                n_obs_steps=self._n_obs_steps,
+                chunk_size=self._chunk_size,
+            )
+
+        return view(train_indices), view(validation_indices)
 
     def inspection_summary(self) -> dict[str, Any]:
         return copy.deepcopy(self._summary)

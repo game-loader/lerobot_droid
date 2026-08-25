@@ -226,6 +226,29 @@ def test_iql_advantage_batch_one_falls_back_to_raw_value() -> None:
     torch.testing.assert_close(normalized, raw)
 
 
+def test_iql_q_value_is_raw_conservative_minimum(decision_batch: DecisionBatch) -> None:
+    iql = _make_iql()
+    expected = torch.minimum(
+        iql.q1(
+            iql._q_input(
+                iql.feature_encoder(decision_batch.observation),
+                iql.action_packer(decision_batch.action, decision_batch.action_valid),
+            )
+        ),
+        iql.q2(
+            iql._q_input(
+                iql.feature_encoder(decision_batch.observation),
+                iql.action_packer(decision_batch.action, decision_batch.action_valid),
+            )
+        ),
+    )
+    actual = iql.q_value(
+        decision_batch.observation, decision_batch.action, decision_batch.action_valid
+    )
+    torch.testing.assert_close(actual, expected)
+    assert not actual.requires_grad
+
+
 def test_iql_polyak_update_moves_target_toward_updated_online(
     decision_batch: DecisionBatch,
 ) -> None:

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -148,6 +149,44 @@ def test_stochastic_ddim_uses_configured_clipping_at_final_transition() -> None:
     assert output.std.item() == pytest.approx(0.01)
 
 
+def test_stochastic_ddim_separates_sampling_and_probability_sigma() -> None:
+    scheduler = DDIMScheduler(
+        num_train_timesteps=8,
+        prediction_type="sample",
+        clip_sample=False,
+    )
+    scheduler.set_timesteps(4)
+    sample = torch.zeros(1, 2, 1)
+    expected_generator = torch.Generator().manual_seed(29)
+    expected_noise = torch.randn(sample.shape, generator=expected_generator)
+
+    output = stochastic_ddim_step(
+        scheduler=scheduler,
+        model_output=torch.zeros_like(sample),
+        timestep=int(scheduler.timesteps[-1]),
+        previous_timestep=None,
+        sample=sample,
+        eta=1.0,
+        sigma_min=0.0067,
+        sigma_max=0.1,
+        probability_sigma_min=0.1,
+        generator=torch.Generator().manual_seed(29),
+    )
+
+    assert output.std.item() == pytest.approx(0.0067)
+    assert output.probability_std.item() == pytest.approx(0.1)
+    torch.testing.assert_close(
+        output.previous_sample,
+        output.mean + output.std * expected_noise,
+    )
+    expected_log_prob = (
+        -0.5 * ((output.previous_sample - output.mean) / output.probability_std).square()
+        - output.probability_std.log()
+        - 0.5 * torch.log(torch.tensor(2.0 * torch.pi))
+    )
+    torch.testing.assert_close(output.log_prob, expected_log_prob)
+
+
 def test_stochastic_ddim_rejects_invalid_schedule_pair() -> None:
     scheduler = DDIMScheduler(num_train_timesteps=8)
 
@@ -161,6 +200,23 @@ def test_stochastic_ddim_rejects_invalid_schedule_pair() -> None:
             eta=1.0,
             sigma_min=0.01,
             sigma_max=0.1,
+        )
+
+
+def test_stochastic_ddim_rejects_nonfinite_raw_sigma() -> None:
+    scheduler = DDIMScheduler(num_train_timesteps=8)
+    scheduler.set_timesteps(4)
+    with pytest.raises(ValueError, match="raw_std"):
+        stochastic_ddim_step(
+            scheduler=scheduler,
+            model_output=torch.zeros(1, 2, 1),
+            timestep=int(scheduler.timesteps[0]),
+            previous_timestep=int(scheduler.timesteps[1]),
+            sample=torch.zeros(1, 2, 1),
+            eta=1e308,
+            sigma_min=0.01,
+            sigma_max=0.1,
+            previous_sample=torch.zeros(1, 2, 1),
         )
 
 
@@ -184,6 +240,10 @@ def test_trace_replay_has_unit_ratio_and_unet_gradients(
     assert not trace.old_log_prob.requires_grad
     torch.testing.assert_close(replayed, trace.old_log_prob, rtol=1e-5, atol=1e-5)
 
+    replay_info = tiny_diffusion_adapter.verify_trace_replay(observation, trace)
+    assert replay_info["old_replay_abs_delta_max"] == pytest.approx(0.0, abs=1e-6)
+    assert replay_info["old_replay_abs_delta_mean"] == pytest.approx(0.0, abs=1e-7)
+
     new_executable = tiny_diffusion_adapter.executable_log_prob(replayed)
     old_executable = tiny_diffusion_adapter.executable_log_prob(trace.old_log_prob)
     loss, metrics = denoising_ppo_loss(
@@ -202,6 +262,93 @@ def test_trace_replay_has_unit_ratio_and_unet_gradients(
         parameter.grad is not None and torch.isfinite(parameter.grad).all()
         for parameter in tiny_diffusion_adapter.policy.diffusion.unet.parameters()
     )
+
+
+def test_adapter_reports_effective_and_raw_sigma_for_each_denoising_step(
+    tiny_diffusion_adapter: DiffusionRLAdapter,
+) -> None:
+    diagnostics = tiny_diffusion_adapter.denoising_step_diagnostics()
+
+    assert len(diagnostics) == len(tiny_diffusion_adapter.timesteps)
+    assert diagnostics[0]["step"] == 0.0
+    assert diagnostics[-1]["previous_timestep"] == -1.0
+    assert diagnostics[-1]["sigma_raw"] == pytest.approx(0.0)
+    assert diagnostics[-1]["sigma_effective"] == pytest.approx(0.01)
+    assert diagnostics[-1]["sigma_inverse_square"] == pytest.approx(10000.0)
+    assert diagnostics[-1]["sigma_sample_effective"] == pytest.approx(0.01)
+    assert diagnostics[-1]["sigma_probability"] == pytest.approx(0.1)
+    assert diagnostics[-1]["sigma_probability_inverse_square"] == pytest.approx(100.0)
+    assert diagnostics[-1]["sigma_clamped_to_min"] == 1.0
+    assert all(
+        0.01 <= diagnostics[index]["sigma_effective"] <= 0.1
+        for index in range(len(diagnostics))
+    )
+
+
+def test_probability_sigma_does_not_change_sampled_trace(
+    tiny_diffusion_adapter: DiffusionRLAdapter,
+) -> None:
+    sampling_floor = DiffusionRLAdapter(
+        tiny_diffusion_adapter.checkpoint,
+        TraceConfig(
+            num_inference_steps=4,
+            eta=1.0,
+            sigma_min=0.01,
+            sigma_max=0.1,
+            probability_sigma_min=0.01,
+        ),
+    )
+    probability_floor = DiffusionRLAdapter(
+        tiny_diffusion_adapter.checkpoint,
+        TraceConfig(
+            num_inference_steps=4,
+            eta=1.0,
+            sigma_min=0.01,
+            sigma_max=0.1,
+            probability_sigma_min=0.1,
+        ),
+    )
+    observation = ObservationBatch({"observation.state": torch.zeros(2, 2, 3)})
+
+    sampled = sampling_floor.sample_trace(
+        observation, generator=sampling_floor.make_generator(31)
+    )
+    widened = probability_floor.sample_trace(
+        observation, generator=probability_floor.make_generator(31)
+    )
+
+    torch.testing.assert_close(widened.latents, sampled.latents, rtol=0, atol=0)
+    torch.testing.assert_close(widened.next_latents, sampled.next_latents, rtol=0, atol=0)
+    torch.testing.assert_close(widened.final_actions, sampled.final_actions, rtol=0, atol=0)
+    assert not torch.equal(widened.old_log_prob, sampled.old_log_prob)
+
+
+def test_adapter_rejects_mismatched_transition_contract(
+    tiny_diffusion_adapter: DiffusionRLAdapter,
+) -> None:
+    other = DiffusionRLAdapter(
+        tiny_diffusion_adapter.checkpoint,
+        TraceConfig(num_inference_steps=4, eta=0.5, sigma_min=0.01, sigma_max=0.1),
+    )
+
+    with pytest.raises(ValueError, match="transition contract"):
+        tiny_diffusion_adapter.assert_transition_compatible(other)
+
+
+def test_adapter_rejects_trace_with_inconsistent_final_action(
+    tiny_diffusion_adapter: DiffusionRLAdapter,
+) -> None:
+    observation = ObservationBatch({"observation.state": torch.zeros(1, 2, 3)})
+    trace = tiny_diffusion_adapter.sample_trace(
+        observation, generator=torch.Generator().manual_seed(23)
+    )
+    invalid = replace(
+        trace,
+        final_actions=trace.final_actions.clone().add(1.0),
+    )
+
+    with pytest.raises(ValueError, match="final_actions"):
+        tiny_diffusion_adapter.recompute_log_prob(observation, invalid)
 
 
 def test_execution_slice_starts_after_observation_prefix(
@@ -300,6 +447,27 @@ def test_stochastic_ddim_rejects_cpu_generator_for_cuda_sample() -> None:
             sigma_min=0.01,
             sigma_max=0.1,
             generator=torch.Generator().manual_seed(3),
+        )
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.device_count() < 2,
+    reason="requires two CUDA devices",
+)
+def test_stochastic_ddim_rejects_generator_on_wrong_cuda_index() -> None:
+    scheduler = DDIMScheduler(num_train_timesteps=8)
+    sample = torch.zeros(1, 2, 1, device="cuda:0")
+    with pytest.raises(ValueError, match="generator device"):
+        stochastic_ddim_step(
+            scheduler=scheduler,
+            model_output=torch.zeros_like(sample),
+            timestep=2,
+            previous_timestep=1,
+            sample=sample,
+            eta=1.0,
+            sigma_min=0.01,
+            sigma_max=0.1,
+            generator=torch.Generator(device="cuda:1").manual_seed(3),
         )
 
 

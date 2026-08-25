@@ -1,0 +1,237 @@
+session:
+  id: "2026-08-18_001"
+  date: "2026-08-18"
+  started: "2026-08-18T19:01:40+08:00"
+  last_turn: "2026-08-18T21:30:34+08:00"
+  turn_count: 5
+  summary: Diagnosed invariant PPO metrics and audited paper parity, establishing that the migrated run used IQL advantages but omitted RL-100's AM-Q behavior-promotion gate.
+
+events_logged:
+  - turn: 1
+    type: decision
+    id: N01
+    routing: direct
+    provenance: user
+    summary: Diagnostic observations belong under info rather than primary training metrics.
+  - turn: 1
+    type: experiment
+    id: N02
+    routing: direct
+    provenance: ai-executed
+    summary: Historical fixed-reference KL drift audited.
+  - turn: 1
+    type: decision
+    id: N03
+    routing: direct
+    provenance: ai-suggested
+    summary: Actor LR set to 1e-6, epochs to 1, and default snapshot sync interval to 1.
+  - turn: 1
+    type: experiment
+    id: N04
+    routing: direct
+    provenance: ai-executed
+    summary: Synchronized 10-step CUDA smoke remained at unit ratios and zero KL.
+  - turn: 1
+    type: experiment
+    id: N05
+    routing: direct
+    provenance: ai-executed
+    summary: Fixed-reference control localized ratio spread to low-sigma tail transitions.
+  - turn: 1
+    type: experiment
+    id: N06
+    routing: direct
+    provenance: ai-executed
+    summary: Full tests, static checks, and CUDA smoke passed.
+  - turn: 1
+    type: claim
+    id: C01
+    routing: crystallized
+    provenance: ai-suggested
+    summary: Stale references turn local PPO ratios into cumulative drift.
+  - turn: 1
+    type: observation
+    id: O01
+    routing: staged
+    provenance: ai-suggested
+    summary: Tail sigma sensitivity needs evaluation before changing the floor.
+  - turn: 1
+    type: observation
+    id: O02
+    routing: staged
+    provenance: ai-suggested
+    summary: Joint chunk event count may amplify log-ratio variance.
+  - turn: 2
+    type: decision
+    id: N07
+    routing: direct
+    provenance: user
+    summary: Separate rollout sampling sigma from PPO probability sigma and default the probability floor to 0.1.
+  - turn: 2
+    type: experiment
+    id: N08
+    routing: direct
+    provenance: ai-executed
+    summary: Matched CUDA A/B reduced KL and ratio tails while deterministic replay kept sampled actions identical.
+  - turn: 2
+    type: claim
+    id: C02
+    routing: crystallized
+    provenance: user
+    summary: Decoupled likelihood variance controls tail ratios without changing rollout samples.
+  - turn: 2
+    type: heuristic
+    id: H01
+    routing: crystallized
+    provenance: user
+    summary: Sample with sigma_sample and evaluate both likelihoods with the shared floored sigma_prob.
+  - turn: 3
+    type: decision
+    id: N09
+    routing: direct
+    provenance: user
+    summary: Restart offline actor training from the original IL checkpoint with a 50000-update actor bound.
+  - turn: 3
+    type: experiment
+    id: N10
+    routing: direct
+    provenance: ai-executed
+    summary: Fresh CUDA run completed IQL and entered actor training with the intended dual-sigma diagnostics.
+  - turn: 4
+    type: decision
+    id: N11
+    routing: direct
+    provenance: user
+    summary: Stop the live actor run to explain signed loss and invariant diagnostics.
+  - turn: 4
+    type: dead_end
+    id: N12
+    routing: direct
+    provenance: ai-executed
+    summary: Immediate snapshot sync made every pre-update ratio and KL row structurally trivial.
+  - turn: 4
+    type: claim
+    id: C03
+    routing: crystallized
+    provenance: ai-suggested
+    summary: Pre-update metrics cannot observe an update followed by immediate snapshot synchronization.
+  - turn: 5
+    type: question
+    id: N13
+    routing: direct
+    provenance: user
+    summary: Audit per-step policy updates, same-transition KL, and AM-Q use.
+  - turn: 5
+    type: experiment
+    id: N14
+    routing: direct
+    provenance: ai-executed
+    summary: Paper/original/migration comparison found correct IQL advantage and trace replay but no active AM-Q gate.
+  - turn: 5
+    type: claim
+    id: C04
+    routing: crystallized
+    provenance: ai-suggested
+    summary: IQL actor advantage and AM-Q behavior promotion are separate RL-100 mechanisms.
+
+ai_actions:
+  - turn: 1
+    action: Implemented PPO distribution diagnostics, DDIM sigma reporting, transition contracts, replay assertions, and conservative trainer defaults.
+    provenance: ai-executed
+    files_changed:
+      - RL/algorithms/ppo.py
+      - RL/policy/ddim.py
+      - RL/policy/diffusion_adapter.py
+      - RL/trainers/offline.py
+      - RL/trainers/online.py
+      - RL/cli/train_offline.py
+      - RL/cli/train_online.py
+      - RL/README.md
+      - tests/rl100
+  - turn: 1
+    action: Ran full CPU tests, Ruff, real offline and online CUDA smoke, and a fixed-old CUDA comparison.
+    provenance: ai-executed
+    files_changed: []
+  - turn: 2
+    action: Implemented and documented separate DDIM sampling and PPO probability sigma across configuration, rollout, replay, and CLI entry points.
+    provenance: ai-executed
+    files_changed:
+      - RL/config.py
+      - RL/policy/ddim.py
+      - RL/policy/diffusion_adapter.py
+      - RL/cli/train_offline.py
+      - RL/cli/train_online.py
+      - RL/README.md
+      - tests/rl100
+  - turn: 2
+    action: Ran the full RL test suite, Ruff, deterministic rollout regression, and inspected the matched fixed-reference CUDA A/B metrics.
+    provenance: ai-executed
+    files_changed: []
+  - turn: 3
+    action: Launched a detached CUDA offline training run from the original IL checkpoint with 100000 IQL and 50000 actor updates, recording online to SwanLab.
+    provenance: ai-executed
+    files_changed:
+      - outputs/rl100/offline-moya-il-dualsigma-50k-20260818-195725.launch.txt
+      - outputs/rl100/offline-moya-il-dualsigma-50k-20260818-195725.pid
+      - outputs/rl100/offline-moya-il-dualsigma-50k-20260818-195725.log
+      - outputs/rl100/offline-moya-il-dualsigma-50k-20260818-195725
+  - turn: 3
+    action: Verified the live process, GPU use, SwanLab URL, completed IQL phase, first actor metrics, dual-sigma values, and absence of runtime errors.
+    provenance: ai-executed
+    files_changed: []
+  - turn: 4
+    action: Interrupted the CUDA run, allowed SwanLab to upload buffered records, and verified both parent and child training processes exited.
+    provenance: ai-executed
+    files_changed: []
+  - turn: 4
+    action: Audited 30165 actor rows, traced loss and likelihood data flow through IQL advantage normalization, PPO reduction, optimizer timing, and snapshot synchronization, and ran focused regression tests.
+    provenance: ai-executed
+    files_changed:
+      - ara/evidence/tables/ppo-stability-smoke.md
+  - turn: 5
+    action: Retrieved the RL-100 paper and current upstream README, then compared the paper equations, original BPPO/dynamics loop, and migrated offline CLI/trainer line by line.
+    provenance: ai-executed
+    files_changed:
+      - ara/evidence/tables/rl100-offline-parity-audit.md
+
+claims_touched:
+  - id: C01
+    action: crystallized
+    turn: 1
+  - id: C02
+    action: crystallized
+    turn: 2
+  - id: C03
+    action: crystallized
+    turn: 4
+
+logic_revisions: []
+
+key_context:
+  - turn: 1
+    excerpt: User required ratio quantiles, per-denoising-step ratios, delta log-probability, tail sigma inspection, joint chunk semantics, lower actor LR, fewer epochs, and old/new transition verification.
+  - turn: 1
+    excerpt: User required diagnostic observations to be namespaced under info so primary training metrics remain directly readable.
+  - turn: 2
+    excerpt: User directed that rollout retain sigma_sample while both old and new PPO likelihoods use sigma_prob=max(sigma_sample, probability_sigma_min), with a default probability floor of 0.1.
+  - turn: 3
+    excerpt: User requested restarting actor training from scratch with a 50000-update limit.
+  - turn: 4
+    excerpt: User requested stopping the run and observed that loss could be negative while approximate KL and the other PPO diagnostics remained unchanged.
+  - turn: 5
+    excerpt: User asked whether every step updates policy, whether KL should compare old/new policies on the same transition, and whether AM-Q from the paper was actually used.
+
+open_threads:
+  - Evaluate whether increasing the final sigma floor or excluding the deterministic final transition improves stability without reducing rollout success.
+  - Decide whether future BPPO runs should use fixed, periodic, or OPE-gated behavior snapshot promotion.
+  - Monitor the live 50000-update actor run through final checkpoint validation and downstream Newton evaluation.
+  - Redesign offline actor update grouping and post-update likelihood probes before restarting training.
+  - Wire state dynamics, AM-Q rollout scoring, validation checks, and conditional behavior-policy promotion into the offline CLI.
+
+closed_threads:
+  - turn: 4
+    thread: Monitor the live 50000-update actor run through final checkpoint validation and downstream Newton evaluation.
+    reason: Run interrupted at actor update 30165; no final checkpoint was written.
+
+ai_suggestions_pending:
+  - Compare sigma-floor variants with matched rollout success before changing TraceConfig defaults.

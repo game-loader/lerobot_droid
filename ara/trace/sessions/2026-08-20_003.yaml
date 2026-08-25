@@ -1,0 +1,69 @@
+session:
+  id: "2026-08-20_003"
+  date: "2026-08-20"
+  started: "2026-08-20T12:10:00+08:00"
+  last_turn: "2026-08-20T14:27:00+08:00"
+  turn_count: 1
+  summary: Added a default-off per-denoising debug metrics switch and restarted offline RL from the round-one IL checkpoint with compact metrics.
+
+events_logged:
+  - turn: 1
+    type: decision
+    id: N53
+    routing: direct
+    provenance: user
+    summary: Restart offline RL from the 50000-step IL checkpoint and suppress verbose denoising info unless debug mode is enabled.
+    evidence:
+      - outputs/rl100/eval-il-round001-050000-20260820-115500/collection_summary.json
+  - turn: 1
+    type: experiment
+    id: N54
+    routing: direct
+    provenance: ai-executed
+    summary: Added OfflineTrainer.debug and CLI --debug/iterative --offline-debug switches; default metrics retain aggregate ratio/KL diagnostics but omit all denoise_* keys.
+    evidence:
+      - RL/trainers/offline.py
+      - RL/cli/train_offline.py
+      - RL/cli/train_iterative_offline.py
+      - tests/rl100/test_offline_trainer.py
+  - turn: 1
+    type: experiment
+    id: N55
+    routing: direct
+    provenance: ai-executed
+    summary: Restarted CUDA AM-Q offline RL from the IL checkpoint on the 200-episode merged dataset; IQL reached 100000 updates and actor reached 1357 updates with finite aggregate diagnostics and zero denoise keys.
+    evidence:
+      - ara/evidence/tables/offline-il050000-debugoff-launch.md
+      - outputs/rl100/offline-moya-il2-il050000-amq-sync50-20260820-121500/metrics.jsonl
+      - https://swanlab.cn/@game-loader/moya-rl100/runs/b6nfshio
+  - turn: 1
+    type: experiment
+    id: N56
+    routing: direct
+    provenance: ai-executed
+    summary: Full RL regression verification passed 300 tests with one expected skip; Ruff and git diff checks passed.
+    evidence:
+      - tests/rl100
+      - RL/trainers/offline.py
+
+ai_actions:
+  - turn: 1
+    action: Added default-off verbose denoising diagnostics with explicit debug opt-in and regression coverage for both modes.
+    provenance: ai-executed
+    files_changed:
+      - RL/trainers/offline.py
+      - RL/cli/train_offline.py
+      - RL/cli/train_iterative_offline.py
+      - tests/rl100/test_offline_trainer.py
+      - tests/rl100/test_iterative_offline.py
+      - RL/README.md
+  - turn: 1
+    action: Restarted the production offline RL run with SwanLab online tracking and monitored CUDA progress and metric cardinality.
+    provenance: ai-executed
+    files_changed: []
+
+claims_touched: []
+logic_revisions: []
+key_context:
+  - turn: 1
+    excerpt: The new candidate is updating in memory; old-policy sync count remains zero until AM-Q accepts a promotion. The run is intentionally left active.

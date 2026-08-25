@@ -1,0 +1,78 @@
+sessions:
+  - id: "2026-08-18_001"
+    date: "2026-08-18"
+    summary: Diagnosed invariant PPO metrics and found that the migrated offline run used IQL advantage but omitted RL-100's AM-Q promotion gate.
+    turn_count: 5
+    events_count: 21
+    claims_touched: [C01, C02, C03, C04]
+    open_threads: 4
+  - id: "2026-08-19_001"
+    date: "2026-08-19"
+    summary: Launched iterative IL round two after a 59%-success production rollout and canonical 200-episode merge; fixed-normalizer IL is active on CUDA.
+    turn_count: 5
+    events_count: 30
+    claims_touched: [C05]
+    open_threads: 5
+  - id: "2026-08-20_001"
+    date: "2026-08-20"
+    summary: Repaired semantic normalizer fingerprinting, recovered the completed 50k IL output, and resumed CUDA offline RL with finite diffusion-ratio diagnostics.
+    turn_count: 1
+    events_count: 7
+    claims_touched: []
+    open_threads: 2
+  - id: "2026-08-20_002"
+    date: "2026-08-20"
+    summary: Stopped the AM-Q offline run and measured 51% success for the completed round-one IL checkpoint over 100 CUDA Newton episodes.
+    turn_count: 1
+    events_count: 3
+    claims_touched: []
+    open_threads: 1
+  - id: "2026-08-20_003"
+    date: "2026-08-20"
+    summary: Added default-off denoising diagnostics and restarted CUDA offline RL from the IL checkpoint with compact metrics.
+    turn_count: 1
+    events_count: 4
+    claims_touched: []
+    open_threads: 2
+  - id: "2026-08-21_001"
+    date: "2026-08-21"
+    summary: Added exact resumable IL eval provenance, selected the prior best IL checkpoint, and launched the 400-episode CUDA IL/offline cycle with periodic Newton success tracking.
+    turn_count: 3
+    events_count: 5
+    claims_touched: []
+    open_threads: 2
+  - id: "2026-08-23_001"
+    date: "2026-08-23"
+    summary: Completed the IL5 100-sync offline stage, merged the IL6 rollout, and continued fixed-normalizer IL toward the 150-promotion offline stage.
+    turn_count: 2
+    events_count: 5
+    claims_touched: []
+    open_threads: 1
+  - id: "2026-08-24_001"
+    date: "2026-08-24"
+    summary: Confirmed and launched SwanLab-tracked CUDA online PPO from the best IL7 offline sync_165 checkpoint after validating complete sparse-reward episodes and bounded actions.
+    turn_count: 3
+    events_count: 10
+    claims_touched: []
+    open_threads: 0
+  - id: "2026-08-25_001"
+    date: "2026-08-25"
+    summary: Diagnosed online update-005 metric dilution, replayed and independently evaluated its checkpoint, and ruled out broad IK-unreachable initial or dynamic targets as the dominant failure cause.
+    turn_count: 1
+    events_count: 3
+    claims_touched: []
+    open_threads: 2
+  - id: "2026-08-25_002"
+    date: "2026-08-25"
+    summary: Repaired Moya success-event latching and immediate termination, corrected online episode-level success reporting, and validated the path with focused tests plus a real CUDA smoke rollout.
+    turn_count: 1
+    events_count: 4
+    claims_touched: []
+    open_threads: 1
+  - id: "2026-08-25_003"
+    date: "2026-08-25"
+    summary: Evaluated sync_165 under the repaired Moya semantics (86%), reproduced an archived old-submodule baseline (88%), and separated the semantic delta from historical rollout variance.
+    turn_count: 1
+    events_count: 3
+    claims_touched: []
+    open_threads: 1

@@ -23,6 +23,7 @@ import logging
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
+from pathlib import Path
 from pprint import pformat
 from typing import TYPE_CHECKING, Any
 
@@ -49,6 +50,8 @@ from lerobot.envs import close_envs, make_env, make_env_pre_post_processors
 from lerobot.optim.factory import make_optimizer_and_scheduler
 from lerobot.policies import PreTrainedPolicy, make_policy, make_pre_post_processors
 from lerobot.rewards import make_reward_pre_post_processors
+from lerobot.utils.constants import PRETRAINED_MODEL_DIR
+from lerobot.utils.eval_provenance import build_eval_provenance, write_eval_provenance
 from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.logging_utils import AverageMeter, MetricsTracker
 from lerobot.utils.random_utils import set_seed
@@ -60,7 +63,7 @@ from lerobot.utils.utils import (
     inside_slurm,
 )
 
-from .lerobot_eval import eval_policy_all, resolve_max_episodes_rendered
+from .lerobot_eval import _save_eval_info, eval_policy_all, resolve_max_episodes_rendered
 
 
 def _log_eval_to_wandb(
@@ -71,6 +74,38 @@ def _log_eval_to_wandb(
         wandb_logger.log_video(video_paths[0], step, mode="eval")
 
 
+def _save_periodic_eval_provenance(
+    *,
+    cfg: TrainPipelineConfig,
+    checkpoint_dir: Path | None,
+    eval_dir: Path,
+) -> Path | None:
+    """Bind a diffusion-policy eval to the checkpoint saved at the same update."""
+
+    if checkpoint_dir is None or cfg.is_reward_model_training or cfg.policy is None or cfg.env is None:
+        return None
+    inference_steps = getattr(cfg.policy, "num_inference_steps", None)
+    policy_device = cfg.policy.device
+    env_device = getattr(cfg.env, "device", None)
+    if inference_steps is None or policy_device is None or env_device is None or cfg.seed is None:
+        return None
+    eval_info = eval_dir / "eval_info.json"
+    if not eval_info.is_file():
+        raise RuntimeError(f"cannot write evaluation provenance without eval_info.json: {eval_dir}")
+    checkpoint = (checkpoint_dir / PRETRAINED_MODEL_DIR).resolve(strict=True)
+    payload = build_eval_provenance(
+        checkpoint,
+        episodes=cfg.eval.n_episodes,
+        batch_size=cfg.eval.batch_size,
+        inference_steps=inference_steps,
+        policy_device=policy_device,
+        env_device=str(env_device),
+        env_type=cfg.env.type,
+        seed=cfg.seed,
+    )
+    return write_eval_provenance(eval_dir, payload)
+
+
 @contextmanager
 def _close_eval_envs_after_training(eval_env: Any) -> Iterator[None]:
     try:
@@ -78,6 +113,49 @@ def _close_eval_envs_after_training(eval_env: Any) -> Iterator[None]:
     finally:
         if eval_env:
             close_envs(eval_env)
+
+
+def _policy_processor_factory_kwargs(
+    *,
+    preserve_pretrained_processor_stats: bool,
+    processor_pretrained_path: Any,
+    resume: bool,
+    dataset_stats: dict[str, dict[str, Any]],
+    device_type: str,
+    rename_map: dict[str, str],
+    input_features: dict[str, Any],
+    output_features: dict[str, Any],
+    normalization_mapping: dict[Any, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build processor loader kwargs without mutating normalization state."""
+
+    processor_kwargs: dict[str, Any] = {}
+    postprocessor_kwargs: dict[str, Any] = {}
+    if processor_pretrained_path is None:
+        processor_kwargs["dataset_stats"] = dataset_stats
+        return processor_kwargs, postprocessor_kwargs
+
+    preprocessor_overrides: dict[str, Any] = {
+        "device_processor": {"device": device_type},
+        "rename_observations_processor": {"rename_map": rename_map},
+    }
+    if not preserve_pretrained_processor_stats:
+        if not resume:
+            processor_kwargs["dataset_stats"] = dataset_stats
+        preprocessor_overrides["normalizer_processor"] = {
+            "stats": dataset_stats,
+            "features": {**input_features, **output_features},
+            "norm_map": normalization_mapping,
+        }
+        postprocessor_kwargs["postprocessor_overrides"] = {
+            "unnormalizer_processor": {
+                "stats": dataset_stats,
+                "features": output_features,
+                "norm_map": normalization_mapping,
+            }
+        }
+    processor_kwargs["preprocessor_overrides"] = preprocessor_overrides
+    return processor_kwargs, postprocessor_kwargs
 
 
 def update_policy(
@@ -308,39 +386,35 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         and processor_pretrained_path is not None
         and not cfg.resume
     ):
+        if cfg.preserve_pretrained_processor_stats:
+            raise ValueError(
+                "preserve_pretrained_processor_stats cannot rebuild processors for "
+                "use_relative_actions=true; provide a checkpoint with compatible processors"
+            )
         logging.warning(
             "use_relative_actions=true with pretrained processors can skip relative transforms if "
             "the checkpoint processors do not define them. Building processors from current policy config."
         )
         processor_pretrained_path = None
 
-    processor_kwargs = {}
-    postprocessor_kwargs = {}
-    if (processor_pretrained_path and not cfg.resume) or not processor_pretrained_path:
-        processor_kwargs["dataset_stats"] = dataset.meta.stats
-
     if cfg.is_reward_model_training:
+        processor_kwargs = {}
+        postprocessor_kwargs = {}
+        if (processor_pretrained_path and not cfg.resume) or not processor_pretrained_path:
+            processor_kwargs["dataset_stats"] = dataset.meta.stats
         processor_kwargs["dataset_meta"] = dataset.meta
-
-    if not cfg.is_reward_model_training and processor_pretrained_path is not None:
-        processor_kwargs["preprocessor_overrides"] = {
-            "device_processor": {"device": device.type},
-            "normalizer_processor": {
-                "stats": dataset.meta.stats,
-                "features": {**policy.config.input_features, **policy.config.output_features},
-                "norm_map": policy.config.normalization_mapping,
-            },
-        }
-        processor_kwargs["preprocessor_overrides"]["rename_observations_processor"] = {
-            "rename_map": cfg.rename_map
-        }
-        postprocessor_kwargs["postprocessor_overrides"] = {
-            "unnormalizer_processor": {
-                "stats": dataset.meta.stats,
-                "features": policy.config.output_features,
-                "norm_map": policy.config.normalization_mapping,
-            },
-        }
+    else:
+        processor_kwargs, postprocessor_kwargs = _policy_processor_factory_kwargs(
+            preserve_pretrained_processor_stats=cfg.preserve_pretrained_processor_stats,
+            processor_pretrained_path=processor_pretrained_path,
+            resume=cfg.resume,
+            dataset_stats=dataset.meta.stats,
+            device_type=device.type,
+            rename_map=cfg.rename_map,
+            input_features=policy.config.input_features,
+            output_features=policy.config.output_features,
+            normalization_mapping=policy.config.normalization_mapping,
+        )
 
     if cfg.is_reward_model_training:
         preprocessor, postprocessor = make_reward_pre_post_processors(
@@ -500,7 +574,8 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
             train_tracker.step()
             is_log_step = cfg.log_freq > 0 and step % cfg.log_freq == 0 and is_main_process
             is_saving_step = step % cfg.save_freq == 0 or step == cfg.steps
-            is_eval_step = cfg.eval_freq > 0 and step % cfg.eval_freq == 0
+            is_eval_step = cfg.eval_freq > 0 and (step % cfg.eval_freq == 0 or step == cfg.steps)
+            saved_checkpoint_dir = None
 
             if is_log_step:
                 logging.info(train_tracker)
@@ -530,6 +605,7 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
                         postprocessor=postprocessor,
                     )
                     update_last_checkpoint(checkpoint_dir)
+                    saved_checkpoint_dir = checkpoint_dir
                     if wandb_logger:
                         wandb_logger.log_policy(checkpoint_dir)
 
@@ -554,8 +630,20 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
                             max_parallel_tasks=cfg.env.max_parallel_tasks,
                             close_envs_after_eval=not cfg.env.supports_eval_env_reuse,
                         )
+                    # Persist each periodic evaluation next to the checkpoint
+                    # so resumable iterative workflows can select the best IL
+                    # policy using real-environment success rather than the
+                    # final training step. Environments without rendering
+                    # support (for example Moya Newton) still produce no video.
+                    eval_dir = cfg.output_dir / "eval" / f"step_{step_id}"
+                    _save_eval_info(eval_info, eval_dir)
+                    _save_periodic_eval_provenance(
+                        cfg=cfg,
+                        checkpoint_dir=saved_checkpoint_dir,
+                        eval_dir=eval_dir,
+                    )
                     # overall metrics (suite-agnostic)
-                    aggregated = eval_info["overall"]
+                    aggregated = dict(eval_info["overall"])
 
                     # optional: per-suite logging
                     for suite, suite_info in eval_info.items():

@@ -54,3 +54,27 @@ pre-commit run --all-files                           # Lint + format (ruff, typo
 - **Optional dependencies**: many policies, envs, and robots are behind extras (e.g., `lerobot[aloha]`). New imports for optional packages must be guarded or lazy. See `pyproject.toml [project.optional-dependencies]`.
 - **Video decoding**: datasets can store observations as video files. `LeRobotDataset` handles frame extraction, but tests need ffmpeg installed.
 - **Prioritize use of `uv run`** to execute Python commands (not raw `python` or `pip`).
+
+## ARA: agent-native research artifacts
+
+This project records its research in an `ara/` artifact
+(https://github.com/ARA-Labs/Agent-Native-Research-Artifact).
+Route work to the matching ARA skill — invoke these yourself, without being asked:
+
+- `/research-manager` — trigger whenever a research milestone lands: an
+  experiment finishes, a decision is made, a hypothesis is confirmed or killed,
+  a dead end is hit, a direction pivots, user's input. This holds equally in autonomous runs
+  (loops, heartbeats, long experiments) where the user gives no input at all —
+  crystallize the insight at the milestone. It
+  records what just happened (decisions, experiments, dead ends, claims) into
+  `ara/`. Skip when nothing research-significant happened (greetings, pure formatting).
+- `/compiler <path>` — when turning an existing paper, repo, logs, or notes into
+  a structured artifact.
+- `/rigor-reviewer <dir>` — before trusting, publishing, or submitting an artifact.
+- `/research-visualizer <ara-dir>` — to inspect the research trajectory as an
+  interactive process map (add `--serve` for a live local viewer, `--check` to
+  validate/lint via the `ara` CLI).
+- `/research-foresight <ara-dir> "<question>"` — to answer "what should I try
+  next / why did this work / what if I change X", grounded in the artifact.
+- `/submit-ara <dir>` — when an artifact is ready to publish to GitHub and list
+  on the ARA Hub.

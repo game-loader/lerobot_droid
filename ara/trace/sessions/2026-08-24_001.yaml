@@ -1,0 +1,150 @@
+session:
+  id: "2026-08-24_001"
+  date: "2026-08-24"
+  started: "2026-08-24T00:00:00+08:00"
+  last_turn: "2026-08-24T20:07:00+08:00"
+  turn_count: 3
+  summary: Confirmed the migrated online PPO path, repaired bounded environment action execution, validated full-episode CUDA rollouts, and launched a SwanLab-tracked 3M-step online run from IL7 offline sync_165.
+
+events_logged:
+  - turn: 1
+    type: decision
+    id: N67
+    routing: direct
+    provenance: user
+    summary: Use the final IL checkpoint for the next offline RL stage and set the old-policy sync target to 200; periodic IL evaluations remain diagnostic.
+    evidence:
+      - RL/cli/train_iterative_offline.py
+      - ara/evidence/tables/iterative-il7-launch.md
+  - turn: 1
+    type: experiment
+    id: N70
+    routing: direct
+    provenance: ai-executed
+    summary: Added and tested the explicit final-IL selector; 29 focused iterative-offline tests passed with Ruff checks passing.
+    evidence:
+      - RL/cli/train_iterative_offline.py
+      - tests/rl100/test_iterative_offline.py
+  - turn: 1
+    type: experiment
+    id: N68
+    routing: direct
+    provenance: ai-executed
+    summary: Launched IL7 from IL6 sync_120 (81% Newton success) with offline_use_il_final=true and a 200-sync target.
+    evidence:
+      - ara/evidence/tables/iterative-il7-launch.md
+      - outputs/rl100/iterative-moya-il7-20260824-000250/round_001/round_manifest.json
+  - turn: 1
+    type: experiment
+    id: N69
+    routing: direct
+    provenance: ai-executed
+    summary: Completed the 100-episode CUDA rollout and merge; the cumulative IL7 dataset contains 700 episodes with 527 successes and 173 failures, and fixed-normalizer IL is active.
+    evidence:
+      - ara/evidence/tables/iterative-il7-launch.md
+      - outputs/rl100/iterative-moya-il7-20260824-000250/round_001/merge/attempt_001/merged/collection_summary.json
+
+  - turn: 2
+    type: experiment
+    id: N71
+    routing: direct
+    provenance: ai-executed
+    summary: A first saved-action replay attempt was rejected because a new CUDA process changed terminal outcomes while rendering; initial 16-world Charger positions remained unchanged, so the failure was attributed to GPU contact-solver execution timing rather than seed folding.
+    evidence:
+      - outputs/eval/moya_rl100_il7_sync165_first20_success_20260824-180454/record.log
+      - outputs/eval/moya_rl100_il7_sync165_first20_success_20260824-180454/summary.json
+
+  - turn: 2
+    type: experiment
+    id: N72
+    routing: direct
+    provenance: ai-executed
+    summary: Completed a same-rollout GPU body-pose capture for 100 episodes from sync_165; 83 episodes succeeded and the first 20 successful indices were captured as independently validated MP4 files.
+    evidence:
+      - ara/evidence/tables/sync165-first20-success-videos.md
+      - outputs/eval/moya_rl100_il7_sync165_first20_success_20260824-180454/eval_info.json
+      - outputs/eval/moya_rl100_il7_sync165_first20_success_20260824-180454/summary.json
+
+  - turn: 2
+    type: decision
+    id: N73
+    routing: direct
+    provenance: user
+    summary: Retain the first successful episodes in chronological rollout order without an explicit initial-position diversity filter.
+    evidence:
+      - outputs/eval/moya_rl100_il7_sync165_first20_success_20260824-180454/summary.json
+
+  - turn: 3
+    type: experiment
+    id: N74
+    routing: direct
+    provenance: ai-executed
+    summary: Confirmed that the repository already contains RL-100-style online diffusion PPO with vector GAE and a value critic; AM-Q remains an offline promotion gate rather than an online component.
+    evidence:
+      - RL/cli/train_online.py
+      - RL/trainers/online.py
+      - RL/MIGRATION.md
+
+  - turn: 3
+    type: experiment
+    id: N75
+    routing: direct
+    provenance: ai-executed
+    summary: Added explicit default-off online denoising diagnostics and finite Box action projection; focused online tests passed 14 cases and the full-episode CUDA smoke completed 14880 steps without action-contract failure.
+    evidence:
+      - RL/trainers/online.py
+      - RL/cli/train_online.py
+      - tests/rl100/test_online_trainer.py
+      - ara/evidence/tables/online-rl-sync165-launch.md
+
+  - turn: 3
+    type: experiment
+    id: N76
+    routing: direct
+    provenance: ai-executed
+    summary: Started the formal 202-update CUDA online PPO run from sync_165 with SwanLab online tracking; the first four updates completed with 59520 valid environment steps and finite ratio/KL diagnostics.
+    evidence:
+      - ara/evidence/tables/online-rl-sync165-launch.md
+      - outputs/rl100/online-moya-sync165-3m-20260824-2002/metrics.jsonl
+      - outputs/rl100/online-moya-sync165-3m-20260824-2002.log
+
+ai_actions:
+  - turn: 1
+    action: Audited the completed IL6 round, added a resumable final-IL offline selector, validated it with focused tests, and launched the IL7 CUDA rollout/merge/IL cycle.
+    provenance: ai-executed
+    files_changed:
+      - RL/cli/train_iterative_offline.py
+      - tests/rl100/test_iterative_offline.py
+      - ara/evidence/tables/iterative-il7-launch.md
+      - ara/trace/exploration_tree.yaml
+      - ara/trace/sessions/2026-08-24_001.yaml
+      - ara/trace/sessions/session_index.yaml
+  - turn: 2
+    action: Investigated non-deterministic saved-action replay, switched to same-rollout asynchronous GPU body-pose snapshots, encoded the first 20 fresh successes, and independently checked hashes, terminal criteria, frame counts, codec metadata, and representative frames.
+    provenance: ai-executed
+    files_changed:
+      - outputs/eval/moya_rl100_il7_sync165_first20_success_20260824-180454/record_first_20_successes.py
+      - outputs/eval/moya_rl100_il7_sync165_first20_success_20260824-180454/eval_info.json
+      - outputs/eval/moya_rl100_il7_sync165_first20_success_20260824-180454/summary.json
+      - ara/evidence/tables/sync165-first20-success-videos.md
+
+  - turn: 3
+    action: Audited the migrated online trainer, ran CUDA/SwanLab smoke checks, added environment-boundary action projection and compact debug gating, and launched the formal online run from the best offline checkpoint.
+    provenance: ai-executed
+    files_changed:
+      - RL/trainers/online.py
+      - RL/cli/train_online.py
+      - tests/rl100/test_online_trainer.py
+      - ara/evidence/tables/online-rl-sync165-launch.md
+
+claims_touched: []
+logic_revisions: []
+key_context:
+  - turn: 1
+    excerpt: Offline RL must receive the final IL checkpoint even when periodic IL Newton evaluations report a higher success rate elsewhere; the AM-Q target is 200 synchronizations.
+  - turn: 2
+    excerpt: Video selection must use the first 20 successful episodes from the same fresh rollout; rendering a replayed action trace in a new CUDA process is not an equivalent success evaluation.
+  - turn: 3
+    excerpt: Online sparse-reward collection must span the complete 930-step episode; the formal run uses 30 action chunks per update and starts from offline sync_165 with SwanLab tracking.
+open_threads: []
+ai_suggestions_pending: []

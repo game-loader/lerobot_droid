@@ -130,6 +130,122 @@ class DiffusionRLAdapter:
     def execution_slice(self) -> slice:
         return slice(self._execution_start, self._execution_end)
 
+    def denoising_step_diagnostics(self) -> tuple[dict[str, float], ...]:
+        """Describe the exact stochastic scale used by every DDIM transition."""
+
+        result: list[dict[str, float]] = []
+        for index, timestep in enumerate(self._timesteps):
+            previous_timestep = (
+                self._timesteps[index + 1] if index + 1 < len(self._timesteps) else None
+            )
+            alpha_t = self.scheduler.alphas_cumprod[timestep].detach().float().cpu()
+            alpha_previous = (
+                self.scheduler.final_alpha_cumprod.detach().float().cpu()
+                if previous_timestep is None
+                else self.scheduler.alphas_cumprod[previous_timestep].detach().float().cpu()
+            )
+            beta_t = (1.0 - alpha_t).clamp_min(torch.finfo(alpha_t.dtype).eps)
+            variance = ((1.0 - alpha_previous) / beta_t) * (
+                1.0 - alpha_t / alpha_previous
+            )
+            raw_sigma = float(
+                (self.trace_config.eta * variance.clamp_min(0).sqrt()).item()
+            )
+            effective_sigma = min(
+                max(raw_sigma, self.trace_config.sigma_min), self.trace_config.sigma_max
+            )
+            probability_sigma = max(
+                effective_sigma, self.trace_config.probability_sigma_min
+            )
+            result.append(
+                {
+                    "step": float(index),
+                    "timestep": float(timestep),
+                    "previous_timestep": float(
+                        -1 if previous_timestep is None else previous_timestep
+                    ),
+                    "sigma_raw": raw_sigma,
+                    "sigma_effective": effective_sigma,
+                    "sigma_inverse_square": 1.0 / (effective_sigma * effective_sigma),
+                    "sigma_sample_raw": raw_sigma,
+                    "sigma_sample_effective": effective_sigma,
+                    "sigma_sample_inverse_square": 1.0
+                    / (effective_sigma * effective_sigma),
+                    "sigma_probability": probability_sigma,
+                    "sigma_probability_inverse_square": 1.0
+                    / (probability_sigma * probability_sigma),
+                    "sigma_probability_floor": self.trace_config.probability_sigma_min,
+                    "sigma_probability_floor_active": float(
+                        probability_sigma > effective_sigma
+                    ),
+                    "sigma_clamped_to_min": float(raw_sigma < self.trace_config.sigma_min),
+                    "sigma_clamped_to_max": float(raw_sigma > self.trace_config.sigma_max),
+                }
+            )
+        return tuple(result)
+
+    def assert_transition_compatible(self, other: DiffusionRLAdapter) -> None:
+        """Fail when old/new adapters cannot replay the same DDIM transition."""
+
+        if not isinstance(other, DiffusionRLAdapter):
+            raise ValueError(
+                "transition contract peer must be a DiffusionRLAdapter, "
+                f"got {type(other).__name__}"
+            )
+        config_fields = (
+            "num_train_timesteps",
+            "beta_start",
+            "beta_end",
+            "beta_schedule",
+            "clip_sample",
+            "set_alpha_to_one",
+            "steps_offset",
+            "prediction_type",
+            "thresholding",
+            "clip_sample_range",
+            "timestep_spacing",
+            "rescale_betas_zero_snr",
+        )
+        scheduler_contract = tuple(
+            getattr(self.scheduler.config, name, None) for name in config_fields
+        )
+        other_scheduler_contract = tuple(
+            getattr(other.scheduler.config, name, None) for name in config_fields
+        )
+        compatible = (
+            self.trace_config == other.trace_config
+            and self.timesteps == other.timesteps
+            and self.policy.config.horizon == other.policy.config.horizon
+            and self.policy.config.n_obs_steps == other.policy.config.n_obs_steps
+            and self.policy.config.n_action_steps == other.policy.config.n_action_steps
+            and self.policy.config.action_feature.shape
+            == other.policy.config.action_feature.shape
+            and self.checkpoint.processor_fingerprint()
+            == other.checkpoint.processor_fingerprint()
+            and (
+                self.execution_slice.start,
+                self.execution_slice.stop,
+                self.execution_slice.step,
+            )
+            == (
+                other.execution_slice.start,
+                other.execution_slice.stop,
+                other.execution_slice.step,
+            )
+            and scheduler_contract == other_scheduler_contract
+            and torch.equal(
+                self.scheduler.alphas_cumprod.detach().cpu(),
+                other.scheduler.alphas_cumprod.detach().cpu(),
+            )
+            and self.denoising_step_diagnostics() == other.denoising_step_diagnostics()
+        )
+        if not compatible:
+            raise ValueError(
+                "old/new diffusion transition contract mismatch: "
+                f"current_trace={self.trace_config} old_trace={other.trace_config} "
+                f"current_timesteps={self.timesteps} old_timesteps={other.timesteps}"
+            )
+
     def make_generator(self, seed: int) -> torch.Generator:
         if isinstance(seed, bool) or not isinstance(seed, int):
             raise ValueError(f"seed must be an integer, got {seed!r}")
@@ -224,6 +340,7 @@ class DiffusionRLAdapter:
                     eta=self.trace_config.eta,
                     sigma_min=self.trace_config.sigma_min,
                     sigma_max=self.trace_config.sigma_max,
+                    probability_sigma_min=self.trace_config.probability_sigma_min,
                     generator=generator,
                     check_finite=False,
                 )
@@ -255,6 +372,17 @@ class DiffusionRLAdapter:
         if trace_timesteps != self._timesteps:
             raise ValueError(
                 f"trace timesteps disagree with adapter schedule: {trace_timesteps} != {self._timesteps}"
+            )
+        if len(self._timesteps) > 1 and not torch.equal(
+            trace.next_latents[:-1], trace.latents[1:]
+        ):
+            raise ValueError(
+                "trace transition chain is inconsistent: next_latents[i] must equal "
+                "latents[i + 1]"
+            )
+        if not torch.equal(trace.final_actions, trace.next_latents[-1]):
+            raise ValueError(
+                "trace final_actions is inconsistent with the final denoising transition"
             )
 
     def iter_recomputed_log_prob(
@@ -288,6 +416,7 @@ class DiffusionRLAdapter:
                 eta=self.trace_config.eta,
                 sigma_min=self.trace_config.sigma_min,
                 sigma_max=self.trace_config.sigma_max,
+                probability_sigma_min=self.trace_config.probability_sigma_min,
                 previous_sample=stored_previous,
                 check_finite=False,
             )
@@ -302,6 +431,32 @@ class DiffusionRLAdapter:
         if not torch.isfinite(result).all().item():
             raise ValueError("replayed log probability contains non-finite values")
         return result
+
+    @torch.no_grad()
+    def verify_trace_replay(
+        self,
+        observation: ObservationBatch,
+        trace: DenoisingTrace,
+        *,
+        atol: float = 1e-5,
+        rtol: float = 1e-5,
+    ) -> dict[str, float]:
+        """Check that the stored old-policy transition replays exactly."""
+
+        replayed = self.recompute_log_prob(observation, trace)
+        stored = trace.old_log_prob.to(device=replayed.device, dtype=replayed.dtype)
+        delta = (replayed - stored).abs()
+        max_delta = float(delta.max().item())
+        mean_delta = float(delta.mean().item())
+        if not torch.allclose(replayed, stored, atol=atol, rtol=rtol):
+            raise ValueError(
+                "old-policy transition replay mismatch: "
+                f"max_abs_delta={max_delta:.6g} mean_abs_delta={mean_delta:.6g}"
+            )
+        return {
+            "old_replay_abs_delta_max": max_delta,
+            "old_replay_abs_delta_mean": mean_delta,
+        }
 
     def executable_log_prob(self, log_prob: Tensor) -> Tensor:
         if not isinstance(log_prob, Tensor) or log_prob.ndim != 4:

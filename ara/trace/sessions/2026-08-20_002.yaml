@@ -1,0 +1,51 @@
+session:
+  id: "2026-08-20_002"
+  date: "2026-08-20"
+  started: "2026-08-20T11:54:33+08:00"
+  last_turn: "2026-08-20T12:06:00+08:00"
+  turn_count: 1
+  summary: Stopped the stalled AM-Q offline run and evaluated the completed round-one 50000-step IL checkpoint in 100 headless CUDA Newton episodes.
+
+events_logged:
+  - turn: 1
+    type: decision
+    id: N50
+    routing: direct
+    provenance: user
+    summary: Stop the current offline RL training and evaluate the completed IL checkpoint instead.
+    evidence:
+      - outputs/rl100/iterative-moya-il2-20260819-204553/round_001/il/attempt_001/train/checkpoints/050000/pretrained_model
+  - turn: 1
+    type: experiment
+    id: N51
+    routing: direct
+    provenance: ai-executed
+    summary: The completed round-one 50000-step IL checkpoint achieved 51 successes and 49 failures over 100 headless CUDA Newton episodes, for 51.0% success.
+    evidence:
+      - ara/evidence/tables/iterative-il2-il-checkpoint-eval.md
+      - outputs/rl100/eval-il-round001-050000-20260820-115500/collection_summary.json
+  - turn: 1
+    type: experiment
+    id: N52
+    routing: direct
+    provenance: ai-executed
+    summary: All offline training and collection processes were absent after the requested stop and evaluation.
+    evidence:
+      - outputs/rl100/eval-il-round001-050000-20260820-115500/collection_summary.json
+
+ai_actions:
+  - turn: 1
+    action: Sent SIGTERM to the outer iterative runner and its offline training children, then verified no matching process remained.
+    provenance: ai-executed
+    files_changed: []
+  - turn: 1
+    action: Ran a 100-episode, 16-environment, 10-step headless CUDA Newton rollout from the round-one IL checkpoint and published its LeRobot v3 collection artifacts.
+    provenance: ai-executed
+    files_changed:
+      - ara/evidence/tables/iterative-il2-il-checkpoint-eval.md
+
+claims_touched: []
+logic_revisions: []
+key_context:
+  - turn: 1
+    excerpt: The 51.0% IL baseline is now the comparison point for any separately saved offline-RL candidate checkpoint; AM-Q training was stopped before a second behavior-policy promotion.

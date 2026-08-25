@@ -58,19 +58,24 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--sim-device", default="cuda:0")
     parser.add_argument("--num-envs", type=int, default=16)
-    parser.add_argument("--rollout-decisions", type=int, default=4)
+    # Moya uses 32-physics-step action chunks and a 930-step horizon. A
+    # complete sparse-reward episode therefore needs 30 decision rows by
+    # default; smoke mode intentionally overrides this to one.
+    parser.add_argument("--rollout-decisions", type=int, default=30)
     parser.add_argument("--ppo-epochs", type=int, default=1)
     parser.add_argument("--updates", type=int, default=1)
     parser.add_argument("--inference-steps", type=int, default=10)
     parser.add_argument("--minibatch-size", type=int)
     parser.add_argument("--gamma", type=float, default=0.99)
     parser.add_argument("--gae-lambda", type=float, default=0.95)
-    parser.add_argument("--actor-lr", type=float, default=1e-5)
+    parser.add_argument("--actor-lr", type=float, default=1e-6)
     parser.add_argument("--value-lr", type=float, default=3e-4)
+    parser.add_argument("--probability-sigma-min", type=float, default=0.1)
     parser.add_argument("--episode-length", type=int, default=930)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--swanlab-project")
     parser.add_argument("--swanlab-run-name")
+    parser.add_argument("--debug", action="store_true")
     parser.add_argument("--smoke", action="store_true")
     return parser
 
@@ -236,8 +241,13 @@ def run(args: argparse.Namespace) -> Path:
         if getattr(args, name) <= 0:
             raise ValueError(f"{name} must be positive")
     for name in ("actor_lr", "value_lr"):
-        if getattr(args, name) <= 0:
-            raise ValueError(f"{name} must be positive")
+        if not math.isfinite(getattr(args, name)) or getattr(args, name) <= 0:
+            raise ValueError(f"{name} must be positive and finite")
+    if (
+        not math.isfinite(args.probability_sigma_min)
+        or args.probability_sigma_min <= 0
+    ):
+        raise ValueError("probability_sigma_min must be positive and finite")
     torch.manual_seed(args.seed)
 
     checkpoint = args.checkpoint.resolve(strict=True)
@@ -245,7 +255,10 @@ def run(args: argparse.Namespace) -> Path:
         checkpoint, device=args.device
     )
     old_checkpoint = CheckpointAdapter.load(current_checkpoint.source_path, device=args.device)
-    trace_config = TraceConfig(num_inference_steps=args.inference_steps)
+    trace_config = TraceConfig(
+        num_inference_steps=args.inference_steps,
+        probability_sigma_min=args.probability_sigma_min,
+    )
     current = DiffusionRLAdapter(current_checkpoint, trace_config)
     old = DiffusionRLAdapter(old_checkpoint, trace_config)
     policy_config = current.policy.config
@@ -291,6 +304,7 @@ def run(args: argparse.Namespace) -> Path:
             minibatch_size=args.minibatch_size,
             seed=args.seed,
             logger=logger,
+            debug=args.debug,
         )
         for group in trainer.value_optimizer.param_groups:
             group["lr"] = args.value_lr

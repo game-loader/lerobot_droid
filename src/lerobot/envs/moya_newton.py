@@ -334,6 +334,20 @@ class MoyaNewtonVectorEnv(gym.vector.VectorWrapper):
     def _update_history(self, info: dict[str, Any]) -> None:
         self._true_grasp_ever |= self._component_array(info, "true_grasp", self.num_envs) > 0.0
         self._clear_table_ever |= self._component_array(info, "clear_table", self.num_envs) > 0.0
+        # The fused backend also exposes its persistent acceptance history.
+        # Consume it when present so custom reward functions that do not emit
+        # first-occurrence components still obey the same terminal contract.
+        for name, target in (
+            ("true_grasp_ever", self._true_grasp_ever),
+            ("clear_table_ever", self._clear_table_ever),
+        ):
+            value = info.get(name)
+            if value is None:
+                continue
+            array = np.asarray(value, dtype=np.bool_)
+            if array.shape != (self.num_envs,):
+                raise RuntimeError(f"Moya {name} must have shape {(self.num_envs,)}, got {array.shape}")
+            target |= array
 
     def _update_terminal_history(
         self,
@@ -348,6 +362,8 @@ class MoyaNewtonVectorEnv(gym.vector.VectorWrapper):
             if isinstance(components, dict):
                 self._true_grasp_ever[index] |= float(components.get("true_grasp", 0.0)) > 0.0
                 self._clear_table_ever[index] |= float(components.get("clear_table", 0.0)) > 0.0
+            self._true_grasp_ever[index] |= bool(item.get("true_grasp_ever", False))
+            self._clear_table_ever[index] |= bool(item.get("clear_table_ever", False))
 
     def _terminal_success(self, final_info: dict[str, Any], index: int) -> bool:
         required_keys = (
@@ -444,7 +460,10 @@ class MoyaNewtonVectorEnv(gym.vector.VectorWrapper):
         done = np.logical_or(terminated, truncated).astype(np.bool_, copy=False)
         terminal_success: np.ndarray = np.zeros(self.num_envs, dtype=np.bool_)
         native_success = np.asarray(
-            info.get("success", np.zeros(self.num_envs, dtype=np.bool_)),
+            info.get(
+                "native_success",
+                info.get("success", np.zeros(self.num_envs, dtype=np.bool_)),
+            ),
             dtype=np.bool_,
         ).reshape(self.num_envs)
 
@@ -462,7 +481,9 @@ class MoyaNewtonVectorEnv(gym.vector.VectorWrapper):
                 item["is_success"] = bool(terminal_success[index])
                 item["true_grasp_ever"] = bool(self._true_grasp_ever[index])
                 item["clear_table_ever"] = bool(self._clear_table_ever[index])
-                item["native_success"] = bool(item.get("success", item.get("charger_success", False)))
+                item["native_success"] = bool(
+                    item.get("native_success", item.get("success", item.get("charger_success", False)))
+                )
             info["final_info"] = self._collate_final_info(raw_final_info, self.num_envs)
             info["_final_info"] = final_mask
 
