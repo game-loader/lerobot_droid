@@ -1,0 +1,238 @@
+#!/usr/bin/env python
+
+# Copyright 2026 The HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""LeRobot-native DP3-style point-cloud Diffusion Policy.
+
+The point encoder follows the RL-100/DP3 structure: shared per-point MLP,
+global max pooling, a projection layer, and concatenation with encoded robot
+state. The action denoiser and checkpoint contract reuse LeRobot Diffusion.
+"""
+
+from collections import deque
+
+import torch
+from torch import Tensor, nn
+
+from lerobot.policies.diffusion.modeling_diffusion import (
+    DiffusionConditionalUnet1d,
+    DiffusionModel,
+    DiffusionPolicy,
+    _make_noise_scheduler,
+)
+from lerobot.policies.pretrained import PreTrainedPolicy
+from lerobot.policies.utils import populate_queues
+from lerobot.utils.constants import ACTION, OBS_STATE
+from lerobot.utils.import_utils import require_package
+
+from .configuration_dp3 import DP3Config
+
+
+class PointNetEncoder(nn.Module):
+    """Encode an unordered XYZ or XYZRGB point set with global max pooling."""
+
+    def __init__(self, config: DP3Config):
+        super().__init__()
+        point_cloud = config.point_cloud_feature
+        if point_cloud is None:
+            raise ValueError("DP3 point-cloud features must be validated before model construction.")
+
+        layers: list[nn.Module] = []
+        in_dim = point_cloud.shape[1]
+        for out_dim in config.point_cloud_encoder_hidden_dims:
+            layers.append(nn.Linear(in_dim, out_dim))
+            if config.point_cloud_use_layer_norm:
+                layers.append(nn.LayerNorm(out_dim))
+            layers.append(nn.ReLU())
+            in_dim = out_dim
+
+        self.point_mlp = nn.Sequential(*layers)
+        projection: list[nn.Module] = [nn.Linear(in_dim, config.point_cloud_encoder_output_dim)]
+        if config.point_cloud_use_layer_norm:
+            projection.append(nn.LayerNorm(config.point_cloud_encoder_output_dim))
+        self.projection = nn.Sequential(*projection)
+        self.num_points = config.point_cloud_num_points
+        self.random_subsample = config.point_cloud_random_subsample
+
+    def _subsample(self, points: Tensor) -> Tensor:
+        if self.num_points is None or points.shape[-2] == self.num_points:
+            return points
+        if points.shape[-2] < self.num_points:
+            raise ValueError(
+                f"DP3 received {points.shape[-2]} points, fewer than configured {self.num_points}."
+            )
+
+        if self.training and self.random_subsample:
+            indices = torch.randperm(points.shape[-2], device=points.device)[: self.num_points]
+        else:
+            indices = (
+                torch.linspace(
+                    0,
+                    points.shape[-2] - 1,
+                    steps=self.num_points,
+                    device=points.device,
+                )
+                .round()
+                .long()
+            )
+        return points.index_select(-2, indices)
+
+    def forward(self, points: Tensor) -> Tensor:
+        if points.ndim != 3:
+            raise ValueError(f"DP3 PointNet expects (batch, points, channels), got {tuple(points.shape)}.")
+        points = self._subsample(points)
+        points = torch.nan_to_num(points, nan=0.0, posinf=0.0, neginf=0.0)
+        point_features = self.point_mlp(points)
+        pooled_features = point_features.amax(dim=1)
+        return self.projection(pooled_features)
+
+
+class StateEncoder(nn.Module):
+    """Encode proprioception before fusing it with the point-cloud feature."""
+
+    def __init__(self, state_dim: int, hidden_dims: tuple[int, ...]):
+        super().__init__()
+        layers: list[nn.Module] = []
+        in_dim = state_dim
+        for index, out_dim in enumerate(hidden_dims):
+            layers.append(nn.Linear(in_dim, out_dim))
+            if index != len(hidden_dims) - 1:
+                layers.append(nn.ReLU())
+            in_dim = out_dim
+        self.mlp = nn.Sequential(*layers)
+
+    def forward(self, state: Tensor) -> Tensor:
+        return self.mlp(state)
+
+
+class DP3ObservationEncoder(nn.Module):
+    """Fuse PointNet and robot-state features into one diffusion condition."""
+
+    def __init__(self, config: DP3Config):
+        super().__init__()
+        state_feature = config.robot_state_feature
+        if state_feature is None:
+            raise ValueError("DP3 state features must be validated before model construction.")
+
+        self.point_net = PointNetEncoder(config)
+        self.state_encoder = StateEncoder(state_feature.shape[0], config.state_encoder_hidden_dims)
+        self.output_dim = config.point_cloud_encoder_output_dim + config.state_encoder_hidden_dims[-1]
+
+    def forward(self, state: Tensor, point_cloud: Tensor) -> Tensor:
+        if state.ndim != 2:
+            raise ValueError(f"DP3 state encoder expects (batch, state_dim), got {tuple(state.shape)}.")
+        if state.shape[0] != point_cloud.shape[0]:
+            raise ValueError("DP3 state and point-cloud batch dimensions must match.")
+        return torch.cat([self.point_net(point_cloud), self.state_encoder(state)], dim=-1)
+
+
+class DP3DiffusionModel(DiffusionModel):
+    """LeRobot Diffusion denoiser with DP3 observation conditioning."""
+
+    def __init__(self, config: DP3Config):
+        nn.Module.__init__(self)
+        self.config = config
+        self.observation_encoder = DP3ObservationEncoder(config)
+        global_cond_dim = self.observation_encoder.output_dim * config.n_obs_steps
+        self.unet = DiffusionConditionalUnet1d(config, global_cond_dim=global_cond_dim)
+
+        if config.compile_model:
+            self.unet = torch.compile(self.unet, mode=config.compile_mode)
+
+        self.noise_scheduler = _make_noise_scheduler(
+            config.noise_scheduler_type,
+            num_train_timesteps=config.num_train_timesteps,
+            beta_start=config.beta_start,
+            beta_end=config.beta_end,
+            beta_schedule=config.beta_schedule,
+            clip_sample=config.clip_sample,
+            clip_sample_range=config.clip_sample_range,
+            prediction_type=config.prediction_type,
+        )
+        self.num_inference_steps = (
+            self.noise_scheduler.config.num_train_timesteps
+            if config.num_inference_steps is None
+            else config.num_inference_steps
+        )
+
+    def _prepare_global_conditioning(self, batch: dict[str, Tensor]) -> Tensor:
+        point_cloud_key = self.config.point_cloud_key
+        if point_cloud_key not in batch:
+            raise ValueError(f"DP3 batch is missing required feature '{point_cloud_key}'.")
+
+        state = batch[OBS_STATE]
+        point_cloud = batch[point_cloud_key]
+        if state.ndim != 3:
+            raise ValueError(
+                f"DP3 expects batched observation history for '{OBS_STATE}', got {tuple(state.shape)}."
+            )
+        if point_cloud.ndim != 4:
+            raise ValueError(
+                "DP3 expects point-cloud history in (batch, obs_steps, points, channels) layout. "
+                f"Got {tuple(point_cloud.shape)}."
+            )
+        if state.shape[:2] != point_cloud.shape[:2]:
+            raise ValueError("DP3 state and point-cloud history dimensions must match.")
+
+        batch_size, n_obs_steps = state.shape[:2]
+        encoded = self.observation_encoder(
+            state.reshape(batch_size * n_obs_steps, state.shape[-1]),
+            point_cloud.reshape(batch_size * n_obs_steps, *point_cloud.shape[-2:]),
+        )
+        return encoded.reshape(batch_size, n_obs_steps, -1).flatten(start_dim=1)
+
+
+class DP3Policy(DiffusionPolicy):
+    """DP3-style point-cloud policy using LeRobot's Diffusion action denoiser."""
+
+    config_class = DP3Config
+    name = "dp3"
+
+    def __init__(self, config: DP3Config, **kwargs):
+        require_package("diffusers", extra="dp3")
+        PreTrainedPolicy.__init__(self, config)
+        config.validate_features()
+        self.config = config
+        self._queues = None
+        self.diffusion = DP3DiffusionModel(config)
+        self.reset()
+
+    def reset(self):
+        self._queues = {
+            OBS_STATE: deque(maxlen=self.config.n_obs_steps),
+            self.config.point_cloud_key: deque(maxlen=self.config.n_obs_steps),
+            ACTION: deque(maxlen=self.config.n_action_steps),
+        }
+
+    @torch.no_grad()
+    def select_action(self, batch: dict[str, Tensor], noise: Tensor | None = None) -> Tensor:
+        """Select one action while ignoring modalities not used by the 3D policy."""
+
+        required = (OBS_STATE, self.config.point_cloud_key)
+        missing = [key for key in required if key not in batch]
+        if missing:
+            raise ValueError(f"DP3 inference batch is missing required feature(s): {missing}.")
+        conditioning_batch = {key: batch[key] for key in required}
+        self._queues = populate_queues(self._queues, conditioning_batch)
+
+        if len(self._queues[ACTION]) == 0:
+            actions = self.predict_action_chunk(conditioning_batch, noise=noise)
+            self._queues[ACTION].extend(actions.transpose(0, 1))
+        return self._queues[ACTION].popleft()
+
+    def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, None]:
+        """Compute Diffusion loss from state, point cloud, and action trajectories."""
+
+        return self.diffusion.compute_loss(batch), None

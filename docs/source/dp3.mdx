@@ -1,0 +1,98 @@
+# DP3 Point-Cloud Diffusion Policy
+
+This repository provides a LeRobot-native `dp3` policy for training an action
+Diffusion Policy from robot proprioception and a fixed-size 3D point cloud. It
+adapts the point-conditioning path used by RL-100: a shared point MLP, global
+max pooling, projection, and concatenation with an encoded robot state. The
+action denoiser, processors, checkpoint layout, and CLI remain standard
+LeRobot components.
+
+## Dataset Contract
+
+A LeRobot v3 dataset used for DP3 training must contain these numeric features:
+
+| Key                       | dtype     | shape             | Meaning                             |
+| ------------------------- | --------- | ----------------- | ----------------------------------- |
+| `observation.state`       | `float32` | `(state_dim,)`    | Robot proprioception                |
+| `observation.point_cloud` | `float32` | `(num_points, 3)` | XYZ points in a stable metric frame |
+| `action`                  | `float32` | `(action_dim,)`   | Command executed by the robot       |
+
+The default is 512 XYZ points. Set `--policy.use_pc_color=true` and store
+`(num_points, 6)` XYZRGB points to include color, with RGB scaled to `[0, 1]`.
+RGB video features may remain in the same dataset; `dp3` ignores them.
+
+Raw depth is not interchangeable with a point cloud. Before training:
+
+1. Deproject depth with the matching camera intrinsics and depth scale.
+2. Transform points into one stable frame, preferably the robot base frame.
+3. Remove invalid depth and crop to the task workspace.
+4. Sample or pad every frame to the configured fixed point count.
+5. Store the result as `observation.point_cloud` in the v3 parquet data.
+
+Keep camera intrinsics, the depth scale, frame names, and camera-to-base
+extrinsics with the recorded data. Without them, depth cannot be reconstructed
+into geometrically consistent training input.
+
+For the real Franka Duo recorder in this repository, use
+`examples/franka_duo_real_recorder/build_pointcloud_dataset.py`. It reads the
+timestamp-matched ZED Mini depth sidecars, requires a stable camera-to-training
+frame transform by default, writes provenance, removes unused RGB videos by
+default, and recomputes numeric dataset statistics.
+
+`depth_to_point_cloud` provides the dependency-free conversion primitive used
+for offline preprocessing:
+
+```python
+from lerobot.policies.dp3 import depth_to_point_cloud
+
+points = depth_to_point_cloud(
+    depth_meters,
+    camera_info["k"],
+    extrinsics=camera_optical_to_robot_base,
+    workspace_min=(-0.8, -0.8, 0.0),
+    workspace_max=(0.8, 0.8, 1.5),
+    num_points=512,
+    seed=frame_index,
+)
+```
+
+## Training
+
+Install the standard training stack and DP3 dependency group:
+
+```bash
+uv sync --locked --extra training --extra dp3
+```
+
+Then train from a local LeRobot v3 dataset:
+
+```bash
+uv run lerobot-train \
+  --policy.type=dp3 \
+  --policy.device=cuda \
+  --policy.point_cloud_num_points=512 \
+  --dataset.repo_id=local/franka_duo_task \
+  --dataset.root=/path/to/franka_duo_task
+```
+
+The dataset feature shapes are inferred automatically. For a different point
+count, change both the dataset feature shape and
+`policy.point_cloud_num_points`.
+
+For point-cloud-only training throughput, create a derived v3 dataset without
+video columns. The current LeRobot reader decodes video modalities present in
+the dataset even though `dp3` does not consume them.
+
+## Compatibility
+
+This policy does not load RL-100 `RL1003D` checkpoints directly. RL-100 uses
+its own Hydra configuration, normalizer, schedulers, and RL training stack.
+The implementation here preserves the point encoder design while using native
+LeRobot configs and checkpoints. It requires only the existing `diffusers`
+extra; PyTorch3D and Open3D are not required.
+
+## References
+
+- [RL-100](https://github.com/lei-kun/RL-100), Apache-2.0
+- [DP3: 3D Diffusion Policy](https://arxiv.org/abs/2403.03954)
+- [Diffusion Policy](https://arxiv.org/abs/2303.04137)

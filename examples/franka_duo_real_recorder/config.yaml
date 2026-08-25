@@ -1,0 +1,80 @@
+# Real Franka Duo recorder defaults.  The topic names intentionally mirror the
+# benchmark contract; replace them here when the real controller uses native
+# names, or publish a ROS relay into these semantic topics.
+fps: 30
+dataset_name: franka_duo_real
+robot_type: franka_duo_real
+task: "Real Franka Duo demonstration"
+output_root: datasets/franka_duo
+
+topics:
+  joint_states: /isaac/joint_states_full
+  applied_commands: /isaac/applied_joint_commands
+
+cameras:
+  # ZED Mini: RGB and depth are recorded.  Depth is matched to RGB by ROS
+  # header timestamp and written asynchronously to franka_duo_extras/.
+  head:
+    image: /isaac/head_camera/image_raw
+    depth: /isaac/head_camera/depth
+    camera_info: /isaac/head_camera/camera_info
+    width: 1280
+    height: 720
+    fps: 30
+    record_depth: true
+  # Intel RealSense D405 wrist cameras: RGB only for this dataset.
+  # 480x270@30 is an official USB3 profile and reduces dual-camera bandwidth.
+  wrist_left:
+    image: /isaac/left_wrist_camera/image_raw
+    camera_info: /isaac/left_wrist_camera/camera_info
+    width: 480
+    height: 270
+    fps: 30
+    record_depth: false
+  wrist_right:
+    image: /isaac/right_wrist_camera/image_raw
+    camera_info: /isaac/right_wrist_camera/camera_info
+    width: 480
+    height: 270
+    fps: 30
+    record_depth: false
+
+# Less than half of a 30 FPS frame period, so an adjacent ZED depth frame is
+# never silently accepted as the matching RGB frame.
+depth_match_tolerance_ms: 16.0
+# Each accepted sample is anchored to a new head RGB header stamp. Wrist RGB,
+# measured state and applied action must be within these bounded skews.
+rgb_match_tolerance_ms: 45.0
+control_match_tolerance_ms: 50.0
+sync_wait_timeout_ms: 75.0
+max_message_age_ms: 150.0
+# One second of 30 FPS history is ample for the 75 ms synchronizer window and
+# bounds retained raw ROS image/depth memory to roughly 220 MB.
+sync_history_size: 30
+depth_queue_size: 64
+# Match and write one independent ZED depth frame for every accepted head RGB.
+# Set to 2 only when the robot's storage cannot sustain the ~55 MB/s float16
+# sequential sidecar stream at 1280x720x30.
+depth_every: 1
+# Default competition gate: a single missing requested ZED depth frame rejects
+# the whole episode. Set false only when sparse depth is explicitly acceptable.
+reject_episode_on_missing_depth: true
+max_episode_time_s: 180.0
+max_episodes: 100
+
+# Streaming encoding keeps PNG staging out of the capture path.  "auto"
+# selects h264_nvenc when available and falls back to software encoding.
+streaming_encoding: true
+rgb_vcodec: auto
+encoder_queue_maxsize: 90
+encoder_threads: 2
+image_writer_threads: 2
+image_writer_processes: 0
+# REQUIRED: replace both nulls with measured endpoints in the JointState topic
+# unit. Standard Franka finger joints are commonly near 0.0 m closed and 0.04 m
+# open; verify both robots. The Isaac Sim value 0.8 is not a real calibration.
+gripper_closed_rad: null
+gripper_open_rad: null
+# Optional row-major 4x4 homogeneous transform from head optical frame to the
+# robot base frame. Leave null to keep point clouds in the camera frame.
+head_to_robot_base_transform: null

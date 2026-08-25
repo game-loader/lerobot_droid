@@ -49,6 +49,8 @@
 - sections:
   - local: act
     title: ACT
+  - local: dp3
+    title: DP3 Point-Cloud Diffusion
   - local: smolvla
     title: SmolVLA
   - local: pi0

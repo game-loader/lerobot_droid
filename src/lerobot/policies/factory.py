@@ -46,6 +46,7 @@ from lerobot.utils.feature_utils import dataset_to_policy_features
 
 from .act.configuration_act import ACTConfig
 from .diffusion.configuration_diffusion import DiffusionConfig
+from .dp3.configuration_dp3 import DP3Config
 from .eo1.configuration_eo1 import EO1Config
 from .gaussian_actor.configuration_gaussian_actor import GaussianActorConfig
 from .groot.configuration_groot import GrootConfig
@@ -103,6 +104,10 @@ def get_policy_class(name: str) -> type[PreTrainedPolicy]:
         from .diffusion.modeling_diffusion import DiffusionPolicy
 
         return DiffusionPolicy
+    elif name == "dp3":
+        from .dp3.modeling_dp3 import DP3Policy
+
+        return DP3Policy
     elif name == "act":
         from .act.modeling_act import ACTPolicy
 
@@ -181,6 +186,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return TDMPCConfig(**kwargs)
     elif policy_type == "diffusion":
         return DiffusionConfig(**kwargs)
+    elif policy_type == "dp3":
+        return DP3Config(**kwargs)
     elif policy_type == "act":
         return ACTConfig(**kwargs)
     elif policy_type == "multi_task_dit":
@@ -311,6 +318,14 @@ def make_pre_post_processors(
         from .tdmpc.processor_tdmpc import make_tdmpc_pre_post_processors
 
         processors = make_tdmpc_pre_post_processors(
+            config=policy_cfg,
+            dataset_stats=kwargs.get("dataset_stats"),
+        )
+
+    elif isinstance(policy_cfg, DP3Config):
+        from .dp3.processor_dp3 import make_dp3_pre_post_processors
+
+        processors = make_dp3_pre_post_processors(
             config=policy_cfg,
             dataset_stats=kwargs.get("dataset_stats"),
         )

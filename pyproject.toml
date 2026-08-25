@@ -183,6 +183,7 @@ phone = ["hebi-py>=2.8.0,<2.12.0", "teleop>=0.1.0,<0.2.0", "fastapi<1.0", "lerob
 
 # Policies
 diffusion = ["lerobot[diffusers-dep]"]
+dp3 = ["lerobot[diffusion]"]
 wallx = [
     "lerobot[transformers-dep]",
     "lerobot[peft-dep]",
@@ -267,6 +268,7 @@ all = [
     "lerobot[kinematics]",
     "lerobot[intelrealsense]",
     "lerobot[diffusion]",
+    "lerobot[dp3]",
     "lerobot[multi_task_dit]",
     "lerobot[wallx]",
     "lerobot[pi]",
