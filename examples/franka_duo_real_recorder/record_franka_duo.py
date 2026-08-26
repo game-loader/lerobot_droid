@@ -35,21 +35,48 @@ from typing import Any
 
 import numpy as np
 
+try:  # Support both package imports and direct ROS-host script execution.
+    from .tmr_topics import TMR_TOPIC_KEYS, TmrSplitJointAssembler
+except ImportError:  # pragma: no cover - exercised by run_recorder.sh
+    from tmr_topics import TMR_TOPIC_KEYS, TmrSplitJointAssembler
+
 LOGGER = logging.getLogger("franka_duo_recorder")
 
 FPS = 30
 ACTION_DIM = 17
 STATE_DIM = 17
-ACTION_NAMES = tuple(
-    [f"left_fr3v2_joint{i}.target" for i in range(1, 8)]
-    + [f"right_fr3v2_joint{i}.target" for i in range(1, 8)]
-    + ["left_gripper.open_fraction.target", "right_gripper.open_fraction.target", "spine.height.target"]
-)
-STATE_NAMES = tuple(
-    [f"left_fr3v2_joint{i}.pos" for i in range(1, 8)]
-    + [f"right_fr3v2_joint{i}.pos" for i in range(1, 8)]
-    + ["left_gripper.open_fraction", "right_gripper.open_fraction", "spine.height"]
-)
+
+
+def action_names(*, include_spine: bool = True) -> tuple[str, ...]:
+    names = [f"left_fr3v2_joint{i}.target" for i in range(1, 8)] + [
+        f"right_fr3v2_joint{i}.target" for i in range(1, 8)
+    ]
+    names += ["left_gripper.open_fraction.target", "right_gripper.open_fraction.target"]
+    if include_spine:
+        names.append("spine.height.target")
+    return tuple(names)
+
+
+def state_names(*, include_spine: bool = True) -> tuple[str, ...]:
+    names = [f"left_fr3v2_joint{i}.pos" for i in range(1, 8)] + [
+        f"right_fr3v2_joint{i}.pos" for i in range(1, 8)
+    ]
+    names += ["left_gripper.open_fraction", "right_gripper.open_fraction"]
+    if include_spine:
+        names.append("spine.height")
+    return tuple(names)
+
+
+def action_dim(*, include_spine: bool = True) -> int:
+    return len(action_names(include_spine=include_spine))
+
+
+def state_dim(*, include_spine: bool = True) -> int:
+    return len(state_names(include_spine=include_spine))
+
+
+ACTION_NAMES = action_names()
+STATE_NAMES = state_names()
 
 DEFAULT_TOPICS = {
     "joint_states": "/isaac/joint_states_full",
@@ -141,6 +168,13 @@ class RecorderConfig:
     gripper_closed_rad: float | None = None
     gripper_open_rad: float | None = None
     head_to_robot_base_transform: tuple[float, ...] | None = None
+    input_mode: str = "semantic"
+    include_spine: bool = True
+    tmr_split_sync_tolerance_ms: float = 20.0
+    tmr_split_max_age_ms: float = 200.0
+    tmr_gripper_actual_joint_names: dict[str, str | None] = dataclasses.field(
+        default_factory=lambda: {"left": None, "right": None}
+    )
 
 
 def _default_camera_specs() -> dict[str, CameraSpec]:
@@ -188,6 +222,8 @@ def load_config(path: Path | None) -> RecorderConfig:
         "control_match_tolerance_ms",
         "sync_wait_timeout_ms",
         "max_message_age_ms",
+        "tmr_split_sync_tolerance_ms",
+        "tmr_split_max_age_ms",
     ):
         if key in raw:
             setattr(config, key, raw[key])
@@ -195,6 +231,17 @@ def load_config(path: Path | None) -> RecorderConfig:
         config.output_root = Path(str(raw["output_root"]))
     if "topics" in raw:
         config.topics.update({str(k): str(v) for k, v in dict(raw["topics"]).items()})
+    if "input_mode" in raw:
+        config.input_mode = str(raw["input_mode"])
+    if "include_spine" in raw:
+        config.include_spine = bool(raw["include_spine"])
+    if "tmr_gripper_actual_joint_names" in raw:
+        names = raw["tmr_gripper_actual_joint_names"]
+        if not isinstance(names, Mapping):
+            raise ValueError("tmr_gripper_actual_joint_names must be a mapping")
+        config.tmr_gripper_actual_joint_names = {
+            side: None if names.get(side) is None else str(names[side]) for side in ("left", "right")
+        }
     camera_values = dict(raw.get("cameras", {}))
     specs: dict[str, CameraSpec] = {}
     for key, default in config.cameras.items():
@@ -244,6 +291,16 @@ def validate_config(config: RecorderConfig) -> None:
         raise ValueError("fps must be positive")
     if config.depth_every <= 0:
         raise ValueError("depth_every must be positive")
+    if config.input_mode not in {"semantic", "tmr_split"}:
+        raise ValueError("input_mode must be 'semantic' or 'tmr_split'")
+    if config.input_mode == "tmr_split":
+        missing = [key for key in TMR_TOPIC_KEYS if not config.topics.get(key)]
+        if missing:
+            raise ValueError(f"TMR split input is missing topic(s): {missing}")
+        if config.include_spine:
+            raise ValueError(
+                "TMR runtime has no periodic spine state/target topic; set include_spine=false or add a verified bridge"
+            )
     for key in ("depth_queue_size", "encoder_queue_maxsize", "sync_history_size"):
         if int(getattr(config, key)) <= 0:
             raise ValueError(f"{key} must be positive")
@@ -262,6 +319,8 @@ def validate_config(config: RecorderConfig) -> None:
         "control_match_tolerance_ms",
         "sync_wait_timeout_ms",
         "max_message_age_ms",
+        "tmr_split_sync_tolerance_ms",
+        "tmr_split_max_age_ms",
     ):
         if float(getattr(config, key)) <= 0:
             raise ValueError(f"{key} must be positive")
@@ -383,8 +442,9 @@ def build_action(
     closed_rad: float = GRIPPER_CLOSED_RAD,
     open_rad: float = 0.0,
     allow_measured_fallback: bool = False,
+    include_spine: bool = True,
 ) -> np.ndarray:
-    """Build the 17D action without base or world-frame fields."""
+    """Build the arm/gripper action, with an optional spine target."""
 
     source = command if command else measured if allow_measured_fallback else {}
     left = _arm_joints(source, "left")
@@ -399,21 +459,14 @@ def build_action(
             right_gripper = _resolve(measured, _gripper_names("right"))
         if not math.isfinite(spine):
             spine = _resolve(measured, (SPINE_JOINT,))
-    values = np.concatenate(
-        (
-            left,
-            right,
-            np.asarray(
-                (
-                    gripper_open_fraction(left_gripper, closed_rad, open_rad),
-                    gripper_open_fraction(right_gripper, closed_rad, open_rad),
-                    spine,
-                ),
-                dtype=np.float32,
-            ),
-        )
-    ).astype(np.float32)
-    if values.shape != (ACTION_DIM,) or not np.isfinite(values).all():
+    tail = [
+        gripper_open_fraction(left_gripper, closed_rad, open_rad),
+        gripper_open_fraction(right_gripper, closed_rad, open_rad),
+    ]
+    if include_spine:
+        tail.append(spine)
+    values = np.concatenate((left, right, np.asarray(tail, dtype=np.float32))).astype(np.float32)
+    if values.shape != (action_dim(include_spine=include_spine),) or not np.isfinite(values).all():
         raise ValueError("Action topic is missing a finite target for every required channel")
     return values
 
@@ -423,29 +476,23 @@ def build_state(
     *,
     closed_rad: float = GRIPPER_CLOSED_RAD,
     open_rad: float = 0.0,
+    include_spine: bool = True,
 ) -> np.ndarray:
-    """Build the 17D measured state; EE poses are intentionally not included."""
+    """Build measured arm/gripper state, with an optional spine position."""
 
     left = _arm_joints(measured, "left")
     right = _arm_joints(measured, "right")
     left_gripper = _resolve(measured, _gripper_names("left"))
     right_gripper = _resolve(measured, _gripper_names("right"))
     spine = _resolve(measured, (SPINE_JOINT,))
-    values = np.concatenate(
-        (
-            left,
-            right,
-            np.asarray(
-                (
-                    gripper_open_fraction(left_gripper, closed_rad, open_rad),
-                    gripper_open_fraction(right_gripper, closed_rad, open_rad),
-                    spine,
-                ),
-                dtype=np.float32,
-            ),
-        )
-    ).astype(np.float32)
-    if values.shape != (STATE_DIM,) or not np.isfinite(values).all():
+    tail = [
+        gripper_open_fraction(left_gripper, closed_rad, open_rad),
+        gripper_open_fraction(right_gripper, closed_rad, open_rad),
+    ]
+    if include_spine:
+        tail.append(spine)
+    values = np.concatenate((left, right, np.asarray(tail, dtype=np.float32))).astype(np.float32)
+    if values.shape != (state_dim(include_spine=include_spine),) or not np.isfinite(values).all():
         raise ValueError("Joint state topic is missing a finite value for every required channel")
     return values
 
@@ -1018,11 +1065,17 @@ def existing_dataset_versions(output_root: Path, dataset_name: str) -> list[tupl
 
 
 def build_features(
-    cameras: Mapping[str, CameraSpec], *, include_transition_fields: bool = False
+    cameras: Mapping[str, CameraSpec], *, include_transition_fields: bool = False, include_spine: bool = True
 ) -> dict[str, dict[str, Any]]:
+    action_channels = action_names(include_spine=include_spine)
+    state_channels = state_names(include_spine=include_spine)
     features: dict[str, dict[str, Any]] = {
-        "action": {"dtype": "float32", "shape": (ACTION_DIM,), "names": list(ACTION_NAMES)},
-        "observation.state": {"dtype": "float32", "shape": (STATE_DIM,), "names": list(STATE_NAMES)},
+        "action": {"dtype": "float32", "shape": (len(action_channels),), "names": list(action_channels)},
+        "observation.state": {
+            "dtype": "float32",
+            "shape": (len(state_channels),),
+            "names": list(state_channels),
+        },
     }
     for camera in cameras.values():
         features[camera.feature_key] = {
@@ -1083,7 +1136,11 @@ def _validate_resume_contract(
             f"Cannot resume: robot_type {dataset.meta.robot_type!r} != configured {config.robot_type!r}"
         )
 
-    expected = build_features(cameras, include_transition_fields=include_transition_fields)
+    expected = build_features(
+        cameras,
+        include_transition_fields=include_transition_fields,
+        include_spine=config.include_spine,
+    )
     for key, expected_feature in expected.items():
         actual = dataset.meta.features.get(key)
         if actual is None:
@@ -1128,14 +1185,18 @@ def build_recording_manifest(
     *,
     include_transition_fields: bool = False,
 ) -> dict[str, Any]:
+    action_channels = action_names(include_spine=config.include_spine)
+    state_channels = state_names(include_spine=config.include_spine)
     manifest = {
         "format": "franka_duo_real_recording_v1",
         "lerobot_format": "v3.0",
         "lerobot_timestamp_semantics": "frame_index/fps; ROS source stamps are in each episode sidecar",
         "fps": config.fps,
         "robot_type": config.robot_type,
-        "action": {"shape": [ACTION_DIM], "names": list(ACTION_NAMES)},
-        "observation.state": {"shape": [STATE_DIM], "names": list(STATE_NAMES)},
+        "input_mode": config.input_mode,
+        "include_spine": config.include_spine,
+        "action": {"shape": [len(action_channels)], "names": list(action_channels)},
+        "observation.state": {"shape": [len(state_channels)], "names": list(state_channels)},
         "topics": dict(sorted(config.topics.items())),
         "cameras": {key: dataclasses.asdict(camera) for key, camera in sorted(cameras.items())},
         "sync": {
@@ -1146,6 +1207,12 @@ def build_recording_manifest(
             "max_message_age_ms": config.max_message_age_ms,
             "depth_every": config.depth_every,
             "reject_episode_on_missing_depth": config.reject_episode_on_missing_depth,
+            "tmr_split_sync_tolerance_ms": config.tmr_split_sync_tolerance_ms,
+            "tmr_split_max_age_ms": config.tmr_split_max_age_ms,
+        },
+        "tmr_split": {
+            "gripper_actual_joint_names": dict(sorted(config.tmr_gripper_actual_joint_names.items())),
+            "headerless_gripper_target_timestamp": "subscriber_arrival_time",
         },
         "gripper_calibration": {
             "closed_position": config.gripper_closed_rad,
@@ -1246,7 +1313,11 @@ def _create_dataset(
         repo_id=f"local/{repo_name}",
         root=dataset_path,
         fps=config.fps,
-        features=build_features(cameras, include_transition_fields=include_transition_fields),
+        features=build_features(
+            cameras,
+            include_transition_fields=include_transition_fields,
+            include_spine=config.include_spine,
+        ),
         robot_type=config.robot_type,
         use_videos=True,
         **_dataset_kwargs(config),
@@ -1273,6 +1344,7 @@ def _ros_node(config: RecorderConfig, cameras: Mapping[str, CameraSpec]):
         from rclpy.node import Node
         from rclpy.qos import qos_profile_sensor_data
         from sensor_msgs.msg import CameraInfo, Image, JointState
+        from std_msgs.msg import Float32
     except ImportError as exc:  # pragma: no cover - depends on the robot host
         raise RuntimeError(
             "ROS 2 Python packages are unavailable. Source /opt/ros/jazzy/setup.bash "
@@ -1284,15 +1356,37 @@ def _ros_node(config: RecorderConfig, cameras: Mapping[str, CameraSpec]):
     class RealRecorderNode(Node):
         def __init__(self):
             super().__init__("franka_duo_real_recorder")
-            self.create_subscription(
-                JointState, config.topics["joint_states"], cache.store_joint_states, qos_profile_sensor_data
-            )
-            self.create_subscription(
-                JointState,
-                config.topics["applied_commands"],
-                cache.store_applied_commands,
-                qos_profile_sensor_data,
-            )
+            if config.input_mode == "semantic":
+                self.create_subscription(
+                    JointState,
+                    config.topics["joint_states"],
+                    cache.store_joint_states,
+                    qos_profile_sensor_data,
+                )
+                self.create_subscription(
+                    JointState,
+                    config.topics["applied_commands"],
+                    cache.store_applied_commands,
+                    qos_profile_sensor_data,
+                )
+            else:
+                self._tmr_assembler = TmrSplitJointAssembler(
+                    on_measured=cache.store_joint_states,
+                    on_command=cache.store_applied_commands,
+                    gripper_closed_position=float(config.gripper_closed_rad),
+                    gripper_open_position=float(config.gripper_open_rad),
+                    gripper_actual_joint_names=config.tmr_gripper_actual_joint_names,
+                    sync_tolerance_ms=config.tmr_split_sync_tolerance_ms,
+                    max_age_ms=config.tmr_split_max_age_ms,
+                )
+                for key in TMR_TOPIC_KEYS:
+                    message_type = Float32 if key.endswith("_gripper_target") else JointState
+                    self.create_subscription(
+                        message_type,
+                        config.topics[key],
+                        lambda message, key=key: self._tmr_assembler.store(key, message),
+                        qos_profile_sensor_data,
+                    )
             for key, camera in cameras.items():
                 self.create_subscription(
                     Image,
@@ -1520,11 +1614,13 @@ def record_episode(
                     measured,
                     closed_rad=config.gripper_closed_rad,
                     open_rad=config.gripper_open_rad,
+                    include_spine=config.include_spine,
                 ),
                 "observation.state": build_state(
                     measured,
                     closed_rad=config.gripper_closed_rad,
                     open_rad=config.gripper_open_rad,
+                    include_spine=config.include_spine,
                 ),
                 "task": config.task,
             }
@@ -1709,8 +1805,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "Dataset: %s (v%d), action/state=%d/%d, cameras=%s, depth=%s every %d RGB frames",
             dataset_path,
             version,
-            ACTION_DIM,
-            STATE_DIM,
+            action_dim(include_spine=config.include_spine),
+            state_dim(include_spine=config.include_spine),
             ",".join(cameras),
             ",".join(depth_keys) or "none",
             config.depth_every,

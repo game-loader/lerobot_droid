@@ -347,3 +347,102 @@ examples/franka_duo_real_recorder/run_manual_recorder.sh \
 `franka_duo_extras/recording_manifest.json` 的 `transition_annotations` 固化语义。
 没有输入 reward 的 episode 会丢弃，不会生成没有奖励标签的数据。采集完成后仍建议运行
 `validate_dataset.py` 做同步、深度和视频完整性检查。
+
+## TMR 现场配置
+
+[`tmr_config.yaml`](./tmr_config.yaml) 对应当前
+`TMR_Two_Host_Runtime_Guide.md` 的原生分流 topic，不需要先做全量
+`JointState` relay。它把双臂 measured/desired、双夹爪 target/actual 在内存中按时间戳
+聚合。TMR 没有经过确认的周期 spine state/target topic，因此该配置固定
+`include_spine: false`，数据契约为：
+
+```text
+action float32[16]             observation.state float32[16]
+[0:7]   left desired joints   [0:7]   left measured joints
+[7:14]  right desired joints  [7:14]  right measured joints
+[14]    left gripper target   [14]    left gripper actual
+[15]    right gripper target  [15]    right gripper actual
+```
+
+夹爪均保存为 `[0,1]` open fraction。配置中的 `gripper_closed_rad`、
+`gripper_open_rad` 故意为 `null`；必须先用现场实际 JointState 标定后填写，否则工具会
+拒绝启动。若夹爪消息含多个 joint，还必须填写
+`tmr_gripper_actual_joint_names.left/right`。普通采集和人工奖励采集分别运行：
+
+```bash
+FRANKA_RECORDER_CONFIG=examples/franka_duo_real_recorder/tmr_config.yaml \
+  examples/franka_duo_real_recorder/run_recorder.sh
+
+FRANKA_RECORDER_CONFIG=examples/franka_duo_real_recorder/tmr_config.yaml \
+  examples/franka_duo_real_recorder/run_manual_recorder.sh
+```
+
+TMR eval 使用相同相机 topic，默认仍只打印动作。纯图像/点云 bundle 不订阅 joint state；
+stateful bundle 必须先提供聚合后的 16D 语义 relay，并在
+[`tmr_eval_config.yaml`](./tmr_eval_config.yaml) 填写实际夹爪端点：
+
+```bash
+FRANKA_EVAL_CONFIG=examples/franka_duo_real_recorder/tmr_eval_config.yaml \
+  examples/franka_duo_real_recorder/run_eval.sh /path/to/exported_bundle --device cuda --once
+```
+
+### TMR 现场验收
+
+双 FR3 controller 启动后，先确认 desired/measured 都确实是
+`sensor_msgs/msg/JointState`，包含每侧 7 个 finite position，并且有非零同 clock-domain
+时间戳。guide 中这些 broadcaster topic 是待 controller 启动后复核的接口，不是已验证
+常驻 topic：
+
+```bash
+ros2 topic info -v /left/franka_robot_state_broadcaster/desired_joint_states
+ros2 topic info -v /right/franka_robot_state_broadcaster/desired_joint_states
+ros2 topic echo /left/franka_robot_state_broadcaster/desired_joint_states --once
+ros2 topic echo /right/franka_robot_state_broadcaster/desired_joint_states --once
+ros2 topic echo /left/franka_robot_state_broadcaster/measured_joint_states --once
+ros2 topic echo /right/franka_robot_state_broadcaster/measured_joint_states --once
+```
+
+再核对 gripper target 类型和值域，并分别在完全闭合、完全打开时 echo actual joint。
+把选中的同名 joint 两端值写入配置；如果左右两侧标尺不同，先做统一语义 relay，不能用
+一侧标定冒充两侧：
+
+```bash
+ros2 topic info -v /left/gripper/gripper_client/target_gripper_width_percent
+ros2 topic info -v /right/gripper/gripper_client/target_gripper_width_percent
+ros2 topic echo /left/gripper/joint_states --once
+ros2 topic echo /right/gripper/joint_states --once
+```
+
+ZED 必须实际发布 registered depth，且 RGB、depth、RGB CameraInfo 的尺寸/内参一致。
+`tmr_config.yaml` 按 `1280x720`、逻辑 `15 FPS` 配置；当前 guide 曾记录只看到 depth
+CameraInfo、没看到 depth 数据，所以开录前必须检查：
+
+```bash
+ros2 topic info -v /head_camera/zed/depth/depth_registered
+ros2 topic hz /head_camera/zed/rgb/color/rect/image
+ros2 topic hz /head_camera/zed/depth/depth_registered
+ros2 topic echo /head_camera/zed/rgb/color/rect/camera_info --once
+```
+
+当前 TMR guide 的双 D405 启动 profile 是源流 `640x480x30`，本工具按 ZED anchor
+逻辑保存为 `640x480@15`，不在 recorder 中缩放。此前比赛带宽偏好是
+`480x270@30`；如果现场决定采用它，必须同时把两台 RealSense driver profile 和两份
+TMR YAML 的 wrist `width/height` 改为 `480/270`，不能只改配置声称已经降采样。先检查
+实际 profile：
+
+```bash
+ros2 topic hz /wrist_camera_left/color/image_raw
+ros2 topic hz /wrist_camera_right/color/image_raw
+ros2 topic echo /wrist_camera_left/color/camera_info --once
+ros2 topic echo /wrist_camera_right/color/camera_info --once
+```
+
+guide 还存在 D405 serial 左右映射冲突：直接 launch 示例写 left=`409122272639`、
+right=`409122274492`，旧文字说明则相反。不要按编号猜左右；用现场画面确认物理左右，
+再固定 launch 映射和记录 manifest：
+
+```bash
+rs-enumerate-devices -s
+ros2 run rqt_image_view rqt_image_view /wrist_camera_left/color/image_raw
+ros2 run rqt_image_view rqt_image_view /wrist_camera_right/color/image_raw
+```

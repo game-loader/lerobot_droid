@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Add offline Franka end-effector poses computed from a calibrated URDF.
 
-The recorder stores a 17D raw state.  This command reads the two 7-joint
+The recorder stores a 16D arm/gripper state on TMR, or a 17D state when a
+periodic spine channel is available. This command reads the two 7-joint
 segments and writes a sidecar array with 14 values per frame:
 ``left_xyzqxqyqzqw + right_xyzqxqyqzqw``.  The result is expressed in the
 configured arm-base frames (or the supplied static mount transforms), never
@@ -74,8 +75,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     frame_indices = np.arange(len(dataset), dtype=np.int64)
     for index in range(len(dataset)):
         state = np.asarray(dataset.get_raw_item(index)["observation.state"], dtype=np.float64)
-        if state.shape != (17,):
-            raise ValueError(f"Expected raw 17D observation.state, got {state.shape} at frame {index}")
+        if state.shape not in {(16,), (17,)}:
+            raise ValueError(f"Expected raw 16D/17D observation.state, got {state.shape} at frame {index}")
         poses[index] = compute_dual_fk(left_fk, right_fk, state[:7], state[7:14])
 
     extras = root / "franka_duo_extras"
