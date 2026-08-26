@@ -14,7 +14,9 @@ from examples.franka_duo_real_recorder.build_pointcloud_dataset import (
 )
 from examples.franka_duo_real_recorder.record_franka_duo import (
     ACTION_DIM,
+    ACTION_NAMES,
     STATE_DIM,
+    STATE_NAMES,
     CameraSpec,
     DepthSidecarWriter,
     KeyboardCommands,
@@ -25,6 +27,7 @@ from examples.franka_duo_real_recorder.record_franka_duo import (
     _nearest_depth,
     _ready_snapshot,
     _select_synchronized_messages,
+    _stamp_ns,
     _validate_resume_contract,
     _write_or_validate_recording_manifest,
     build_action,
@@ -99,6 +102,13 @@ def test_real_contract_excludes_base_and_world_pose():
     assert state[-1] == 0.2
 
 
+def test_real_feature_names_match_benchmark_joint_contract():
+    assert ACTION_NAMES[:2] == ("left_fr3v2_joint1.target", "left_fr3v2_joint2.target")
+    assert ACTION_NAMES[7] == "right_fr3v2_joint1.target"
+    assert STATE_NAMES[:2] == ("left_fr3v2_joint1.pos", "left_fr3v2_joint2.pos")
+    assert STATE_NAMES[7] == "right_fr3v2_joint1.pos"
+
+
 def test_gripper_calibration_supports_real_franka_finger_positions():
     assert gripper_open_fraction(0.0, closed_rad=0.0, open_rad=0.04) == 0.0
     assert gripper_open_fraction(0.04, closed_rad=0.0, open_rad=0.04) == 1.0
@@ -151,6 +161,16 @@ def test_depth_decoding_respects_big_endian_ros_image():
     )
 
     np.testing.assert_allclose(depth_msg_to_meters(message), [[1.0, 2.5]], atol=1e-3)
+
+
+def test_zero_ros_stamp_is_rejected_as_uninitialized():
+    zero = SimpleNamespace(header=SimpleNamespace(stamp=SimpleNamespace(sec=0, nanosec=0)))
+    assert _stamp_ns(zero) is None
+
+    positive = SimpleNamespace(
+        header=SimpleNamespace(stamp=SimpleNamespace(sec=2, nanosec=3))
+    )
+    assert _stamp_ns(positive) == 2_000_000_003
 
 
 def test_depth_matching_uses_header_stamp_not_arrival_order():
@@ -294,6 +314,12 @@ def test_default_config_uses_requested_d405_profile_and_requires_calibration(tmp
     config.gripper_closed_rad = 0.0
     config.gripper_open_rad = 0.04
     validate_config(config)
+
+    config.encoder_queue_maxsize = 0
+    with pytest.raises(ValueError, match="encoder_queue_maxsize"):
+        validate_config(config)
+    config.encoder_queue_maxsize = 90
+
     _write_or_validate_recording_manifest(
         tmp_path,
         config,

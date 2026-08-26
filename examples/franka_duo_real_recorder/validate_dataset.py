@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from json import JSONDecodeError
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,79 @@ def _append(errors: list[str], condition: bool, message: str) -> None:
         errors.append(message)
 
 
+def _probe_video_file(
+    path: Path,
+    *,
+    feature_key: str,
+    expected_shape: tuple[int, int, int],
+    expected_fps: int,
+    fps_tolerance_ratio: float,
+) -> tuple[float | None, list[str]]:
+    """Check one v3 MP4 reference and return its physical duration in seconds.
+
+    Episode metadata stores references to chunked MP4 files rather than one
+    file per episode. A valid episode row can therefore still point at a
+    deleted or truncated video. Keep this probe lazy and cache it at the
+    caller so each physical file is opened once even when several episodes
+    share the same chunk.
+    """
+
+    errors: list[str] = []
+    if not path.is_file():
+        return None, [f"{feature_key}: referenced video file is missing: {path}"]
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        return None, [f"{feature_key}: cannot stat referenced video file {path}: {exc}"]
+    if size <= 0:
+        return None, [f"{feature_key}: referenced video file is empty: {path}"]
+
+    try:
+        import av
+    except ImportError as exc:
+        return None, [f"{feature_key}: PyAV is required to probe {path}: {exc}"]
+
+    duration_s: float | None = None
+    try:
+        with av.open(str(path), mode="r") as container:
+            streams = list(container.streams.video)
+            if not streams:
+                return None, [f"{feature_key}: referenced file has no video stream: {path}"]
+            stream = streams[0]
+            actual_shape = (int(stream.height), int(stream.width), 3)
+            if actual_shape != expected_shape:
+                errors.append(
+                    f"{feature_key}: video stream shape {actual_shape} != expected {expected_shape} ({path})"
+                )
+            rate = stream.average_rate or stream.base_rate
+            actual_fps = float(rate) if rate else 0.0
+            if actual_fps <= 0.0:
+                errors.append(f"{feature_key}: video stream has no positive FPS ({path})")
+            elif abs(actual_fps - expected_fps) / expected_fps > fps_tolerance_ratio:
+                errors.append(
+                    f"{feature_key}: video stream FPS {actual_fps:.3f} != expected {expected_fps} "
+                    f"within {fps_tolerance_ratio:.1%} ({path})"
+                )
+
+            # Opening a container only validates its header. Decode one frame
+            # as well so a truncated/corrupt MP4 cannot pass the preflight.
+            first_frame = next(container.decode(video=stream.index), None)
+            if first_frame is None:
+                errors.append(f"{feature_key}: referenced video contains no decodable frames ({path})")
+
+            if container.duration is not None:
+                duration_s = float(container.duration / av.time_base)
+            elif stream.duration is not None and stream.time_base is not None:
+                duration_s = float(stream.duration * stream.time_base)
+            if duration_s is None or not np.isfinite(duration_s) or duration_s <= 0:
+                errors.append(f"{feature_key}: referenced video has no positive duration ({path})")
+                duration_s = None
+    except Exception as exc:  # PyAV raises codec/container-specific exceptions.
+        errors.append(f"{feature_key}: cannot read referenced video {path}: {exc}")
+        duration_s = None
+    return duration_s, errors
+
+
 def validate_dataset(
     dataset_root: Path,
     *,
@@ -42,27 +116,57 @@ def validate_dataset(
     manifest_path = root / "franka_duo_extras" / "recording_manifest.json"
     if not manifest_path.is_file():
         return {"valid": False, "errors": [f"Missing recording manifest: {manifest_path}"]}
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    fps = int(manifest["fps"])
-    cameras = manifest["cameras"]
-    sync = manifest["sync"]
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, JSONDecodeError, UnicodeError) as exc:
+        return {"valid": False, "errors": [f"Cannot read recording manifest {manifest_path}: {exc}"]}
+    if not isinstance(manifest, Mapping):
+        return {"valid": False, "errors": [f"Recording manifest {manifest_path} must be a JSON object"]}
+    try:
+        fps = int(manifest["fps"])
+        cameras = manifest["cameras"]
+        sync = manifest["sync"]
+        robot_type = manifest["robot_type"]
+        expected_numeric = {
+            "action": manifest["action"],
+            "observation.state": manifest["observation.state"],
+        }
+    except (KeyError, TypeError, ValueError) as exc:
+        return {"valid": False, "errors": [f"Recording manifest is missing required fields: {exc}"]}
+    if fps <= 0:
+        return {"valid": False, "errors": [f"Recording manifest FPS must be positive, got {fps}"]}
+    if not isinstance(cameras, Mapping) or not cameras:
+        return {"valid": False, "errors": ["Recording manifest cameras must be a non-empty object"]}
+    if not isinstance(sync, Mapping):
+        return {"valid": False, "errors": ["Recording manifest sync must be an object"]}
+    required_sync = {"rgb_match_tolerance_ms", "control_match_tolerance_ms", "depth_every"}
+    missing_sync = required_sync - set(sync)
+    if missing_sync:
+        return {
+            "valid": False,
+            "errors": [f"Recording manifest sync is missing {sorted(missing_sync)}"],
+        }
 
     from lerobot.datasets.dataset_metadata import LeRobotDatasetMetadata
 
-    metadata = LeRobotDatasetMetadata(repo_id or f"local/{root.name}", root=root)
+    try:
+        metadata = LeRobotDatasetMetadata(repo_id or f"local/{root.name}", root=root)
+    except Exception as exc:
+        return {"valid": False, "errors": [f"Cannot load LeRobot metadata from {root}: {exc}"]}
     _append(errors, str(metadata.info.codebase_version).startswith("v3."), "Dataset is not LeRobot v3")
     _append(errors, metadata.fps == fps, f"Metadata FPS {metadata.fps} != manifest FPS {fps}")
     _append(
         errors,
-        metadata.robot_type == manifest["robot_type"],
-        f"robot_type {metadata.robot_type!r} != manifest {manifest['robot_type']!r}",
+        metadata.robot_type == robot_type,
+        f"robot_type {metadata.robot_type!r} != manifest {robot_type!r}",
     )
 
-    expected_numeric = {
-        "action": manifest["action"],
-        "observation.state": manifest["observation.state"],
-    }
     for key, expected in expected_numeric.items():
+        if not isinstance(expected, Mapping) or "shape" not in expected or "names" not in expected:
+            return {
+                "valid": False,
+                "errors": [f"Recording manifest feature {key!r} is missing shape/names"],
+            }
         feature = metadata.features.get(key)
         _append(errors, feature is not None, f"Missing feature {key}")
         if feature is not None:
@@ -75,13 +179,35 @@ def validate_dataset(
             )
 
     expected_video_keys = set()
+    expected_video_shapes: dict[str, tuple[int, int, int]] = {}
     for key, camera in cameras.items():
+        if not isinstance(camera, Mapping):
+            return {
+                "valid": False,
+                "errors": [f"Recording manifest camera {key!r} must be an object"],
+            }
+        if "record_depth" not in camera:
+            return {
+                "valid": False,
+                "errors": [f"Recording manifest camera {key!r} is missing record_depth"],
+            }
         feature_key = f"observation.images.{key}"
         expected_video_keys.add(feature_key)
+        try:
+            expected_video_shapes[feature_key] = (
+                int(camera["height"]),
+                int(camera["width"]),
+                3,
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            return {
+                "valid": False,
+                "errors": [f"Recording manifest camera {key!r} has invalid dimensions: {exc}"],
+            }
         feature = metadata.features.get(feature_key)
         _append(errors, feature is not None, f"Missing RGB feature {feature_key}")
         if feature is not None:
-            expected_shape = (int(camera["height"]), int(camera["width"]), 3)
+            expected_shape = expected_video_shapes[feature_key]
             _append(errors, feature.get("dtype") == "video", f"{feature_key} is not video")
             _append(errors, _shape(feature) == expected_shape, f"{feature_key} shape mismatch")
     _append(
@@ -116,10 +242,11 @@ def validate_dataset(
     depth_missing = 0
     episode_rows = _episode_rows(metadata)
     _append(errors, len(episode_rows) == metadata.total_episodes, "Episode metadata count mismatch")
+    video_probe_cache: dict[tuple[str, Path], tuple[float | None, list[str]]] = {}
 
     for episode_index, episode_row in enumerate(episode_rows):
         length = int(episode_row["length"])
-        for video_key in expected_video_keys:
+        for video_key in sorted(expected_video_keys):
             from_key = f"videos/{video_key}/from_timestamp"
             to_key = f"videos/{video_key}/to_timestamp"
             if from_key not in episode_row or to_key not in episode_row:
@@ -132,13 +259,58 @@ def validate_dataset(
                 abs(duration - expected_duration) <= 0.51 / fps,
                 f"Episode {episode_index}: {video_key} duration implies a frame-count mismatch",
             )
+            try:
+                relative_video_path = metadata.get_video_file_path(episode_index, video_key)
+                video_path = (root / relative_video_path).resolve()
+            except (KeyError, IndexError, TypeError, AttributeError) as exc:
+                errors.append(
+                    f"Episode {episode_index}: cannot resolve video reference for {video_key}: {exc}"
+                )
+                continue
+            if not video_path.is_relative_to(root):
+                errors.append(
+                    f"Episode {episode_index}: video reference for {video_key} escapes dataset root: "
+                    f"{video_path}"
+                )
+                continue
+            cache_key = (video_key, video_path)
+            if cache_key not in video_probe_cache:
+                probe_result = _probe_video_file(
+                    video_path,
+                    feature_key=video_key,
+                    expected_shape=expected_video_shapes[video_key],
+                    expected_fps=fps,
+                    fps_tolerance_ratio=fps_tolerance_ratio,
+                )
+                video_probe_cache[cache_key] = probe_result
+                errors.extend(probe_result[1])
+            physical_duration = video_probe_cache[cache_key][0]
+            if physical_duration is not None:
+                edge_tolerance = 0.51 / fps
+                _append(
+                    errors,
+                    float(episode_row[from_key]) >= -edge_tolerance,
+                    f"Episode {episode_index}: {video_key} starts before the referenced file",
+                )
+                _append(
+                    errors,
+                    float(episode_row[to_key]) <= physical_duration + edge_tolerance,
+                    f"Episode {episode_index}: {video_key} ends after the referenced file",
+                )
 
         episode_dir = root / "franka_duo_extras" / f"episode_{episode_index:06d}"
         sidecar_path = episode_dir / "metadata.json"
         if not sidecar_path.is_file():
             errors.append(f"Episode {episode_index}: missing sidecar metadata")
             continue
-        sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        try:
+            sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+        except (OSError, JSONDecodeError, UnicodeError) as exc:
+            errors.append(f"Episode {episode_index}: cannot read sidecar metadata: {exc}")
+            continue
+        if not isinstance(sidecar, Mapping):
+            errors.append(f"Episode {episode_index}: sidecar metadata must be a JSON object")
+            continue
         layout = list(sidecar.get("sample_timestamp_layout", ()))
         timestamp_file = episode_dir / str(sidecar.get("sample_timestamp_file", ""))
         _append(

@@ -114,7 +114,11 @@ class FrankaUrdfKinematics:
         if frame_id >= model.nframes:
             raise ValueError(f"Frame {frame_name!r} is not present in {urdf_path}")
         names = tuple(joint_names)
-        missing = [name for name in names if model.getJointId(name) >= model.njoints]
+        # Pinocchio's getJointId() returns the universe/root id for an unknown
+        # name on some releases.  Check the model's declared names directly so
+        # a typo cannot silently place a value into joint 0 during FK.
+        declared_joint_names = {str(name) for name in model.names}
+        missing = [name for name in names if name not in declared_joint_names]
         if missing:
             raise ValueError(f"Joints missing from {urdf_path}: {missing}")
         return cls(model, model.createData(), pin, names, frame_name, _as_mount_transform(mount_transform))

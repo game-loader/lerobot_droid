@@ -41,13 +41,13 @@ FPS = 30
 ACTION_DIM = 17
 STATE_DIM = 17
 ACTION_NAMES = tuple(
-    [f"left_franka_joint{i}.target" for i in range(1, 8)]
-    + [f"right_franka_joint{i}.target" for i in range(1, 8)]
+    [f"left_fr3v2_joint{i}.target" for i in range(1, 8)]
+    + [f"right_fr3v2_joint{i}.target" for i in range(1, 8)]
     + ["left_gripper.open_fraction.target", "right_gripper.open_fraction.target", "spine.height.target"]
 )
 STATE_NAMES = tuple(
-    [f"left_franka_joint{i}.pos" for i in range(1, 8)]
-    + [f"right_franka_joint{i}.pos" for i in range(1, 8)]
+    [f"left_fr3v2_joint{i}.pos" for i in range(1, 8)]
+    + [f"right_fr3v2_joint{i}.pos" for i in range(1, 8)]
     + ["left_gripper.open_fraction", "right_gripper.open_fraction", "spine.height"]
 )
 
@@ -244,6 +244,18 @@ def validate_config(config: RecorderConfig) -> None:
         raise ValueError("fps must be positive")
     if config.depth_every <= 0:
         raise ValueError("depth_every must be positive")
+    for key in ("depth_queue_size", "encoder_queue_maxsize", "sync_history_size"):
+        if int(getattr(config, key)) <= 0:
+            raise ValueError(f"{key} must be positive")
+    if float(config.max_episode_time_s) <= 0:
+        raise ValueError("max_episode_time_s must be positive")
+    if int(config.max_episodes) <= 0:
+        raise ValueError("max_episodes must be positive")
+    for key in ("image_writer_threads", "image_writer_processes"):
+        if int(getattr(config, key)) < 0:
+            raise ValueError(f"{key} must be non-negative")
+    if config.encoder_threads is not None and int(config.encoder_threads) <= 0:
+        raise ValueError("encoder_threads must be positive when set")
     for key in (
         "depth_match_tolerance_ms",
         "rgb_match_tolerance_ms",
@@ -253,8 +265,6 @@ def validate_config(config: RecorderConfig) -> None:
     ):
         if float(getattr(config, key)) <= 0:
             raise ValueError(f"{key} must be positive")
-    if config.sync_history_size <= 0:
-        raise ValueError("sync_history_size must be positive")
     if not config.cameras:
         raise ValueError("At least one RGB camera is required")
     for key, camera in config.cameras.items():
@@ -446,9 +456,13 @@ def _stamp_ns(message: Any) -> int | None:
     if stamp is None:
         return None
     try:
-        return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
+        value = int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
     except (AttributeError, TypeError):
         return None
+    # A zero ROS stamp is commonly emitted by an uninitialised driver (and by
+    # the stray /clock publisher in the Isaac benchmark).  Treat it as
+    # missing rather than allowing it to become the synchronization anchor.
+    return value if value > 0 else None
 
 
 def camera_info_to_dict(message: Any) -> dict[str, Any]:
@@ -571,7 +585,7 @@ def depth_msg_to_meters(message: Any, depth_scale: float = 0.001) -> np.ndarray:
         values = _image_rows(message, np.uint16).astype(np.float32) * float(depth_scale)
     else:
         raise ValueError(f"Unsupported depth encoding {encoding!r}")
-    return np.ascontiguousarray(values.astype(np.float16))
+    return np.ascontiguousarray(values.astype("<f2"))
 
 
 class DepthSidecarWriter:
@@ -683,7 +697,9 @@ class DepthSidecarWriter:
     def enqueue(self, frame_index: int, rgb_stamp_ns: int, depth_stamp_ns: int, depth: np.ndarray) -> bool:
         if self._queue is None:
             raise RuntimeError("start_episode must be called before enqueue")
-        depth = np.ascontiguousarray(depth, dtype=np.float16)
+        # Sidecars are specified as little-endian float16 so they can be read
+        # consistently on any machine that later validates the dataset.
+        depth = np.ascontiguousarray(depth, dtype="<f2")
         if self._shape is None:
             self._shape = tuple(depth.shape)
         elif tuple(depth.shape) != self._shape:

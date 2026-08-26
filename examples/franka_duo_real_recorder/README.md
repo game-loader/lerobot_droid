@@ -177,3 +177,134 @@ uv run python examples/franka_duo_real_recorder/build_pointcloud_dataset.py \
 默认移除三路 RGB 视频，避免 DP3 训练仍解码不用的图像；`--keep-videos` 可保留。
 派生集会重算 numeric stats，并在 `pointcloud_extras/` 保存每帧来源、完整标定和
 SHA-256 provenance。训练参数见 `docs/source/dp3.mdx`。
+
+## 真机策略 Eval（训练与测试分离）
+
+`eval_franka_duo.py` 只读取已经导出的模型 bundle，不读取训练目录中的优化器或
+RL replay 状态。它在每个新的 ZED head RGB 时间戳上同步：
+
+- ZED Mini RGB + depth，生成 manifest 指定数量的 XYZ 或 XYZRGB 点云；
+- 左右 D405 RGB（默认各 `480x270@30`）；
+- 若 bundle 声明 `state_key`，再同步 JointState 并按现场夹爪标定生成 17D state。
+
+点云投影要求 ZED depth topic 已经注册到 RGB optical frame；若驱动同时提供 raw
+depth 和 registered depth，必须在 `eval_config.yaml` 选择后者，工具不会静默做
+不同分辨率的深度/颜色配准。
+
+模型输出必须是下面固定的 `float32[20]`：
+
+```text
+[0:9]   left EE:  xyz + rotation matrix first two rows (rot6d_rows)
+[9:18]  right EE: xyz + rotation matrix first two rows (rot6d_rows)
+[18]    left gripper open fraction, [0, 1]
+[19]    right gripper open fraction, [0, 1]
+```
+
+旋转 6D 定义与 RL-100 `mat_to_rot6d` 一致。工具会在 ROS 启动前校验
+`manifest.json` 的 action、点云和双腕图像契约；维度不符、缺少 normalizer 或缺少
+输入模态会直接失败。
+
+### Bundle 目录
+
+所有 bundle 都必须包含 `manifest.json`。LeRobot backend 的推荐布局为：
+
+```text
+my_franka_policy/
+  manifest.json
+  pretrained_model/
+    config.json
+    model.safetensors
+    policy_preprocessor.json
+    policy_postprocessor.json
+    *.safetensors                 # processor state, including normalizer stats
+```
+
+manifest 最小示例（`image_keys` 的 value 也可以是列表；列表会按宽度拼接左右图）：
+
+`sampling` 必须和训练时一致：`random` 是均匀随机索引，`fps` 是按空间最远点
+覆盖采样；“固定点数下采样”本身不等于随机采样。manifest 会把该选择固定下来，
+现场不会静默换一种采样方法。
+
+```json
+{
+  "manifest_version": 1,
+  "backend": "lerobot",
+  "policy_dir": "pretrained_model",
+  "action_dim": 20,
+  "action_spec": {
+    "dimension": 20,
+    "ee_dimension": 9,
+    "ee_rotation": "rot6d_rows",
+    "gripper_range": [0.0, 1.0]
+  },
+  "pointcloud": {
+    "num_points": 512,
+    "channels": 3,
+    "sampling": "fps",
+    "seed": 0,
+    "min_depth": 0.05,
+    "max_depth": 5.0,
+    "extrinsics": [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]
+  },
+  "inputs": {
+    "point_cloud_key": "observation.point_cloud",
+    "state_key": null,
+    "image_keys": {
+      "observation.images.wrist_left": "wrist_left",
+      "observation.images.wrist_right": "wrist_right"
+    }
+  }
+}
+```
+
+RL-100 原生 backend 使用同一份 action/pointcloud/input contract，但必须额外声明
+`native.factory: "python.module:function"`。factory 负责用训练时的 Hydra 配置、
+normalizer、scheduler、`model.pt` 和 `encoder.pt` 构造可推理对象；它应返回提供
+`predict(batch)`（或 `predict_action`/`select_action`）的对象。只把 RL-100 的
+`model.pt` 放进目录而没有 factory/config **不会被加载**。这避免把当前仓库已有的
+14D state-only RL-100 checkpoint 误当成 20D 双腕视觉模型。
+
+可以用脚手架命令复制 RL-100 的两个权重并生成 manifest；`--factory` 仍必须由训练
+代码提供，因为 RL-100 的 scheduler、shape metadata 和 normalizer 不能从权重反推：
+
+```bash
+PYTHONPATH=. uv run python -m examples.franka_duo_real_recorder.export_rl100_eval_bundle \
+  --checkpoint /path/to/rl100/checkpoint \
+  --output /path/to/franka_eval_bundle \
+  --factory my_franka_policy_factory:load \
+  --python-root /path/to/factory/package \
+  --num-points 512 --channels 3 --sampling fps \
+  --workspace-min=-0.8,-0.8,0.0 --workspace-max=0.8,0.8,1.5
+```
+
+### 运行
+
+先把 `eval_config.yaml` 中 topic 和（若需要 state）夹爪端点改成真机值。默认只打印
+JSONL action，不发布任何 ROS 消息：
+
+```bash
+PYTHONPATH=. uv run python -m examples.franka_duo_real_recorder.eval_franka_duo \
+  --bundle /path/to/my_franka_policy \
+  --config examples/franka_duo_real_recorder/eval_config.yaml \
+  --device cuda
+```
+
+也可以用宿主机 ROS 启动脚本（第一个位置参数是 bundle）：
+
+```bash
+examples/franka_duo_real_recorder/run_eval.sh /path/to/my_franka_policy --device cuda
+```
+
+现场确认 relay 已经限幅、急停和控制器转换后，才同时显式打开两个开关。工具发布的
+是 `std_msgs/Float32MultiArray.data[20]` 到配置的 relay topic，**不是** Franka 原生
+关节命令 topic：
+
+```bash
+PYTHONPATH=. uv run python -m examples.franka_duo_real_recorder.eval_franka_duo \
+  --bundle /path/to/my_franka_policy --config eval_config.yaml \
+  --device cuda --publish --enable-robot
+```
+
+每次推理还会检查输入消息新鲜度、RGB/depth 时间差、推理耗时和动作 finite；若 bundle
+配置了 workspace bounds，也会检查工作空间边界。任一检查失败都会停止发布。`--once` 可在不上机器人动作的情况下现场检查一帧
+输入和导出模型是否匹配。

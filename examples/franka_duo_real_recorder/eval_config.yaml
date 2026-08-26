@@ -1,0 +1,47 @@
+# ROS-side configuration for eval_franka_duo.py.  The model bundle owns the
+# point-cloud shape/channels/sampling contract; this file owns live topics and
+# hardware calibration only.
+fps: 30
+topics:
+  head_image: /isaac/head_camera/image_raw
+  head_depth: /isaac/head_camera/depth
+  head_camera_info: /isaac/head_camera/camera_info
+  wrist_left_image: /isaac/left_wrist_camera/image_raw
+  wrist_right_image: /isaac/right_wrist_camera/image_raw
+  joint_states: /isaac/joint_states_full
+
+cameras:
+  head:
+    width: 1280
+    height: 720
+    fps: 30
+    # 16UC1 is millimetres; 32FC1 is already metres and ignores this value.
+    depth_scale: 0.001
+    # The depth topic must be registered/aligned to the RGB optical frame.
+    # Use the ZED driver's registered depth topic or image_proc before eval.
+    depth_registered: true
+  wrist_left:
+    width: 480
+    height: 270
+    fps: 30
+  wrist_right:
+    width: 480
+    height: 270
+    fps: 30
+
+rgb_match_tolerance_ms: 45.0
+depth_match_tolerance_ms: 16.0
+state_match_tolerance_ms: 50.0
+max_message_age_ms: 150.0
+sync_wait_timeout_ms: 75.0
+
+# Required only when the exported policy declares an observation.state or
+# agent_pos input.  Measure both endpoints on the real robot; these values are
+# not inferred from the recorder's Isaac Sim defaults.
+state_gripper_closed: null
+state_gripper_open: null
+
+# This is a relay topic carrying std_msgs/Float32MultiArray.data[20].  A site
+# controller may subscribe and convert the Cartesian action to its native API.
+publish_topic: /franka_duo/policy_action
+inference_timeout_ms: 100.0
