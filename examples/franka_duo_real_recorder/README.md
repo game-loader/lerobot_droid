@@ -204,6 +204,18 @@ depth 和 registered depth，必须在 `eval_config.yaml` 选择后者，工具�
 `manifest.json` 的 action、点云和双腕图像契约；维度不符、缺少 normalizer 或缺少
 输入模态会直接失败。
 
+checkpoint 可以是带 `manifest.json` 的 bundle，也可以和 manifest 分开传入。后者适合
+训练系统原样导出的 `pretrained_model/` 或 RL-100 `model.pt`/`encoder.pt` 目录：
+
+```bash
+examples/franka_duo_real_recorder/run_eval.sh \
+  /path/to/checkpoint \
+  --manifest /path/to/franka_eval_manifest.json \
+  --device cuda --once
+```
+
+没有显式 manifest 的 checkpoint 会被拒绝，不会根据文件名猜测 action/state/点云布局。
+
 ### Bundle 目录
 
 所有 bundle 都必须包含 `manifest.json`。LeRobot backend 的推荐布局为：
@@ -308,3 +320,30 @@ PYTHONPATH=. uv run python -m examples.franka_duo_real_recorder.eval_franka_duo 
 每次推理还会检查输入消息新鲜度、RGB/depth 时间差、推理耗时和动作 finite；若 bundle
 配置了 workspace bounds，也会检查工作空间边界。任一检查失败都会停止发布。`--once` 可在不上机器人动作的情况下现场检查一帧
 输入和导出模型是否匹配。
+
+## 手动奖励采集
+
+需要人工给每个 episode 一个终端奖励时，使用独立 CLI。它复用本文件前面的 ROS
+同步、ZED 深度 sidecar 和 LeRobot v3 视频写入实现，不依赖 Docker：
+
+```bash
+examples/franka_duo_real_recorder/run_manual_recorder.sh \
+  --config examples/franka_duo_real_recorder/config.yaml \
+  --gripper-closed-rad 0.0 --gripper-open-rad 0.04 \
+  --output-root datasets/franka_duo --episodes 50
+```
+
+交互按键：空闲时 `r` 开始，录制时 `e`（或兼容旧习惯的 `s`）结束并进入奖励输入，
+`d` 丢弃当前 episode，`q` 退出。结束键后程序会恢复终端的普通行输入，再提示：
+`Episode reward (finite scalar):`。输入 `nan`、`inf` 或非数字会被拒绝并重新提示。
+
+手动数据集仍是 LeRobot v3，额外包含三个 canonical RL transition 字段：
+
+- `next.reward`：每个 episode 只有最后一帧写入人工输入的标量，前面的帧为 `0.0`；
+- `next.done`：最后一帧为 `true`；
+- `next.truncated`：手动结束默认为 `false`。
+
+这三个字段会写入 Parquet，并在
+`franka_duo_extras/recording_manifest.json` 的 `transition_annotations` 固化语义。
+没有输入 reward 的 episode 会丢弃，不会生成没有奖励标签的数据。采集完成后仍建议运行
+`validate_dataset.py` 做同步、深度和视频完整性检查。

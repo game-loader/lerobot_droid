@@ -1017,7 +1017,9 @@ def existing_dataset_versions(output_root: Path, dataset_name: str) -> list[tupl
     return sorted(versions)
 
 
-def build_features(cameras: Mapping[str, CameraSpec]) -> dict[str, dict[str, Any]]:
+def build_features(
+    cameras: Mapping[str, CameraSpec], *, include_transition_fields: bool = False
+) -> dict[str, dict[str, Any]]:
     features: dict[str, dict[str, Any]] = {
         "action": {"dtype": "float32", "shape": (ACTION_DIM,), "names": list(ACTION_NAMES)},
         "observation.state": {"dtype": "float32", "shape": (STATE_DIM,), "names": list(STATE_NAMES)},
@@ -1028,6 +1030,16 @@ def build_features(cameras: Mapping[str, CameraSpec]) -> dict[str, dict[str, Any
             "shape": (camera.height, camera.width, 3),
             "names": ["height", "width", "channel"],
         }
+    if include_transition_fields:
+        # Keep the canonical LeRobot RL names.  Manual annotation is applied
+        # after capture, so the recorder itself can keep its original schema.
+        features.update(
+            {
+                "next.reward": {"dtype": "float32", "shape": (1,), "names": None},
+                "next.done": {"dtype": "bool", "shape": (1,), "names": None},
+                "next.truncated": {"dtype": "bool", "shape": (1,), "names": None},
+            }
+        )
     return features
 
 
@@ -1058,7 +1070,11 @@ def _codec_family(codec: str) -> str:
 
 
 def _validate_resume_contract(
-    dataset: Any, config: RecorderConfig, cameras: Mapping[str, CameraSpec]
+    dataset: Any,
+    config: RecorderConfig,
+    cameras: Mapping[str, CameraSpec],
+    *,
+    include_transition_fields: bool = False,
 ) -> None:
     if int(dataset.meta.fps) != int(config.fps):
         raise ValueError(f"Cannot resume: dataset FPS {dataset.meta.fps} != configured {config.fps}")
@@ -1067,7 +1083,7 @@ def _validate_resume_contract(
             f"Cannot resume: robot_type {dataset.meta.robot_type!r} != configured {config.robot_type!r}"
         )
 
-    expected = build_features(cameras)
+    expected = build_features(cameras, include_transition_fields=include_transition_fields)
     for key, expected_feature in expected.items():
         actual = dataset.meta.features.get(key)
         if actual is None:
@@ -1106,8 +1122,13 @@ def _validate_resume_contract(
             raise ValueError(f"Cannot resume: {key} pixel format {existing_pix_fmt!r} != {encoder.pix_fmt!r}")
 
 
-def build_recording_manifest(config: RecorderConfig, cameras: Mapping[str, CameraSpec]) -> dict[str, Any]:
-    return {
+def build_recording_manifest(
+    config: RecorderConfig,
+    cameras: Mapping[str, CameraSpec],
+    *,
+    include_transition_fields: bool = False,
+) -> dict[str, Any]:
+    manifest = {
         "format": "franka_duo_real_recording_v1",
         "lerobot_format": "v3.0",
         "lerobot_timestamp_semantics": "frame_index/fps; ROS source stamps are in each episode sidecar",
@@ -1139,6 +1160,15 @@ def build_recording_manifest(config: RecorderConfig, cameras: Mapping[str, Camer
         "streaming_encoding": config.streaming_encoding,
         "requested_rgb_vcodec": config.rgb_vcodec,
     }
+    if include_transition_fields:
+        manifest["transition_annotations"] = {
+            "reward_key": "next.reward",
+            "done_key": "next.done",
+            "truncated_key": "next.truncated",
+            "reward_semantics": "episode reward is stored on the final transition; preceding transitions are zero",
+            "manual_end_semantics": "manual end marks next.done=true and next.truncated=false on the final transition",
+        }
+    return manifest
 
 
 def _recording_manifest_path(dataset_path: Path) -> Path:
@@ -1151,9 +1181,14 @@ def _write_or_validate_recording_manifest(
     cameras: Mapping[str, CameraSpec],
     *,
     resume: bool,
+    include_transition_fields: bool = False,
 ) -> None:
     manifest_path = _recording_manifest_path(dataset_path)
-    expected = build_recording_manifest(config, cameras)
+    expected = build_recording_manifest(
+        config,
+        cameras,
+        include_transition_fields=include_transition_fields,
+    )
     if resume:
         if not manifest_path.is_file():
             raise ValueError(f"Cannot resume: recording manifest is missing at {manifest_path}")
@@ -1168,7 +1203,13 @@ def _write_or_validate_recording_manifest(
     manifest_path.write_text(json.dumps(expected, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def _create_dataset(config: RecorderConfig, cameras: Mapping[str, CameraSpec], *, resume: bool):
+def _create_dataset(
+    config: RecorderConfig,
+    cameras: Mapping[str, CameraSpec],
+    *,
+    resume: bool,
+    include_transition_fields: bool = False,
+):
     from lerobot.datasets import LeRobotDataset
 
     dataset_path, repo_name, version = next_dataset_path(config.output_root, config.dataset_name)
@@ -1184,12 +1225,18 @@ def _create_dataset(config: RecorderConfig, cameras: Mapping[str, CameraSpec], *
             **_dataset_kwargs(config),
         )
         try:
-            _validate_resume_contract(dataset, config, cameras)
+            _validate_resume_contract(
+                dataset,
+                config,
+                cameras,
+                include_transition_fields=include_transition_fields,
+            )
             _write_or_validate_recording_manifest(
                 dataset_path,
                 config,
                 cameras,
                 resume=True,
+                include_transition_fields=include_transition_fields,
             )
         except BaseException:
             dataset.finalize()
@@ -1199,13 +1246,19 @@ def _create_dataset(config: RecorderConfig, cameras: Mapping[str, CameraSpec], *
         repo_id=f"local/{repo_name}",
         root=dataset_path,
         fps=config.fps,
-        features=build_features(cameras),
+        features=build_features(cameras, include_transition_fields=include_transition_fields),
         robot_type=config.robot_type,
         use_videos=True,
         **_dataset_kwargs(config),
     )
     try:
-        _write_or_validate_recording_manifest(dataset_path, config, cameras, resume=False)
+        _write_or_validate_recording_manifest(
+            dataset_path,
+            config,
+            cameras,
+            resume=False,
+            include_transition_fields=include_transition_fields,
+        )
     except BaseException:
         dataset.finalize()
         raise
@@ -1270,6 +1323,7 @@ class KeyboardCommands:
         self._commands: queue.Queue[str] = queue.Queue()
         self._stop = threading.Event()
         self.quit_requested = False
+        self.last_command: str | None = None
         self._thread = threading.Thread(target=self._run, name="recorder-keyboard", daemon=True)
         self._stdin_fd: int | None = None
         self._terminal_settings: list[Any] | None = None
@@ -1367,10 +1421,15 @@ def record_episode(
     episode_index: int,
     *,
     command: KeyboardCommands | None = None,
+    include_transition_fields: bool = False,
 ) -> tuple[bool, int, int]:
     """Record one episode; return ``(saved, frames, dropped_samples)``."""
 
     depth_writer.start_episode(episode_index)
+    if command is not None:
+        # A timeout has no key event. Clear the previous episode's terminal
+        # key so manual reward annotation cannot misclassify it as a normal end.
+        command.last_command = None
     started = time.monotonic()
     frame_index = 0
     dropped = 0
@@ -1388,8 +1447,11 @@ def record_episode(
     while time.monotonic() - started < config.max_episode_time_s:
         if command is not None:
             key = command.get()
-            if key in {"s", "d", "q"}:
-                saved = key == "s"
+            if key in {"s", "e", "d", "q"}:
+                command.last_command = key
+                # ``e`` is the explicit manual-collection end key; ``s`` is
+                # retained for compatibility with the original recorder.
+                saved = key in {"s", "e"}
                 if key == "q":
                     command.quit_requested = True
                 return saved, frame_index, dropped
@@ -1466,6 +1528,14 @@ def record_episode(
                 ),
                 "task": config.task,
             }
+            if include_transition_fields:
+                frame.update(
+                    {
+                        "next.reward": np.zeros((1,), dtype=np.float32),
+                        "next.done": np.zeros((1,), dtype=np.bool_),
+                        "next.truncated": np.zeros((1,), dtype=np.bool_),
+                    }
+                )
             rgb_stamps: dict[str, int] = {}
             for key, camera in cameras.items():
                 image_item = selected["images"][key]

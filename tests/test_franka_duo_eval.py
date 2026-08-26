@@ -171,9 +171,11 @@ def test_native_bundle_requires_manifest_factory_and_preserves_contract(tmp_path
         """
 class Model:
     def predict(self, batch):
-        assert batch['point_cloud'].shape == (1, 8, 3)
-        assert batch['wrist_left'].shape[1] == 3
-        assert batch['wrist_right'].shape[1] == 3
+        assert batch['point_cloud'].shape == (1, 1, 8, 3)
+        assert batch['wrist_left'].shape[1] == 1
+        assert batch['wrist_left'].shape[2] == 3
+        assert batch['wrist_right'].shape[1] == 1
+        assert batch['wrist_right'].shape[2] == 3
         return [0.0] * 20
 def make(bundle_dir, device):
     return Model()
@@ -190,6 +192,30 @@ def make(bundle_dir, device):
         "wrist_right": np.zeros((6, 16, 3), dtype=np.uint8),
     }
     np.testing.assert_equal(bundle.predict(observation), np.zeros(20, dtype=np.float32))
+
+
+def test_checkpoint_can_use_external_manifest(tmp_path):
+    checkpoint = tmp_path / "pretrained_model"
+    checkpoint.mkdir()
+    (tmp_path / "external_factory.py").write_text(
+        """
+class Model:
+    def select_action(self, batch):
+        return [0.0] * 20
+def make(bundle_dir, device):
+    assert bundle_dir.name == 'pretrained_model'
+    return Model()
+""",
+        encoding="utf-8",
+    )
+    manifest = _native_manifest()
+    manifest["native"] = {"factory": "external_factory:make", "python_root": ".."}
+    manifest_path = tmp_path / "franka_eval_manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    bundle = load_policy_bundle(checkpoint, device="cpu", manifest_path=manifest_path)
+    assert bundle.predict(
+        {"point_cloud": np.zeros((8, 3), dtype=np.float32), "wrist_left": np.zeros((2, 2, 3), np.uint8), "wrist_right": np.zeros((2, 2, 3), np.uint8)}
+    ).shape == (20,)
 
 
 def test_native_input_uses_manifest_image_keys_for_custom_names():

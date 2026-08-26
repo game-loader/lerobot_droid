@@ -13,11 +13,11 @@ fi
 
 CONFIG="${FRANKA_EVAL_CONFIG:-${SCRIPT_DIR}/eval_config.yaml}"
 if [[ $# -lt 1 ]]; then
-  echo "usage: $0 /path/to/model_bundle [eval options...]" >&2
+  echo "usage: $0 /path/to/checkpoint-or-bundle [eval options...]" >&2
   exit 2
 fi
-BUNDLE="$1"
+CHECKPOINT="$1"
 shift
 cd "${REPO_ROOT}"
 exec uv run --project "${REPO_ROOT}" python -m examples.franka_duo_real_recorder.eval_franka_duo \
-  --bundle "${BUNDLE}" --config "${CONFIG}" "$@"
+  --checkpoint "${CHECKPOINT}" --config "${CONFIG}" "$@"

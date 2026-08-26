@@ -338,12 +338,12 @@ class _NativePredictor:
             history = self._history.setdefault(key, [])
             history.append(tensor)
             del history[:-self.n_obs_steps]
-            if self.n_obs_steps > 1:
-                while len(history) < self.n_obs_steps:
-                    history.insert(0, history[0])
-                batch[key] = torch.cat(history, dim=1)
-            else:
-                batch[key] = tensor
+            while len(history) < self.n_obs_steps:
+                history.insert(0, history[0])
+            # RL-100 policies consume (batch, observation_steps, ...).  A
+            # concat here would merge point rows or image channels instead of
+            # creating the temporal axis.
+            batch[key] = torch.stack(history, dim=1)
         return batch
 
     def predict(self, observation: dict[str, np.ndarray]) -> np.ndarray:
@@ -410,11 +410,22 @@ def _load_native(bundle_dir: Path, manifest: dict[str, Any], device: str) -> Pol
     )
 
 
-def load_policy_bundle(path: Path, *, device: str = "auto") -> PolicyBundle:
-    """Load and validate an exported bundle before ROS subscriptions start."""
+def load_policy_bundle(
+    path: Path,
+    *,
+    device: str = "auto",
+    manifest_path: Path | None = None,
+) -> PolicyBundle:
+    """Load and validate an exported bundle/checkpoint before ROS subscriptions.
+
+    ``path`` may be either a bundle directory containing ``manifest.json`` or
+    a bare LeRobot/RL-100 checkpoint when ``manifest_path`` points at a separate
+    contract file.  A checkpoint without an explicit manifest is rejected.
+    """
 
     bundle_dir = Path(path).expanduser().resolve()
-    manifest = _read_json(bundle_dir / MANIFEST_NAME, "policy bundle manifest")
+    contract_path = Path(manifest_path).expanduser().resolve() if manifest_path else bundle_dir / MANIFEST_NAME
+    manifest = _read_json(contract_path, "policy bundle manifest")
     version = int(manifest.get("manifest_version", 1))
     if version != 1:
         raise ValueError(f"Unsupported policy bundle manifest_version={version}")

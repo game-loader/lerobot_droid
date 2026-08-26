@@ -212,7 +212,19 @@ def build_policy_observation(observation: SynchronizedObservation, manifest: Map
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bundle", type=Path, required=True, help="Exported model bundle directory")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--bundle", type=Path, help="Exported model bundle directory")
+    source.add_argument(
+        "--checkpoint",
+        type=Path,
+        help="Bare checkpoint directory; pair with --manifest when manifest.json is not inside it",
+    )
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=None,
+        help="Explicit manifest for --checkpoint (manifest paths are resolved separately from weights)",
+    )
     parser.add_argument("--config", type=Path, default=None, help="ROS topics/camera YAML or JSON")
     parser.add_argument("--device", default="auto", help="torch device used by the policy")
     parser.add_argument("--publish", action="store_true", help="Publish to the configured relay topic")
@@ -288,7 +300,14 @@ def _action_record(observation: SynchronizedObservation, action: np.ndarray) -> 
 
 def run(args: argparse.Namespace) -> int:
     config = load_eval_config(args.config)
-    bundle: PolicyBundle = load_policy_bundle(args.bundle, device=args.device)
+    checkpoint = args.bundle if args.bundle is not None else args.checkpoint
+    if args.manifest is not None and args.bundle is not None:
+        raise ValueError("--manifest is only needed with --checkpoint")
+    bundle: PolicyBundle = load_policy_bundle(
+        checkpoint,
+        device=args.device,
+        manifest_path=args.manifest,
+    )
     action_spec: FrankaDuoActionSpec = bundle.action_spec
     pointcloud: PointCloudConfig = bundle.pointcloud_config
     require_state = bool(getattr(bundle, "requires_state", False))
