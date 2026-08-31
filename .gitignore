@@ -172,6 +172,10 @@ outputs/
 
 # Dev folders
 .cache/*
+.agents/
+.camera-cache/
+.hf-datasets-cache/
+.uv-cache/
 *.stl
 *.urdf
 *.xml

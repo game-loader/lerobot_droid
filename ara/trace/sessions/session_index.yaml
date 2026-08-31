@@ -76,3 +76,38 @@ sessions:
     events_count: 3
     claims_touched: []
     open_threads: 1
+  - id: "2026-08-26_001"
+    date: "2026-08-26"
+    summary: Scoped and validated DP3 for real Franka Duo ZED depth, dual scratch-ResNet18 wrist RGB, pose/joint/gripper 40D state, and 24D action.
+    turn_count: 3
+    events_count: 5
+    claims_touched: []
+    open_threads: 1
+  - id: "2026-08-27_001"
+    date: "2026-08-27"
+    summary: Reduced DP3 to a 34D state and 18D action, measured the 2048-point XYZ PointNet at 59,072 parameters, integrated multimodal DP3 with offline RL-100, made online PPO explicitly real-robot only, and verified RL-100 AM-Q's 3D latent observation flow and shared initial conditioning with IL.
+    turn_count: 7
+    events_count: 12
+    claims_touched: []
+    open_threads: 2
+  - id: "2026-08-27_002"
+    date: "2026-08-27"
+    summary: Fixed DP3 IL augmentation to be deterministic, audited the canonical reward-bearing v3 schema, and documented the DP3/RL-100 dataset contract.
+    turn_count: 1
+    events_count: 2
+    claims_touched: []
+    open_threads: 1
+  - id: "2026-08-27_003"
+    date: "2026-08-27"
+    summary: "Completed DP3 IL at 50k, launched offline RL-100 from the terminal checkpoint, validated real-machine export, and confirmed the real-machine evaluator integration is tested while IQL warm-up continues."
+    turn_count: 5
+    events_count: 11
+    claims_touched: []
+    open_threads: 3
+  - id: "2026-08-28_001"
+    date: "2026-08-28"
+    summary: Audited shared HF cache usage, patched launcher exports, and recorded offline RL termination at sync 11 without a final checkpoint.
+    turn_count: 1
+    events_count: 2
+    claims_touched: []
+    open_threads: 2

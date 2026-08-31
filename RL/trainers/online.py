@@ -101,7 +101,7 @@ def _env_action_bounds(
     if space is None:
         space = getattr(env, "action_space", None)
     if space is None:
-        return
+        return None
     low = getattr(space, "low", None)
     high = getattr(space, "high", None)
     shape = getattr(space, "shape", None)
@@ -187,17 +187,125 @@ def _raw_feature_mapping(raw: Any, *, num_envs: int) -> dict[str, Tensor]:
     else:
         result = {"observation.state": _as_tensor(raw)}
 
-    for key, value in result.items():
-        if value.ndim == 0 or value.shape[0] != num_envs:
-            raise ValueError(
-                f"observation feature {key!r} must have leading dimension {num_envs}, "
-                f"got {tuple(value.shape)}"
-            )
+    for key, value in list(result.items()):
+        if value.ndim == 0:
+            raise ValueError(f"observation feature {key!r} must not be scalar")
+        if value.shape[0] != num_envs:
+            # A single real robot commonly exposes unbatched observations
+            # (state=[D], image=[C,H,W], point cloud=[P,3]).  Treat these as
+            # a one-world vector environment while preserving strict checks
+            # for genuinely batched environments.
+            if num_envs == 1:
+                value = value.unsqueeze(0)
+                result[key] = value
+            else:
+                raise ValueError(
+                    f"observation feature {key!r} must have leading dimension {num_envs}, "
+                    f"got {tuple(value.shape)}"
+                )
         if value.is_floating_point() and not torch.isfinite(value).all().item():
             raise ValueError(f"observation feature {key!r} contains non-finite values")
     if "observation.state" not in result:
         raise ValueError("online state path requires an observation.state feature")
     return result
+
+
+def _final_observation_rows(raw: Any, *, num_envs: int) -> list[dict[str, Tensor] | None]:
+    """Normalize Gymnasium ``final_obs`` payloads into per-world feature rows.
+
+    Vector environments commonly expose terminal observations as an object
+    array of mappings, while some adapters return a dense batched state array.
+    This helper deliberately has no simulator-specific assumptions (in
+    particular, no fixed 39D state width), so DP3 real-robot observations are
+    handled exactly like state-only observations.
+    """
+
+    if isinstance(raw, Mapping):
+        mapped = _raw_feature_mapping(raw, num_envs=num_envs)
+        return [
+            {key: value[index].clone() for key, value in mapped.items()}
+            for index in range(num_envs)
+        ]
+
+    array = np.asarray(raw)
+    # Dense numeric arrays are interpreted as a single state feature.  This
+    # covers the common ``final_obs: [N, state_dim]`` contract.
+    if array.dtype != object and array.ndim >= 1 and array.shape[0] == num_envs:
+        mapped = _raw_feature_mapping(array, num_envs=num_envs)
+        return [
+            {key: value[index].clone() for key, value in mapped.items()}
+            for index in range(num_envs)
+        ]
+
+    object_rows = np.asarray(raw, dtype=object).reshape(-1)
+    if object_rows.shape != (num_envs,):
+        raise ValueError(
+            f"final observation payload must have one row per environment, got {object_rows.shape}"
+        )
+    rows: list[dict[str, Tensor] | None] = []
+    for _index, item in enumerate(object_rows.tolist()):
+        if item is None:
+            rows.append(None)
+            continue
+        mapped = _raw_feature_mapping(item, num_envs=1)
+        rows.append({key: value[0].clone() for key, value in mapped.items()})
+    return rows
+
+
+def _select_transition_frames(
+    next_frames: Mapping[str, Tensor],
+    info: Mapping[str, Any],
+    done: np.ndarray,
+    *,
+    num_envs: int,
+) -> dict[str, Tensor]:
+    """Replace SAME_STEP reset frames with terminal ``final_obs`` rows.
+
+    Real-robot adapters usually return the terminal observation directly and
+    therefore do not provide ``final_obs``.  If a vector wrapper does expose
+    SAME_STEP payloads, this generic path keeps state, point cloud, and image
+    features aligned without importing a simulator adapter.
+    """
+
+    final_key = next(
+        (key for key in ("final_obs", "final_observation") if key in info), None
+    )
+    if final_key is None:
+        return {key: value.clone() for key, value in next_frames.items()}
+
+    for mask_key in (
+        "_final_obs",
+        "_final_observation",
+        "final_obs_mask",
+        "final_observation_mask",
+    ):
+        if mask_key in info:
+            mask = _as_bool_vector(info[mask_key], num_envs, name=f"info[{mask_key}]")
+            if not np.array_equal(mask, done):
+                raise ValueError(f"info[{mask_key}] mask does not match done")
+
+    rows = _final_observation_rows(info[final_key], num_envs=num_envs)
+    selected = {key: value.clone() for key, value in next_frames.items()}
+    for world in np.flatnonzero(done):
+        row = rows[int(world)]
+        if row is None:
+            raise ValueError(f"done world {int(world)} is missing final observation")
+        for key, base in next_frames.items():
+            if key not in row:
+                raise ValueError(
+                    f"done world {int(world)} final observation is missing feature {key!r}"
+                )
+            value = row[key]
+            expected_shape = tuple(base.shape[1:])
+            if tuple(value.shape) != expected_shape:
+                raise ValueError(
+                    f"final observation feature {key!r} shape {tuple(value.shape)} "
+                    f"does not match {expected_shape}"
+                )
+            selected[key][int(world)] = value.to(
+                device=base.device, dtype=base.dtype
+            )
+    return selected
 
 
 def _reset_history(features: Mapping[str, Tensor], n_obs_steps: int) -> dict[str, Tensor]:
@@ -372,9 +480,9 @@ class OnlineRolloutBatch:
                 raise ValueError("executed_steps must have integer dtype")
             if not torch.isfinite(value).all().item():
                 raise ValueError(f"{name} contains non-finite values")
-        reward_values = self.reward.float()
-        if not torch.all((reward_values == 0.0) | (reward_values == 1.0)).item():
-            raise ValueError("reward must contain only sparse binary values 0 or 1")
+        # Rewards are finite transition scalars.  RL-100's default Moya
+        # contract is sparse terminal binary reward, but a real-robot
+        # environment may provide dense shaping through the same Gym API.
         discount_values = self.discount.float()
         if torch.any((discount_values < 0.0) | (discount_values > 1.0)).item():
             raise ValueError("discount must lie in [0, 1]")
@@ -474,6 +582,7 @@ class OnlineTrainer:
         debug: bool = False,
         image_encoder: ObservationFeatureEncoder | None = None,
         value_hidden_dims: Sequence[int] = (128, 128),
+        reward_mode: str = "terminal_success",
     ) -> None:
         if not isinstance(current_policy, DiffusionRLAdapter):
             raise ValueError("current_policy must be a DiffusionRLAdapter")
@@ -508,6 +617,11 @@ class OnlineTrainer:
             raise ValueError("minibatch_size must be positive when supplied")
         if isinstance(seed, bool) or not isinstance(seed, int):
             raise ValueError("seed must be an integer")
+        if reward_mode not in {"terminal_success", "environment"}:
+            raise ValueError(
+                "reward_mode must be 'terminal_success' or 'environment', "
+                f"got {reward_mode!r}"
+            )
 
         self.current_policy = current_policy
         self.old_policy = old_policy
@@ -530,6 +644,7 @@ class OnlineTrainer:
         self.ppo_epochs = ppo_epochs
         self.minibatch_size = minibatch_size
         self.seed = seed
+        self.reward_mode = reward_mode
         self.logger = logger
         if not isinstance(debug, bool):
             raise ValueError("debug must be a bool")
@@ -557,6 +672,7 @@ class OnlineTrainer:
                     hidden_dims=(128, 128),
                     output_dim=128,
                     image_encoder=image_encoder,
+                    ignore_extra_features=True,
                 )
             value_network = StateValueNetwork(value_encoder, hidden_dims=value_hidden_dims)
         if not isinstance(value_network, nn.Module):
@@ -626,6 +742,7 @@ class OnlineTrainer:
             "ppo_epochs": self.ppo_epochs,
             "minibatch_size": self.minibatch_size,
             "seed": self.seed,
+            "reward_mode": self.reward_mode,
             **self._runtime_contract,
         }
 
@@ -641,7 +758,11 @@ class OnlineTrainer:
 
     def _value(self, observation: ObservationBatch) -> Tensor:
         normalized = self.current_policy.checkpoint.normalize_observation(
-            observation.to(self.value_device)
+            observation.to(self.value_device),
+            # Real-robot camera streams commonly arrive as uint8.  Convert
+            # them to [0, 1] before applying the checkpoint visual statistics,
+            # matching the actor/DP3 AM-Q preprocessing path.
+            convert_visual_uint8=True,
         )
         value = self.value_network(normalized)
         if value.ndim == 1:
@@ -698,6 +819,59 @@ class OnlineTrainer:
                 raise ValueError("vector environment reset info must be a mapping")
             return observation, info
         return result, {}
+
+    @staticmethod
+    def _terminal_success(
+        info: Mapping[str, Any], done: np.ndarray, reward: np.ndarray
+    ) -> np.ndarray:
+        """Extract terminal success when available, with reward fallback.
+
+        Moya supplies ``final_info[*]["is_success"]``.  A real-robot adapter
+        may instead expose ``is_success``/``success`` directly, or only a
+        positive terminal reward.  All forms are normalized to one boolean
+        per environment and nonterminal rows are forced false.
+        """
+
+        num_envs = int(done.shape[0])
+        result: np.ndarray = np.zeros(num_envs, dtype=np.bool_)
+        found: np.ndarray = np.zeros(num_envs, dtype=np.bool_)
+
+        raw_final = info.get("final_info")
+        if isinstance(raw_final, Mapping):
+            for key in ("is_success", "success"):
+                if key in raw_final:
+                    values = _as_bool_vector(raw_final[key], num_envs, name=f"final_info[{key}]")
+                    result[:] = values
+                    found[:] = True
+                    break
+        elif raw_final is not None:
+            array = np.asarray(raw_final, dtype=object).reshape(num_envs)
+            for index, item in enumerate(array.tolist()):
+                if isinstance(item, Mapping):
+                    for key in ("is_success", "success"):
+                        if key in item:
+                            value = item[key]
+                            if not isinstance(value, (bool, np.bool_)):
+                                raise ValueError(
+                                    f"final_info[{index}][{key}] must be bool, got {value!r}"
+                                )
+                            result[index] = bool(value)
+                            found[index] = True
+                            break
+
+        for key in ("is_success", "success"):
+            if key not in info:
+                continue
+            values = _as_bool_vector(info[key], num_envs, name=f"info[{key}]")
+            result[~found] = values[~found]
+            found |= ~found
+            break
+
+        # Positive terminal reward is the least-surprising fallback for a
+        # generic environment that does not provide a separate success flag.
+        result[~found] = reward[~found] > 0
+        result[~done] = False
+        return result
 
     def collect(
         self,
@@ -757,8 +931,8 @@ class OnlineTrainer:
             terminal_history: dict[int, dict[str, Tensor]] = {}
             working_history = {key: history_value.clone() for key, history_value in policy_history.items()}
             working_frames = {key: frame_value.clone() for key, frame_value in current_frames.items()}
-            term_row = np.zeros(num_envs, dtype=np.bool_)
-            trunc_row = np.zeros(num_envs, dtype=np.bool_)
+            term_row: np.ndarray = np.zeros(num_envs, dtype=np.bool_)
+            trunc_row: np.ndarray = np.zeros(num_envs, dtype=np.bool_)
 
             for action_index in range(chunk_size):
                 action_np = raw_chunk[:, action_index, :].detach().to("cpu").numpy().astype(np.float32, copy=False)
@@ -788,27 +962,13 @@ class OnlineTrainer:
                 reset_frames = _move_features(
                     _raw_feature_mapping(next_raw, num_envs=num_envs), self.device
                 )
-                next_frames = {key: value.clone() for key, value in reset_frames.items()}
-                # The adapter selects final_obs only for done worlds.  Import
-                # lazily so state-only unit tests do not import Newton.
-                from RL.adapters.moya_newton import select_transition_next_state
-
-                next_state = select_transition_next_state(
-                    next_frames["observation.state"].detach().cpu().numpy(), info, done_np
+                # SAME_STEP vector environments may provide terminal
+                # ``final_obs`` payloads.  Use the generic adapter for all
+                # modalities; real-robot environments normally return their
+                # terminal observation directly and omit this payload.
+                next_frames = _select_transition_frames(
+                    reset_frames, info, done_np, num_envs=num_envs
                 )
-                next_frames["observation.state"] = torch.as_tensor(
-                    next_state, dtype=torch.float32, device=self.device
-                )
-                image_keys = [
-                    key
-                    for key, value in reset_frames.items()
-                    if key != "observation.state" and is_image_feature(key, value)
-                ]
-                if np.any(newly_done) and image_keys:
-                    raise ValueError(
-                        "terminal image observations require a final_obs image adapter; "
-                        f"cannot safely use SAME_STEP reset images for {image_keys}"
-                    )
 
                 # Build one terminal-aware history for the stored transition,
                 # while continuing the next policy history from SAME_STEP's
@@ -822,11 +982,19 @@ class OnlineTrainer:
                             key: terminal_appended[key][world].clone()
                             for key in terminal_appended
                         }
-                        from RL.adapters.moya_newton import extract_terminal_success
-
-                        final_success = bool(extract_terminal_success(info, done_np)[world])
+                        final_success = bool(
+                            self._terminal_success(info, done_np, _env_reward)[world]
+                        )
                         success_row[world] = final_success
-                        reward_row[world] = float(final_success)
+                        if self.reward_mode == "terminal_success":
+                            reward_row[world] = float(final_success)
+
+                if self.reward_mode == "environment":
+                    reward_row += torch.as_tensor(
+                        _env_reward * active_np,
+                        dtype=torch.float32,
+                        device=self.device,
+                    )
                 working_history = _append_history(working_history, reset_frames)
                 working_frames = reset_frames
 

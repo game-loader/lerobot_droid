@@ -30,7 +30,7 @@ from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import FeatureType
 from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
-from lerobot.policies.factory import make_pre_post_processors
+from lerobot.policies.factory import get_policy_class, make_pre_post_processors
 from lerobot.processor.normalize_processor import (
     NormalizerProcessorStep,
     UnnormalizerProcessorStep,
@@ -304,6 +304,10 @@ def _validate_processor_compatibility(
 class CheckpointAdapter:
     """Policy plus the exact saved normalization contract used to train it."""
 
+    # DP3Policy subclasses DiffusionPolicy and reuses the same denoising
+    # interface.  Keep this annotation at the common base so standard
+    # DiffusionPolicy checkpoints and multimodal DP3 checkpoints share one
+    # adapter contract.
     policy: DiffusionPolicy
     preprocessor: PolicyProcessorPipeline
     postprocessor: PolicyProcessorPipeline
@@ -342,7 +346,18 @@ class CheckpointAdapter:
                 f"checkpoint must contain a DiffusionConfig, got {type(config).__name__}"
             )
         config.device = device_name
-        policy = DiffusionPolicy.from_pretrained(checkpoint, config=config, strict=True)
+        # Select the concrete policy implementation encoded by the checkpoint
+        # config.  Calling DiffusionPolicy.from_pretrained unconditionally
+        # would construct a vanilla state/image model and fail strict loading
+        # for DP3 checkpoints whose state dict contains the point-cloud and
+        # dual-wrist encoders.
+        policy_cls = get_policy_class(config.type)
+        if not issubclass(policy_cls, DiffusionPolicy):
+            raise ValueError(
+                "RL diffusion checkpoint adapter only supports DiffusionPolicy "
+                f"implementations, got policy type {config.type!r} ({policy_cls.__name__})"
+            )
+        policy = policy_cls.from_pretrained(checkpoint, config=config, strict=True)
         policy.to(device)
         policy.eval()
         device_override = {"device_processor": {"device": device_name}}
@@ -384,13 +399,26 @@ class CheckpointAdapter:
     def active_action_indices(self) -> Tensor:
         return torch.nonzero(self.active_action_mask, as_tuple=False).flatten()
 
-    def normalize_observation(self, observation: ObservationBatch) -> ObservationBatch:
+    def normalize_observation(
+        self, observation: ObservationBatch, *, convert_visual_uint8: bool = False
+    ) -> ObservationBatch:
         if not isinstance(observation, ObservationBatch):
             raise ValueError(
                 f"observation must be an ObservationBatch, got {type(observation).__name__}"
             )
+        if not isinstance(convert_visual_uint8, bool):
+            raise ValueError("convert_visual_uint8 must be a bool")
         prepared = {
-            key: value.float() if value.is_floating_point() else value
+            key: (
+                value.float() / 255.0
+                if convert_visual_uint8
+                and value.dtype == torch.uint8
+                and self._normalizer.features.get(key, None) is not None
+                and self._normalizer.features[key].type is FeatureType.VISUAL
+                else value.float()
+                if value.is_floating_point()
+                else value
+            )
             for key, value in observation.features.items()
         }
         normalized = self._normalizer._normalize_observation(prepared, inverse=False)

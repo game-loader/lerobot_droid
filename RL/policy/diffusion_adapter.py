@@ -259,7 +259,9 @@ class DiffusionRLAdapter:
             )
         device = get_device_from_parameters(self.policy)
         dtype = get_dtype_from_parameters(self.policy)
-        normalized = self.checkpoint.normalize_observation(observation.to(device))
+        normalized = self.checkpoint.normalize_observation(
+            observation.to(device), convert_visual_uint8=True
+        )
         batch = {
             key: value.to(dtype=dtype) if value.is_floating_point() else value
             for key, value in normalized.features.items()
@@ -294,17 +296,22 @@ class DiffusionRLAdapter:
             raise ValueError("policy conditioning contains non-finite values")
         return conditioning
 
-    def sample_trace(
+    def _sample_trace_with_conditioning(
         self,
-        observation: ObservationBatch,
+        global_cond: Tensor,
         *,
         generator: torch.Generator | None = None,
     ) -> DenoisingTrace:
-        """Sample a detached complete trace from the current policy."""
-
         device = get_device_from_parameters(self.policy)
         dtype = get_dtype_from_parameters(self.policy)
-        batch_size = observation.batch_size()
+        if not isinstance(global_cond, Tensor) or global_cond.ndim != 2:
+            raise ValueError(
+                "global_cond must have shape [batch,conditioning_dim], "
+                f"got {getattr(global_cond, 'shape', None)}"
+            )
+        if not global_cond.is_floating_point() or not torch.isfinite(global_cond).all().item():
+            raise ValueError("global_cond must be finite floating-point values")
+        batch_size = global_cond.shape[0]
         horizon = self.policy.config.horizon
         action_dim = self.policy.config.action_feature.shape[0]
         latents: list[Tensor] = []
@@ -313,7 +320,7 @@ class DiffusionRLAdapter:
         self.policy.eval()
         _validate_generator_device(generator, device)
         with torch.no_grad():
-            global_cond = self._prepare_global_conditioning(observation)
+            global_cond = global_cond.to(device=device, dtype=dtype)
             sample = torch.randn(
                 (batch_size, horizon, action_dim),
                 dtype=dtype,
@@ -354,6 +361,34 @@ class DiffusionRLAdapter:
             old_log_prob=torch.stack(log_probs),
             final_actions=sample.detach(),
         )
+
+    def sample_trace(
+        self,
+        observation: ObservationBatch,
+        *,
+        generator: torch.Generator | None = None,
+    ) -> DenoisingTrace:
+        """Sample a detached complete trace from a raw observation."""
+
+        return self._sample_trace_with_conditioning(
+            self._prepare_global_conditioning(observation),
+            generator=generator,
+        )
+
+    def sample_trace_from_features(
+        self,
+        features: Tensor,
+        *,
+        generator: torch.Generator | None = None,
+    ) -> DenoisingTrace:
+        """Sample using a precomputed policy-conditioning latent.
+
+        RL-100's 3D AM-Q rollout evolves DP3 encoder features.  This method
+        bypasses re-encoding static point clouds/RGB and feeds the predicted
+        latent directly to the diffusion denoiser.
+        """
+
+        return self._sample_trace_with_conditioning(features, generator=generator)
 
     def _validate_trace(self, observation: ObservationBatch, trace: DenoisingTrace) -> None:
         if not isinstance(trace, DenoisingTrace):

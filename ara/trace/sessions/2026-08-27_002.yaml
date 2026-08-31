@@ -1,0 +1,69 @@
+session:
+  id: "2026-08-27_002"
+  date: "2026-08-27"
+  started: "2026-08-27T23:56:00+08:00"
+  last_turn: "2026-08-27T23:59:00+08:00"
+  turn_count: 1
+  summary: >-
+    Fixed the DP3 IL augmentation policy to deterministic crops and point
+    handling, audited the canonical LeRobot v3 reward columns and summary
+    fallback, and documented the resulting DP3/RL-100 dataset contract.
+
+events_logged:
+  - turn: 1
+    type: decision
+    id: N103
+    routing: direct
+    provenance: user
+    summary: >-
+      DP3 IL must not use random image crops or random point-cloud
+      subsampling; both configuration flags remain false by default and
+      stochastic opt-in is rejected.
+    evidence:
+      - src/lerobot/policies/dp3/configuration_dp3.py
+      - tests/policies/test_dp3.py
+  - turn: 1
+    type: experiment
+    id: N104
+    routing: direct
+    provenance: ai-executed
+    summary: >-
+      Verified canonical RL fields next.reward, next.done, and next.truncated
+      in v3 info/parquet, all-or-none validation, sparse terminal semantics,
+      legacy summary synthesis, and DP3 checkpoint-derived 34D/18D loading.
+    evidence:
+      - src/lerobot/utils/constants.py
+      - RL/adapters/lerobot_v3.py
+      - RL/cli/train_offline.py
+      - tests/rl100/test_lerobot_v3_adapter.py
+      - tests/rl100/test_lerobot_v3_merge.py
+      - docs/source/dp3.mdx
+
+ai_actions:
+  - turn: 1
+    action: >-
+      Ran the DP3 and RL-100 focused suite after deterministic augmentation
+      changes: 341 tests passed and 2 were skipped; updated DP3 and RL README
+      documentation with the reward schema and no-random-augmentation rule.
+    provenance: ai-executed
+    files_changed:
+      - docs/source/dp3.mdx
+      - RL/README.md
+      - ara/trace/exploration_tree.yaml
+      - ara/trace/pm_reasoning_log.yaml
+      - ara/trace/sessions/2026-08-27_002.yaml
+
+claims_touched: []
+logic_revisions: []
+key_context:
+  - turn: 1
+    excerpt: >-
+      The user specified that IL does not need random crop or random point-cloud
+      sampling and asked for the exact reward-bearing LeRobot dataset format
+      and its changes relative to v3.
+open_threads:
+  - >-
+    The current offline dynamics reward head still assumes binary sparse
+    rewards; dense offline rewards would require a regression loss and a
+    revised canonical contract.
+ai_suggestions_pending: []

@@ -63,6 +63,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         encoder_threads: int | None = None,
         streaming_encoding: bool = False,
         encoder_queue_maxsize: int = 30,
+        camera_frame_cache: dict[int, dict[str, torch.Tensor]] | None = None,
     ):
         """
         2 modes are available for instantiating this class, depending on 2 different use cases:
@@ -208,6 +209,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self.revision = revision if revision else CODEBASE_VERSION
         self._video_backend = video_backend if video_backend else get_safe_default_video_backend()
         self._return_uint8 = return_uint8
+        self._camera_frame_cache = camera_frame_cache
         self._batch_encoding_size = batch_encoding_size
         self._encoder_threads = encoder_threads
 
@@ -248,6 +250,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
             delta_timestamps=delta_timestamps,
             image_transforms=image_transforms,
             return_uint8=self._return_uint8,
+            camera_frame_cache=self._camera_frame_cache,
         )
 
         # Load actual data
@@ -315,6 +318,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 delta_timestamps=self.delta_timestamps,
                 image_transforms=self.image_transforms,
                 return_uint8=self._return_uint8,
+                camera_frame_cache=self._camera_frame_cache,
             )
         return self.reader
 
@@ -515,6 +519,35 @@ class LeRobotDataset(torch.utils.data.Dataset):
         """Remove the transform applied to visual observations."""
         self.set_image_transforms(None)
 
+    def preload_camera_frame_cache(self) -> dict[str, int | float]:
+        """Decode selected camera videos once and cache raw RGB frames in RAM.
+
+        Frames are cached below image transforms and policy encoders, preserving
+        the exact normalization/augmentation behavior used by normal training.
+        The returned summary contains the number of unique frames and bytes
+        resident in the cache.
+        """
+
+        if self.writer is not None and not self._is_finalized:
+            raise RuntimeError("Cannot preload camera frames while a dataset is being recorded")
+        reader = self._ensure_reader()
+        if reader.hf_dataset is None:
+            reader.load_and_activate()
+        summary = reader.preload_camera_frame_cache()
+        self._camera_frame_cache = reader._camera_frame_cache
+        return summary
+
+    def preload_camera_frame_cache_disk(self) -> dict[str, int | float]:
+        """Decode selected camera videos into a reusable disk-backed cache."""
+        if self.writer is not None and not self._is_finalized:
+            raise RuntimeError("Cannot preload camera frames while a dataset is being recorded")
+        reader = self._ensure_reader()
+        if reader.hf_dataset is None:
+            reader.load_and_activate()
+        summary = reader.preload_camera_frame_cache_disk()
+        self._camera_frame_cache = reader._camera_frame_cache
+        return summary
+
     # ── Hub methods (stay on facade) ──────────────────────────────────
 
     def push_to_hub(
@@ -711,6 +744,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         obj.episodes = None
         obj._video_backend = video_backend if video_backend is not None else get_safe_default_video_backend()
         obj._return_uint8 = False
+        obj._camera_frame_cache = None
         obj._batch_encoding_size = batch_encoding_size
         obj._encoder_threads = encoder_threads
 
@@ -805,6 +839,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         obj.episodes = None
         obj._video_backend = video_backend if video_backend else get_safe_default_video_backend()
         obj._return_uint8 = False
+        obj._camera_frame_cache = None
         obj._batch_encoding_size = batch_encoding_size
 
         if obj._requested_root is not None:

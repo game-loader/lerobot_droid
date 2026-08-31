@@ -15,6 +15,11 @@ Sim。真机驱动可以直接发布这些 topic，也可以使用 ROS relay 做
 - ZED Mini 深度不放入 LeRobot RGB 视频，而写入
   `franka_duo_extras/episode_NNNNNN/`。
 
+本采集器是当前 DP3 变体的真机数据源：训练时从 ZED Mini depth sidecar 生成一个
+固定点数的 XYZ 点云，从左右 D405 视频读取两个腕部 RGB。采集器原始数据契约仍是
+17 维 state/action；它不会猜测或补造 DP3 所需的 34 维 state、18 维 action。必须在
+派生训练集阶段提供显式字段映射，并在部署阶段提供对应的 18 维控制映射。
+
 ### D405 官方模式
 
 RealSense D400 Series Datasheet（Revision 023，2026-03，Table 4-4）列出的
@@ -156,29 +161,38 @@ uv run python examples/franka_duo_real_recorder/validate_dataset.py \
 
 ## DP3 点云派生集
 
-本分支已引入 LeRobot 原生 `dp3` policy。其输入契约是固定数量点云（默认
-512 点）和 `observation.state`；它复用 LeRobot Diffusion 的 UNet、processor
-和 checkpoint 机制，但不直接加载 RL-100 `RL1003D` checkpoint，需要用真机
-数据重新训练。
+本分支已引入 LeRobot 原生 `dp3` policy。当前模型输入契约是固定数量 XYZ
+点云（默认 2048 点）、左右腕 RGB 和 34 维 `observation.state`，输出 18 维
+`action`。左右腕分别使用从零初始化的 ResNet18；点云编码仍采用 RL-100 的共享
+MLP、global max pooling 和 projection。它复用 LeRobot Diffusion 的 UNet、
+processor 和 checkpoint 机制，但不直接加载 RL-100 `RL1003D` checkpoint。
 
-采集完成后，从已同步 ZED depth sidecar 生成纯点云 LeRobot v3 派生集：
+采集完成后，从已同步 ZED depth sidecar 生成点云并保留腕部 RGB 的 LeRobot v3 真机
+派生集：
 
 ```bash
 uv run python examples/franka_duo_real_recorder/build_pointcloud_dataset.py \
   --dataset-root datasets/franka_duo/franka_duo_real_v1 \
   --output-root datasets/franka_duo/franka_duo_real_dp3_v1 \
-  --num-points 512 \
+  --num-points 2048 \
+  --keep-videos \
   --workspace-min=-0.8,-0.8,0.0 \
   --workspace-max=0.8,0.8,1.5
 ```
 
 默认要求采集时已有 `head_to_robot_base_transform`，否则必须显式传
 `--extrinsics`。只有确实接受相机坐标系训练时才使用 `--allow-camera-frame`。
-默认移除三路 RGB 视频，避免 DP3 训练仍解码不用的图像；`--keep-videos` 可保留。
-派生集会重算 numeric stats，并在 `pointcloud_extras/` 保存每帧来源、完整标定和
-SHA-256 provenance。训练参数见 `docs/source/dp3.mdx`。
+必须传 `--keep-videos` 保留左右腕 RGB；模型会忽略额外的 head RGB。当前 recorder
+原始 state/action 是 17/17 维，不能直接用于该 34/18 模型，训练前必须通过数据适配
+明确生成 34 维 state 与 18 维 action。派生集会重算 numeric stats，并在
+`pointcloud_extras/` 保存每帧来源、完整标定和 SHA-256 provenance。训练参数见
+`docs/source/dp3.mdx`。
 
 ## 真机策略 Eval（训练与测试分离）
+
+注意：下述 Franka evaluator 当前使用 20 维 Cartesian action contract，不能直接加载
+本节的 18 维 DP3 输出。部署前必须先为 18 维 action 定义明确的控制映射并同步修改
+`action_spec` 与 evaluator 校验，不能截断或猜测维度含义。
 
 `eval_franka_duo.py` 只读取已经导出的模型 bundle，不读取训练目录中的优化器或
 RL replay 状态。它在每个新的 ZED head RGB 时间戳上同步：

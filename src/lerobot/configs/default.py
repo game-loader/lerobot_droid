@@ -38,6 +38,11 @@ class DatasetConfig:
     # When True, video frames are returned as uint8 tensors (0-255) instead of float32 (0.0-1.0).
     # This reduces memory and speeds up DataLoader IPC. The training pipeline handles the conversion.
     return_uint8: bool = False
+    # Optional eager cache for decoded raw RGB camera frames. ``ram`` keeps
+    # frames in memory; ``disk`` uses a disk-backed memmap (recommended for
+    # large datasets). Both caches are below image transforms/normalization
+    # and do not freeze policy encoders.
+    camera_cache: str = "none"
     streaming: bool = False
 
     def __post_init__(self) -> None:
@@ -49,6 +54,8 @@ class DatasetConfig:
             if len(self.episodes) != len(set(self.episodes)):
                 duplicates = sorted({ep for ep in self.episodes if self.episodes.count(ep) > 1})
                 raise ValueError(f"Episode indices contain duplicates: {duplicates}")
+        if self.camera_cache not in {"none", "ram", "disk"}:
+            raise ValueError("camera_cache must be either 'none', 'ram', or 'disk'")
 
 
 @dataclass

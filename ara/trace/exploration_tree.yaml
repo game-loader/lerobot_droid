@@ -824,3 +824,457 @@ tree:
       - third_party/moya_newton_sim/tests/test_batched_newton_env.py
     status: resolved
     also_depends_on: [N82]
+  - id: N87
+    type: decision
+    title: Fix DP3 to point cloud, dual-wrist RGB, 40D state, and 24D action
+    provenance: user
+    timestamp: "2026-08-26T17:45:12+08:00"
+    choice: >-
+      Replace the point-cloud-only DP3 observation path with one XYZ point
+      cloud, independent left/right wrist ResNet18 encoders initialized
+      without pretrained weights, and a 40-dimensional state; predict a
+      24-dimensional action while retaining RL-100 point-cloud processing.
+    alternatives:
+      - Keep the prior point-cloud-plus-state model and ignore RGB.
+      - Share one RGB encoder or initialize the wrist encoders from pretrained weights.
+      - Leave state and action dimensions dataset-dependent.
+    evidence:
+      - src/lerobot/policies/dp3/configuration_dp3.py
+      - src/lerobot/policies/dp3/modeling_dp3.py
+      - docs/source/dp3.mdx
+    status: resolved
+  - id: N88
+    type: experiment
+    title: Implement and validate multimodal DP3 contract
+    provenance: ai-executed
+    timestamp: "2026-08-26T17:45:12+08:00"
+    result: >-
+      Added dual-wrist conditioning, strict 40D-state and 24D-action checks,
+      independent randomly initialized ResNet18 encoders, RL-100-compatible
+      sparse-cloud zero padding, and checkpoint/inference regressions. The
+      combined DP3, recorder, and Diffusion-processor suite passed 39 tests
+      with 4 dependency/device skips; Ruff and diff checks passed.
+    evidence:
+      - ara/evidence/tables/dp3-dual-wrist-validation.md
+      - tests/policies/test_dp3.py
+      - tests/test_franka_duo_real_recorder.py
+    status: resolved
+    also_depends_on: [N87]
+  - id: N89
+    type: decision
+    title: Bind the DP3 milestone to real Franka Duo depth and wrist-camera data
+    provenance: user
+    timestamp: "2026-08-26T17:52:12+08:00"
+    choice: >-
+      Record this DP3 architecture milestone as a real-robot Franka Duo
+      preparation: ZED Mini depth sidecar becomes the single point cloud and
+      the left/right wrist camera streams become the two RGB inputs.
+    alternatives:
+      - Describe the policy as a generic simulation or point-cloud-only model.
+      - Treat the recorder's raw 17D state/action fields as already compatible with 40D/24D DP3.
+    evidence:
+      - examples/franka_duo_real_recorder/README.md
+      - examples/franka_duo_real_recorder/config.yaml
+      - docs/source/dp3.mdx
+      - ara/evidence/tables/dp3-dual-wrist-validation.md
+    status: resolved
+    also_depends_on: [N87, N88]
+  - id: N90
+    type: decision
+    title: Fix the Franka Duo 40D state interpretation
+    provenance: user
+    timestamp: "2026-08-26T18:08:10+08:00"
+    choice: >-
+      The 40D state is the two current EE poses (xyz plus each quaternion
+      converted to a 9D rotation matrix), the two arms' measured joint states,
+      and two gripper values. The policy consumes the resulting vector without
+      reconstructing or inventing fields.
+    alternatives:
+      - Pass the raw quaternion pose values directly.
+      - Treat the raw joint-only state as the complete DP3 state.
+    evidence:
+      - docs/source/dp3.mdx
+      - src/lerobot/policies/dp3/configuration_dp3.py
+    status: resolved
+    also_depends_on: [N87, N89]
+  - id: N91
+    type: experiment
+    title: Revalidate DP3 after the real-state clarification
+    provenance: ai-executed
+    timestamp: "2026-08-26T18:08:10+08:00"
+    result: >-
+      The DP3 and recorder/processor focused suite passed 40 tests with 4
+      dependency/device skips. Runtime checks still enforce two independent
+      scratch ResNet18 encoders, state shape (40,), action shape (24,), and
+      RL-100 zero padding for sparse and all-invalid point clouds.
+    evidence:
+      - ara/evidence/tables/dp3-dual-wrist-validation-followup.md
+      - tests/policies/test_dp3.py
+    status: resolved
+    also_depends_on: [N90]
+  - id: N92
+    type: decision
+    title: Reduce DP3 state and action dimensions
+    provenance: user
+    timestamp: "2026-08-27T21:36:28+08:00"
+    choice: >-
+      Fix the DP3 input contract to a 34-dimensional observation.state and an
+      18-dimensional action; keep the point-cloud and dual-wrist encoder
+      architecture unchanged.
+    alternatives:
+      - Keep the previous 40-dimensional state and 24-dimensional action contract.
+      - Make state and action dimensions dataset-dependent.
+    evidence:
+      - src/lerobot/policies/dp3/configuration_dp3.py
+      - tests/policies/test_dp3.py
+      - docs/source/dp3.mdx
+    status: resolved
+    also_depends_on: [N87, N90]
+  - id: N93
+    type: experiment
+    title: Count XYZ PointNet parameters at 2048 points
+    provenance: ai-executed
+    timestamp: "2026-08-27T21:36:28+08:00"
+    result: >-
+      The default XYZ PointNet (3 -> 64 -> 128 -> 256 shared MLP, LayerNorm,
+      global max pooling, and 64-dimensional projection) contains 59,072
+      trainable parameters when configured for a (2048, 3) input. The count is
+      independent of point count; 2048 changes compute and memory, not weights.
+    evidence:
+      - ara/evidence/tables/dp3-34d-18d-parameter-count.md
+      - tests/policies/test_dp3.py
+      - src/lerobot/policies/dp3/modeling_dp3.py
+    status: resolved
+    also_depends_on: [N92]
+  - id: N94
+    type: decision
+    title: Process the full 2048-point cloud by default
+    provenance: user
+    timestamp: "2026-08-27T21:50:58+08:00"
+    choice: >-
+      Set the DP3 point-cloud default to 2048 so a `(2048, 3)` XYZ input is
+      processed in full unless an explicit lower subsampling value is supplied.
+    alternatives:
+      - Keep the default at 512 and require an explicit 2048 override.
+      - Change the point-cloud encoder architecture or parameter dimensions.
+    evidence:
+      - src/lerobot/policies/dp3/configuration_dp3.py
+      - src/lerobot/policies/dp3/pointcloud.py
+      - examples/franka_duo_real_recorder/build_pointcloud_dataset.py
+    status: resolved
+    also_depends_on: [N92, N93]
+  - id: N95
+    type: experiment
+    title: Validate the 2048-point default path
+    provenance: ai-executed
+    timestamp: "2026-08-27T21:50:58+08:00"
+    result: >-
+      DP3, recorder, and Diffusion-processor regression tests passed 41 tests
+      with 4 skips after changing the defaults; Ruff check/format and git diff
+      whitespace checks passed. The PointNet parameter count remains 59,072.
+    evidence:
+      - ara/evidence/tables/dp3-34d-18d-parameter-count.md
+      - tests/policies/test_dp3.py
+    status: resolved
+    also_depends_on: [N94]
+  - id: N96
+    type: question
+    title: Define reward and terminal fields for DP3 RL use
+    provenance: user
+    timestamp: "2026-08-27T22:46:25+08:00"
+    description: >-
+      Determine whether the DP3 Franka Duo dataset must retain the same reward
+      contract as the earlier RL-100-style offline and online diffusion flow.
+    status: open
+    also_depends_on: [N92, N94]
+  - id: N97
+    type: experiment
+    title: Audit DP3 compatibility with the existing RL-100 adapters
+    provenance: ai-executed
+    timestamp: "2026-08-27T22:46:25+08:00"
+    result: >-
+      The existing RL path still loads DiffusionPolicy checkpoints, does not
+      pass point-cloud conditioning through its diffusion adapter, uses
+      state-only critic features, and hardcodes 39D/14D Moya dimensions in the
+      online CLI. The reward adapter itself preserves sparse terminal
+      next.reward/next.done/next.truncated semantics and can synthesize them
+      from collection_summary.json when canonical columns are absent.
+    evidence:
+      - RL/adapters/checkpoint.py
+      - RL/policy/diffusion_adapter.py
+      - RL/cli/train_online.py
+      - RL/adapters/lerobot_v3.py
+      - docs/superpowers/specs/2026-08-17-rl100-diffusion-rl-migration-design.md
+    status: resolved
+    also_depends_on: [N96]
+  - id: N98
+    type: decision
+    title: Make online DP3 RL real-robot only
+    provenance: user
+    timestamp: "2026-08-27T23:28:26+08:00"
+    choice: >-
+      Online RL for the Franka Duo DP3 policy must receive a caller-provided
+      real-robot environment and must not create or assume a simulated env.
+      The default world count is one, with reset/step/close and environment
+      reward/termination callbacks defining the hardware boundary.
+    alternatives:
+      - Keep the previous implicit Moya simulator path for online PPO.
+      - Let the online CLI infer robot control and reward semantics.
+    evidence:
+      - RL/cli/train_online.py
+      - RL/adapters/real_robot.py
+      - tests/rl100/test_real_robot_adapter.py
+    status: resolved
+    also_depends_on: [N97]
+  - id: N99
+    type: experiment
+    title: Validate DP3 RL-100 integration and real-robot boundary
+    provenance: ai-executed
+    timestamp: "2026-08-27T23:28:26+08:00"
+    result: >-
+      The DP3 checkpoint dispatch, point-cloud plus dual-wrist RGB diffusion
+      trace, IQL/actor offline smoke, multimodal AM-Q static-auxiliary rollout,
+      and callback-based real-robot adapter all ran successfully. Focused tests
+      passed 65 tests; the RL-100 suite passed 323 tests with 2 skips when a
+      writable HuggingFace cache was supplied; Ruff passed.
+    evidence:
+      - tests/policies/test_dp3.py
+      - tests/rl100/test_checkpoint_adapter.py
+      - tests/rl100/test_offline_trainer.py
+      - tests/rl100/test_online_trainer.py
+      - tests/rl100/test_real_robot_adapter.py
+      - RL/algorithms/amq.py
+      - RL/cli/train_online.py
+    status: resolved
+    also_depends_on: [N98]
+  - id: N100
+    type: decision
+    title: Treat RL-100 AM-Q as a valid 3D point-cloud policy path
+    provenance: user
+    timestamp: "2026-08-27T23:55:00+08:00"
+    choice: >-
+      AM-Q is applicable to RL-100's 3D point-cloud policy; the observation
+      enters the DP3 encoder and AM-Q evaluates actions in the resulting latent
+      feature space rather than requiring a state-only observation.
+    alternatives:
+      - Restrict AM-Q to state-only policies.
+    evidence:
+      - /tmp/RL-100/RL-100/rl_100/policy/rl100_3d.py
+      - /tmp/RL-100/RL-100/rl_100/unidpg/transition_model/dynamics/ensemble_dynamics_for_batch.py
+    status: resolved
+    also_depends_on: [N99]
+  - id: N101
+    type: experiment
+    title: Audit RL-100 3D AM-Q observation flow
+    provenance: ai-executed
+    timestamp: "2026-08-27T23:55:00+08:00"
+    result: >-
+      RL1003D normalizes each observation history, optionally truncates point
+      clouds to XYZ, encodes every history frame with DP3 PointNet plus optional
+      RGB backbone and agent-state MLP, then flattens the latent history.
+      Diffusion candidates are scored by latent dynamics rollouts and IQL Q;
+      last-mode dynamics predicts only the newest latent and shifts the history,
+      while full-mode predicts the complete latent window. No future raw RGB or
+      point cloud is synthesized.
+    evidence:
+      - /tmp/RL-100/RL-100/rl_100/policy/rl100_3d.py
+      - /tmp/RL-100/RL-100/rl_100/unidpg/transition_model/dynamics/ensemble_dynamics_for_batch.py
+      - RL/algorithms/amq.py
+      - RL/algorithms/dynamics.py
+    status: resolved
+    also_depends_on: [N100]
+  - id: N102
+    type: experiment
+    title: Compare IL and AM-Q conditioning observations
+    provenance: ai-executed
+    timestamp: "2026-08-27T23:59:00+08:00"
+    result: >-
+      IL and AM-Q use the same raw DP3 observation contract and checkpoint
+      normalization at the initial state: 34D state, 2048×3 XYZ point cloud,
+      and two wrist RGB histories. IL encodes raw history on every forward;
+      AM-Q encodes the initial history once, then feeds predicted latent
+      histories to the denoiser and critic. Training-time random augmentation
+      may differ from AM-Q evaluation mode, while the default exact-2048 cloud
+      has no point-count subsampling.
+    evidence:
+      - src/lerobot/policies/dp3/modeling_dp3.py
+      - RL/policy/diffusion_adapter.py
+      - RL/algorithms/amq.py
+      - RL/algorithms/dynamics.py
+    status: resolved
+    also_depends_on: [N101]
+  - id: N103
+    type: decision
+    title: Disable stochastic DP3 IL augmentation
+    provenance: user
+    timestamp: "2026-08-27T23:59:00+08:00"
+    choice: >-
+      DP3 IL training must not use random image crops or random point-cloud
+      subsampling; both settings are fixed to false and rejected when enabled.
+    alternatives:
+      - Retain the generic Diffusion Policy random crop and point subsampling defaults.
+    evidence:
+      - src/lerobot/policies/dp3/configuration_dp3.py
+      - tests/policies/test_dp3.py
+    status: resolved
+    also_depends_on: [N102]
+  - id: N104
+    type: experiment
+    title: Audit canonical reward dataset contract
+    provenance: ai-executed
+    timestamp: "2026-08-27T23:59:00+08:00"
+    result: >-
+      Canonical LeRobot v3 RL data keeps the standard meta/data/videos tree and
+      adds all-or-none frame columns next.reward float32[1], next.done bool[1],
+      and next.truncated bool[1]. The loader validates terminal sparse tuples
+      and can synthesize them from an episode summary when all three columns
+      are absent. The DP3 offline CLI derives 34D/18D dimensions from the
+      checkpoint, while DP3 observations remain state, 2048×3 XYZ, and two
+      wrist RGB streams.
+    evidence:
+      - src/lerobot/utils/constants.py
+      - RL/adapters/lerobot_v3.py
+      - RL/cli/train_offline.py
+      - docs/source/dp3.mdx
+      - tests/rl100/test_lerobot_v3_adapter.py
+      - tests/rl100/test_lerobot_v3_merge.py
+    status: resolved
+    also_depends_on: [N103]
+  - id: N105
+    type: experiment
+    title: Complete DP3 IL training
+    provenance: ai-executed
+    timestamp: "2026-08-27T23:50:00+08:00"
+    result: >-
+      DP3 IL completed 50,000 optimizer steps and produced checkpoints at
+      5,000-step intervals through the terminal 050000 snapshot.
+    evidence:
+      - outputs/franka_duo_dp3_pipeline_logs/il.log
+      - outputs/franka_duo_dp3_il_50k/checkpoints
+    status: resolved
+    also_depends_on: [N103, N104]
+  - id: N106
+    type: experiment
+    title: Launch DP3 offline RL-100 from terminal IL checkpoint
+    provenance: ai-executed
+    timestamp: "2026-08-27T23:55:00+08:00"
+    result: >-
+      Offline RL launched from IL 050000 with AM-Q enabled, a target of 50
+      behavior synchronizations, periodic snapshots every five syncs, no
+      simulator evaluation, and SwanLab offline logging.
+    evidence:
+      - outputs/run_franka_duo_dp3_training.sh
+      - outputs/franka_duo_dp3_pipeline_logs/offline.log
+      - outputs/franka_duo_dp3_offline_sync50/swanlog
+    status: resolved
+    also_depends_on: [N105]
+  - id: N107
+    type: dead_end
+    title: Transient IL-to-offline handoff failure
+    provenance: ai-executed
+    timestamp: "2026-08-27T23:52:00+08:00"
+    hypothesis: >-
+      The first handoff should automatically continue from the IL terminal
+      checkpoint.
+    failure_mode: >-
+      The initial pipeline process exited with status 127 before creating an
+      offline log; rerunning from the explicit 050000 checkpoint succeeded.
+    lesson: >-
+      The handoff is now guarded by an explicit terminal-checkpoint existence
+      check and can be restarted independently without using the early
+      ``last`` symlink.
+    evidence:
+      - outputs/franka_duo_dp3_pipeline_logs/pipeline.log
+      - outputs/run_franka_duo_dp3_training.sh
+    status: resolved
+    also_depends_on: [N105]
+  - id: N108
+    type: experiment
+    title: Fix AM-Q interval scheduling across PPO epoch jumps
+    provenance: ai-executed
+    timestamp: "2026-08-27T00:00:00+08:00"
+    result: >-
+      AM-Q evaluation now triggers when actor-update interval buckets are
+      crossed, rather than requiring an exact modulo hit that can be skipped
+      when PPO increments actor_updates by multiple epochs.
+    evidence:
+      - RL/cli/train_offline.py
+      - tests/rl100/test_tracking.py
+      - tests/rl100/test_offline_trainer.py
+    status: resolved
+    also_depends_on: [N100, N101]
+  - id: N109
+    type: experiment
+    title: Validate export and real-machine evaluator integration
+    provenance: ai-executed
+    timestamp: "2026-08-27T00:00:00+08:00"
+    result: >-
+      The terminal IL checkpoint exported as a LeRobot eval bundle with 18D
+      actions, 2048×3 adaptive point clouds, inferred transforms, and
+      device-overridden processors; CPU inference returned finite float32
+      actions. The real-machine tele-data project passed its full focused test
+      suite.
+    evidence:
+      - /tmp/franka_duo_dp3_il_050000_eval_bundle
+      - /home/droid/project/franka_duo_tele_data/src/franka_duo_tele_data/export_lerobot_eval_bundle.py
+      - /home/droid/project/franka_duo_tele_data/src/franka_duo_tele_data/action_spec.py
+      - /home/droid/project/franka_duo_tele_data/src/franka_duo_tele_data/eval_franka_duo.py
+      - /home/droid/project/franka_duo_tele_data/tests
+    status: resolved
+    also_depends_on: [N105]
+  - id: N110
+    type: experiment
+    title: Monitor offline IQL warm-up
+    provenance: ai-executed
+    timestamp: "2026-08-27T00:00:00+08:00"
+    result: >-
+      The offline process remains healthy and is progressing through the
+      IQL warm-up phase before dynamics and actor synchronization; no sync
+      checkpoints are expected until actor updates begin.
+    evidence:
+      - outputs/franka_duo_dp3_offline_sync50/metrics.jsonl
+      - outputs/franka_duo_dp3_pipeline_logs/offline.log
+      - outputs/watch_dp3_training.sh
+    status: open
+    also_depends_on: [N106, N108]
+  - id: N111
+    type: experiment
+    title: Audit shared Hugging Face cache usage
+    provenance: ai-executed
+    timestamp: "2026-08-28T16:30:00+08:00"
+    result: >-
+      The DP3 launcher did not export HF_DATASETS_CACHE, HF_HOME, or HF_HUB_CACHE.
+      Cache artifacts created during the IL/offline cycle were observed under
+      /home/droid/.cache/huggingface, while the repository-local .hf-datasets-cache
+      was populated earlier. The launcher was patched to export a shared repository
+      cache for future IL and offline runs.
+    evidence:
+      - outputs/run_franka_duo_dp3_training.sh
+      - outputs/.agents/rgb_cache_audit.txt
+      - /home/droid/.cache/huggingface/datasets
+      - .hf-datasets-cache
+    status: resolved
+    also_depends_on: [N105, N106]
+  - id: N112
+    type: dead_end
+    title: Offline RL process terminated before target sync count
+    provenance: ai-executed
+    timestamp: "2026-08-28T16:30:00+08:00"
+    hypothesis: >-
+      The launched DP3 offline run would continue from IQL completion through all
+      50 behavior-policy synchronizations and produce a final checkpoint.
+    failure_mode: >-
+      No training process remains. Metrics stop at IQL 100000, actor_updates 26248,
+      old_policy_syncs 11; only sync_005 and sync_010 checkpoints exist and no final
+      checkpoint or completion marker was written.
+    lesson: >-
+      The run must be resumed or relaunched from a saved sync checkpoint after the
+      action20 dataset/cache decision; do not treat sync_010 as the requested final
+      artifact.
+    evidence:
+      - outputs/franka_duo_dp3_offline_sync50/metrics.jsonl
+      - outputs/franka_duo_dp3_offline_sync50/checkpoints
+      - outputs/franka_duo_dp3_pipeline_logs/pipeline.log
+      - outputs/franka_duo_dp3_pipeline_logs/pipeline.pid
+    status: unresolved
+    also_depends_on: [N106, N110]

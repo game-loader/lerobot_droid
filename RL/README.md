@@ -1,24 +1,45 @@
 # RL-100 Diffusion RL Migration
 
-This directory contains the state-first adaptation of the offline and online
-reinforcement-learning stages from RL-100 for the LeRobot Diffusion Policy
-checkpoint used by the Moya charger-grasp task. The implementation keeps the
-LeRobot policy, processor, dataset, and environment contracts as the source of
-truth.
+This directory contains a policy-agnostic adaptation of the offline and online
+reinforcement-learning stages from RL-100 for LeRobot Diffusion-family
+checkpoints. It supports the original state-only Moya policy and the DP3
+Franka Duo policy (`34D` state, `18D` action, XYZ point cloud, and two wrist
+RGB streams). The LeRobot policy, processor, dataset, and environment
+contracts remain the source of truth.
 
 ## Scope
 
-- State critics and dynamics use `observation.state` with the current 39D
-  Moya observation and 14D action contract.
+- State-only critics and dynamics use `observation.state`; DP3 instead uses a
+  frozen multimodal encoder (PointNet + two wrist ResNet18 encoders + state)
+  for IQL and AM-Q. Dimensions are read from the checkpoint (Moya is
+  39D/14D, DP3 is 34D/18D).
 - Offline training uses sparse terminal labels from the LeRobot v3 collection
   summary, with success equal to `1` and failure equal to `0`.
-- Online training uses the fused Moya Newton vector environment, stochastic
-  DDIM traces, vector GAE, and masked denoising PPO.
-- Action dimensions `3:12` are constant in the supplied checkpoint and are
-  excluded from critic and PPO likelihood reductions.
+- Online training uses a caller-provided real-robot vector environment,
+  stochastic DDIM traces, vector GAE, and masked denoising PPO. No simulator
+  is created by the online CLI.
+- For the supplied Moya checkpoint, constant action dimensions `3:12` are
+  excluded from critic and PPO likelihood reductions; DP3 uses its own saved
+  action-range mask.
 - Image tensors are preserved by the data and actor paths. An image critic
   encoder is an explicit extension point and is not silently inferred.
 - Moya evaluation is headless and never records video.
+
+For a canonical offline dataset, retain the LeRobot v3 tree and declare the
+following transition columns in `meta/info.json`:
+
+```text
+next.reward    float32 [1]
+next.done      bool    [1]
+next.truncated bool    [1]
+```
+
+Write one value per frame in `data/**/*.parquet`. The three columns are
+all-or-none; sparse terminal data uses `(0, false, false)` before the final
+frame, `(1, true, false)` for success, and `(0, true, true)` for a failed
+timeout. DP3 additionally requires the multimodal observation features
+`observation.state[34]`, `observation.point_cloud[2048,3]`,
+`observation.images.wrist_left`, and `observation.images.wrist_right`.
 
 The acceptance rule is shared by dataset and simulator paths:
 
@@ -164,44 +185,45 @@ The default AM-Q score is the batch mean of the horizon-summed modeled Q
 values used by RL-100; `--amq-discounted` is an explicit experiment-only
 alternative.
 `--amq-use-critic-reference` enables the optional stricter critic baseline.
-For state-only AM-Q, image-conditioned checkpoints and image-bearing datasets
-are rejected explicitly until an imagined-image encoder is implemented.
+For DP3, AM-Q follows RL-100's 3D path: the PointNet + dual-wrist RGB +
+state observation is encoded once per history frame, and the learned ensemble
+predicts the next encoded latent (plus reward/done). Imagined rollouts update
+that latent history directly; raw point clouds/RGB are never hallucinated.
 
-## Online Training
+## Online Training (real robot)
 
-Online collection and PPO require a CUDA-capable Newton installation:
+Online PPO does **not** create a simulator. You must provide a real-robot
+environment factory with:
 
-```bash
-uv run python -m RL.cli.train_online \
-  --checkpoint outputs/rl100/offline_smoke/checkpoints/final \
-  --output-dir outputs/rl100/online_smoke \
-  --device cuda --sim-device cuda:0 \
-  --num-envs 16 --smoke
+```python
+env.num_envs = 1  # or a safely vectorized number of robots
+env.reset(...) -> (observation, info)
+env.step(action) -> (observation, reward, terminated, truncated, info)
 ```
 
-Smoke mode fixes a short one-decision rollout, two DDIM steps, one PPO epoch,
-headless execution, and no video output. The online buffer stores decisions in
-`[time, environment]` order. A partial action chunk uses a contiguous validity
-mask and a discount of `gamma ** executed_steps`. Moya terminates a world on
-the first frame that satisfies the five acceptance conditions above; the
-terminal success history is kept in `final_info` before SAME_STEP autoreset.
-`rollout/success_rate` is episode-level (successful terminal episodes divided
-by terminal episodes); `rollout/chunk_success_rate` is the raw decision-row
-ratio for diagnostics.
-
-A longer run can record metrics to SwanLab when the package is installed in
-the active uv environment:
+The observation must expose the policy features. For DP3 this is
+`observation.state` (34D), `observation.point_cloud` `(2048, 3)`, and both
+wrist RGB streams. A single Franka Duo adapter may return unbatched
+`[34]`, `[2048, 3]`, and `[3, H, W]` tensors; the trainer wraps them as one
+environment.
 
 ```bash
 uv run python -m RL.cli.train_online \
-  --checkpoint outputs/rl100/offline/checkpoints/final \
-  --output-dir outputs/rl100/online \
-  --device cuda --sim-device cuda:0 --num-envs 16 \
+  --checkpoint /path/to/dp3_or_diffusion_checkpoint \
+  --output-dir outputs/rl100/franka_duo_online \
+  --device cuda --num-envs 1 \
+  --env-factory my_franka_env:make_env \
+  --reward-mode terminal_success \
   --updates 1000 --rollout-decisions 30 --ppo-epochs 1 \
-  --inference-steps 10 --minibatch-size 32 --actor-lr 1e-6 \
-  --probability-sigma-min 0.1 \
-  --swanlab-project moya-rl100 --swanlab-run-name online-ppo
+  --inference-steps 10 --minibatch-size 1 --actor-lr 1e-6
 ```
+
+`terminal_success` keeps the RL-100 sparse contract: each active step has
+reward `0`, a successful terminal step has reward `1`, and a failed timeout has
+reward `0` with `truncated=True`. Set `--reward-mode environment` to accumulate
+the scalars returned by `env.step()` instead (dense shaping is supported by the
+online PPO buffer). The environment remains responsible for task-specific
+success detection and safe robot stopping.
 
 ## Iterative Offline Loop
 
@@ -274,7 +296,9 @@ all immutable `RLConfig` fields match:
 uv run python -m RL.cli.train_online \
   --checkpoint outputs/rl100/online/checkpoints/final \
   --output-dir outputs/rl100/online-resumed \
-  --device cuda --sim-device cuda:0 --num-envs 16 \
+  --device cuda --env-device cuda:0 --num-envs 1 \
+  --env-factory my_franka_env:make_env \
+  --reward-mode terminal_success \
   --updates 1000 --rollout-decisions 30 --ppo-epochs 4 \
   --gamma 0.99 --inference-steps 10
 ```
@@ -302,7 +326,9 @@ This environment is state-only, headless, and video-free by design.
 
 ## Limitations
 
-The migration does not copy DP3/PointNet, point-cloud schemas, flow policies,
-distillation stages, MuJoCo runners, real-robot drivers, or automatic image
-critic features from RL-100. A concrete image feature encoder can be added
-behind `ObservationFeatureEncoder` without changing the trainer contracts.
+Flow policies, distillation stages, MuJoCo runners, and robot-specific drivers
+remain out of scope. DP3/PointNet is integrated through the shared diffusion
+adapter. DP3 offline AM-Q uses a multimodal latent critic and
+`DP3FeatureDynamicsEnsemble` (latent predictions; raw point clouds/RGB are
+carried from the initial observation because no visual decoder is learned).
+State-only policies continue to use the lightweight state critic/dynamics path.

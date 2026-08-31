@@ -21,15 +21,20 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
+from lerobot.policies.dp3.configuration_dp3 import DP3Config
 from RL.adapters.checkpoint import CheckpointAdapter
 from RL.adapters.lerobot_v3 import LeRobotV3DecisionDataset, collate_decision_batches
 from RL.algorithms.amq import AMQEvaluator
-from RL.algorithms.dynamics import PolicyPromotionGate, StateDynamicsEnsemble
+from RL.algorithms.dynamics import (
+    DP3FeatureDynamicsEnsemble,
+    PolicyPromotionGate,
+    StateDynamicsEnsemble,
+)
 from RL.algorithms.iql import IQL
 from RL.checkpointing import RLProvenance
 from RL.config import AMQConfig, RLConfig, TraceConfig
 from RL.policy.diffusion_adapter import DiffusionRLAdapter
-from RL.policy.observation_encoder import StateFeatureEncoder
+from RL.policy.observation_encoder import DP3FeatureEncoder, StateFeatureEncoder
 from RL.tracking import SwanLabConfig, create_swanlab_tracker
 from RL.trainers.offline import OfflineTrainer
 from RL.types import DecisionBatch
@@ -235,6 +240,26 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--inference-steps", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument(
+        "--num-workers",
+        "--num_workers",
+        type=int,
+        default=16,
+        help="DataLoader worker processes used for LeRobot video decoding.",
+    )
+    parser.add_argument(
+        "--prefetch-factor",
+        "--prefetch_factor",
+        type=int,
+        default=4,
+        help="Batches prefetched by each DataLoader worker.",
+    )
+    parser.add_argument(
+        "--camera-cache",
+        choices=("none", "ram"),
+        default="none",
+        help="Predecode required decision-level camera frames into RAM before offline RL.",
+    )
     parser.add_argument("--actor-lr", type=float, default=1e-6)
     parser.add_argument("--ppo-epochs", type=int, default=1)
     parser.add_argument("--probability-sigma-min", type=float, default=0.1)
@@ -279,6 +304,14 @@ def _parser() -> argparse.ArgumentParser:
         default=0,
         help="Run a headless Newton evaluation every N old-policy syncs; 0 disables it.",
     )
+    parser.add_argument(
+        "--checkpoint-every-old-policy-syncs",
+        "--checkpoint-every-syncs",
+        type=int,
+        default=0,
+        help="Persist a standard LeRobot policy bundle every N old-policy syncs; "
+        "independent of evaluation (0 disables periodic snapshots).",
+    )
     parser.add_argument("--eval-episodes", type=int, default=100)
     parser.add_argument("--eval-batch-size", type=int, default=16)
     parser.add_argument(
@@ -317,14 +350,33 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _batches(dataset: LeRobotV3DecisionDataset, *, batch_size: int) -> Iterator[DecisionBatch]:
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        collate_fn=collate_decision_batches,
-        drop_last=False,
-    )
+def _batches(
+    dataset: LeRobotV3DecisionDataset,
+    *,
+    batch_size: int,
+    num_workers: int,
+    prefetch_factor: int,
+) -> Iterator[DecisionBatch]:
+    if num_workers < 0:
+        raise ValueError("num_workers must be nonnegative")
+    if prefetch_factor <= 0:
+        raise ValueError("prefetch_factor must be positive")
+    loader_kwargs: dict[str, object] = {
+        "batch_size": batch_size,
+        "shuffle": True,
+        "collate_fn": collate_decision_batches,
+        "drop_last": False,
+        "pin_memory": True,
+        "num_workers": num_workers,
+    }
+    if num_workers > 0:
+        loader_kwargs.update(
+            {
+                "prefetch_factor": prefetch_factor,
+                "persistent_workers": True,
+            }
+        )
+    loader = DataLoader(dataset, **loader_kwargs)
     while True:
         yielded = False
         for batch in loader:
@@ -409,6 +461,10 @@ def run(args: argparse.Namespace) -> Path:
     for name in ("iql_steps", "inference_steps", "batch_size"):
         if getattr(args, name) <= 0:
             raise ValueError(f"{name} must be positive")
+    if args.num_workers < 0:
+        raise ValueError("num_workers must be nonnegative")
+    if args.prefetch_factor <= 0:
+        raise ValueError("prefetch_factor must be positive")
     if args.actor_steps < 0:
         raise ValueError("actor_steps must be nonnegative")
     if args.old_policy_sync_target < 0:
@@ -443,6 +499,8 @@ def run(args: argparse.Namespace) -> Path:
         raise ValueError("eval_every_actor_updates must be nonnegative")
     if args.eval_every_old_policy_syncs < 0:
         raise ValueError("eval_every_old_policy_syncs must be nonnegative")
+    if args.checkpoint_every_old_policy_syncs < 0:
+        raise ValueError("checkpoint_every_old_policy_syncs must be nonnegative")
     for name in ("eval_episodes", "eval_batch_size"):
         if getattr(args, name) <= 0:
             raise ValueError(f"{name} must be positive")
@@ -463,11 +521,6 @@ def run(args: argparse.Namespace) -> Path:
     current = DiffusionRLAdapter(current_checkpoint, trace_config)
     old = DiffusionRLAdapter(old_checkpoint, trace_config)
     policy_config = current.policy.config
-    if args.amq_enabled and policy_config.image_features:
-        raise ValueError(
-            "--amq-enabled currently supports state-only Diffusion Policies; "
-            f"checkpoint declares image features {tuple(policy_config.image_features)!r}"
-        )
     state_dim = policy_config.robot_state_feature.shape[0]
     action_dim = policy_config.action_feature.shape[0]
     rl_config = RLConfig(
@@ -497,27 +550,47 @@ def run(args: argparse.Namespace) -> Path:
         summary_path=args.summary,
         config=rl_config,
     )
+    if args.camera_cache == "ram":
+        cache_started = time.monotonic()
+        cache_summary = dataset.preload_camera_frame_cache()
+        cache_summary = dict(cache_summary)
+        cache_summary["camera_cache_seconds"] = time.monotonic() - cache_started
+        print(json.dumps(cache_summary, sort_keys=True))
     dataset_summary = dataset.inspection_summary()
     print(json.dumps(dataset_summary, sort_keys=True))
-    if args.amq_enabled and dataset_summary.get("image_keys"):
-        raise ValueError(
-            "--amq-enabled currently requires a state-only dataset; "
-            f"dataset contains image keys {dataset_summary['image_keys']!r}"
-        )
     if args.amq_enabled:
         train_dataset, validation_dataset = dataset.split_by_episode(validation_fraction=0.1)
     else:
         train_dataset, validation_dataset = dataset, None
-    batches = _batches(train_dataset, batch_size=args.batch_size)
+    batches = _batches(
+        train_dataset,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        prefetch_factor=args.prefetch_factor,
+    )
     validation_batches = (
-        _batches(validation_dataset, batch_size=args.batch_size) if validation_dataset is not None else None
+        _batches(
+            validation_dataset,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            prefetch_factor=args.prefetch_factor,
+        )
+        if validation_dataset is not None
+        else None
     )
-    encoder = StateFeatureEncoder(
-        state_dim=state_dim,
-        n_obs_steps=policy_config.n_obs_steps,
-        hidden_dims=(256, 256),
-        output_dim=256,
-    )
+    is_dp3 = isinstance(policy_config, DP3Config)
+    if is_dp3:
+        # Match RL-100 3D: IQL and dynamics operate on the DP3 latent emitted
+        # by the multimodal point-cloud/RGB/state encoder.
+        encoder = DP3FeatureEncoder(current.policy)
+    else:
+        encoder = StateFeatureEncoder(
+            state_dim=state_dim,
+            n_obs_steps=policy_config.n_obs_steps,
+            hidden_dims=(256, 256),
+            output_dim=256,
+            ignore_extra_features=True,
+        )
     iql = IQL(
         feature_encoder=encoder,
         action_dim=action_dim,
@@ -533,18 +606,31 @@ def run(args: argparse.Namespace) -> Path:
     amq_evaluator = None
     promotion_gate = None
     if args.amq_enabled:
-        dynamics = StateDynamicsEnsemble(
-            feature_encoder=encoder,
-            state_dim=state_dim,
-            n_obs_steps=policy_config.n_obs_steps,
-            action_dim=action_dim,
-            chunk_size=policy_config.n_action_steps,
-            active_action_mask=current.checkpoint.active_action_mask,
-            hidden_dims=(256, 256),
-            ensemble_size=rl_config.amq.ensemble_size,
-            learning_rate=3e-4,
-            state_key=rl_config.state_key,
-        ).to(next(current.policy.parameters()).device)
+        if is_dp3:
+            dynamics = DP3FeatureDynamicsEnsemble(
+                feature_encoder=encoder,
+                n_obs_steps=policy_config.n_obs_steps,
+                action_dim=action_dim,
+                chunk_size=policy_config.n_action_steps,
+                active_action_mask=current.checkpoint.active_action_mask,
+                hidden_dims=(256, 256),
+                ensemble_size=rl_config.amq.ensemble_size,
+                learning_rate=3e-4,
+                prediction_mode="last",
+            ).to(next(current.policy.parameters()).device)
+        else:
+            dynamics = StateDynamicsEnsemble(
+                feature_encoder=encoder,
+                state_dim=state_dim,
+                n_obs_steps=policy_config.n_obs_steps,
+                action_dim=action_dim,
+                chunk_size=policy_config.n_action_steps,
+                active_action_mask=current.checkpoint.active_action_mask,
+                hidden_dims=(256, 256),
+                ensemble_size=rl_config.amq.ensemble_size,
+                learning_rate=3e-4,
+                state_key=rl_config.state_key,
+            ).to(next(current.policy.parameters()).device)
         amq_evaluator = AMQEvaluator(
             dynamics=dynamics,
             iql=iql,
@@ -604,6 +690,8 @@ def run(args: argparse.Namespace) -> Path:
                 trainer.record_metrics(trainer.train_dynamics_step(next(batches)), 0)
         actor_iteration = 0
         last_eval_sync_count = -1
+        last_checkpoint_sync_count = -1
+        last_amq_eval_bucket = -1
         while (
             args.old_policy_sync_target > 0
             and trainer.counters.old_policy_syncs < args.old_policy_sync_target
@@ -628,9 +716,20 @@ def run(args: argparse.Namespace) -> Path:
             )
             if dynamics is not None:
                 metrics.update(trainer.train_dynamics_step(actor_batch))
+                # AM-Q evaluations are scheduled by actor-update count.  Use
+                # crossed interval buckets rather than an exact modulo test:
+                # with PPO epochs > 1, actor_updates can jump over an
+                # interval boundary (e.g. 48 -> 52 for interval 50), which
+                # would otherwise prevent any promotion and leave a
+                # sync-targeted run spinning forever.
+                amq_bucket = (
+                    trainer.counters.actor_updates // args.amq_eval_interval
+                    if args.amq_eval_interval > 0
+                    else -1
+                )
                 if (
                     trainer.counters.dynamics_updates >= args.amq_min_dynamics_updates
-                    and trainer.counters.actor_updates % args.amq_eval_interval == 0
+                    and amq_bucket > last_amq_eval_bucket
                 ):
                     if validation_batches is None:
                         raise RuntimeError("AM-Q validation batches were not initialized")
@@ -640,6 +739,7 @@ def run(args: argparse.Namespace) -> Path:
                             seed=args.seed + 100_000 + actor_iteration,
                         )
                     )
+                    last_amq_eval_bucket = amq_bucket
             actor_updates = trainer.counters.actor_updates
             sync_count = trainer.counters.old_policy_syncs
             sync_eval_due = (
@@ -653,10 +753,19 @@ def run(args: argparse.Namespace) -> Path:
                 and actor_updates > 0
                 and actor_updates % args.eval_every_actor_updates == 0
             )
-            if sync_eval_due or actor_eval_due:
-                if sync_eval_due:
+            sync_checkpoint_due = (
+                args.checkpoint_every_old_policy_syncs > 0
+                and sync_count > 0
+                and sync_count % args.checkpoint_every_old_policy_syncs == 0
+                and sync_count != last_checkpoint_sync_count
+            )
+            if sync_checkpoint_due or sync_eval_due or actor_eval_due:
+                if sync_checkpoint_due or sync_eval_due:
                     checkpoint_label = f"sync_{sync_count:03d}"
-                    last_eval_sync_count = sync_count
+                    if sync_eval_due:
+                        last_eval_sync_count = sync_count
+                    if sync_checkpoint_due:
+                        last_checkpoint_sync_count = sync_count
                 else:
                     checkpoint_label = f"actor_{actor_updates:06d}"
                 # Persist a standard LeRobot policy checkpoint for the
@@ -665,22 +774,24 @@ def run(args: argparse.Namespace) -> Path:
                 # and processor artifacts so periodic saves stay inexpensive.
                 snapshot_root = args.output_dir / "checkpoints" / checkpoint_label / "pretrained_model"
                 snapshot_path = _save_eval_policy_snapshot(current_checkpoint, snapshot_root)
-                eval_root = args.output_dir / "eval" / checkpoint_label
-                eval_metrics = _run_newton_eval(
-                    policy_path=snapshot_path,
-                    output_dir=eval_root,
-                    episodes=args.eval_episodes,
-                    batch_size=args.eval_batch_size,
-                    inference_steps=args.eval_inference_steps or args.inference_steps,
-                    policy_device=args.eval_device or args.device,
-                    env_device=args.eval_env_device,
-                    seed=args.seed,
-                    env_type=args.eval_env_type,
-                    executable=args.eval_executable,
-                )
-                metrics.update(eval_metrics)
-                metrics["eval/actor_updates"] = float(actor_updates)
-                metrics["eval/old_policy_sync_count"] = float(sync_count)
+                if sync_eval_due or actor_eval_due:
+                    eval_root = args.output_dir / "eval" / checkpoint_label
+                    eval_metrics = _run_newton_eval(
+                        policy_path=snapshot_path,
+                        output_dir=eval_root,
+                        episodes=args.eval_episodes,
+                        batch_size=args.eval_batch_size,
+                        inference_steps=args.eval_inference_steps or args.inference_steps,
+                        policy_device=args.eval_device or args.device,
+                        env_device=args.eval_env_device,
+                        seed=args.seed,
+                        env_type=args.eval_env_type,
+                        executable=args.eval_executable,
+                    )
+                    metrics.update(eval_metrics)
+                    metrics["eval/actor_updates"] = float(actor_updates)
+                    metrics["eval/old_policy_sync_count"] = float(sync_count)
+                metrics["checkpoint/old_policy_sync_count"] = float(sync_count)
             trainer.record_metrics(metrics, 1)
             actor_iteration += 1
         destination = args.output_dir / "checkpoints" / "final"

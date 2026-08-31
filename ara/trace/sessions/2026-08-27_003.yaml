@@ -1,0 +1,100 @@
+session:
+  id: "2026-08-27_003"
+  date: "2026-08-27"
+  started: "2026-08-27T23:00:00+08:00"
+  last_turn: "2026-08-27T23:59:00+08:00"
+  turn_count: 5
+  summary: "Completed DP3 IL at 50k, launched offline RL-100 from the terminal checkpoint, validated real-machine export, and confirmed the real-machine evaluator integration is tested while offline IQL warm-up continues."
+
+events_logged:
+  - turn: 1
+    type: experiment
+    id: N105
+    routing: direct
+    provenance: ai-executed
+    summary: "DP3 IL completed 50,000 steps with checkpoints every 5,000 steps, including the terminal 050000 checkpoint."
+  - turn: 1
+    type: experiment
+    id: N106
+    routing: direct
+    provenance: ai-executed
+    summary: "DP3 offline RL-100 launched from IL 050000 using 34D state, 18D action, AM-Q, target 50 syncs, periodic snapshots every 5 syncs, no simulator eval, and SwanLab offline logging."
+  - turn: 1
+    type: dead_end
+    id: N107
+    routing: direct
+    provenance: ai-executed
+    summary: "First pipeline handoff exited with status 127 before offline startup; rerun from the terminal IL checkpoint succeeded and started offline training."
+  - turn: 2
+    type: experiment
+    id: N108
+    routing: direct
+    provenance: ai-executed
+    summary: "Changed AM-Q scheduling from exact modulo checks to crossed actor-update interval buckets and reran focused RL tests."
+  - turn: 2
+    type: experiment
+    id: N109
+    routing: direct
+    provenance: ai-executed
+    summary: "Exported and loaded the terminal IL checkpoint as a real-machine LeRobot bundle; tele-data tests passed 70 tests with 2 skips."
+  - turn: 2
+    type: experiment
+    id: N110
+    routing: direct
+    provenance: ai-executed
+    summary: "Confirmed offline metrics continue advancing through IQL warm-up with actor and sync counts still zero as expected."
+  - turn: 3
+    type: experiment
+    id: N110
+    routing: direct
+    provenance: ai-executed
+    summary: "Current status check: offline process remains alive at 17,901/100,000 IQL updates; actor and accepted sync counts remain zero."
+  - turn: 4
+    type: experiment
+    id: N111
+    routing: direct
+    provenance: ai-executed
+    summary: "Offline DP3 IQL warm-up remains healthy at approximately 18,000/100,000 updates with active GPU utilization; no actor or sync checkpoints yet."
+  - turn: 5
+    type: experiment
+    id: N112
+    routing: direct
+    provenance: ai-executed
+    summary: "Measured IL checkpoint storage and re-ran the real-machine project tests: each model bundle is about 1.1 GB, each full training checkpoint about 3.2 GB, and tele-data tests pass 70 with 2 skips."
+
+ai_actions:
+  - turn: 1
+    action: "Monitored IL progress and verified checkpoints 005000 through 050000; started offline RL and validated a DP3 AM-Q smoke path before the full run."
+    provenance: ai-executed
+    files_changed:
+      - outputs/run_franka_duo_dp3_training.sh
+      - outputs/watch_dp3_training.sh
+      - outputs/franka_duo_dp3_pipeline_logs/pipeline.log
+      - outputs/franka_duo_dp3_pipeline_logs/offline.log
+      - outputs/franka_duo_dp3_offline_sync50/metrics.jsonl
+  - turn: 2
+    action: "Fixed AM-Q interval scheduling to handle PPO epoch jumps, reran focused RL tests, exported the terminal IL checkpoint, and validated the real-machine evaluator test suite."
+    provenance: ai-executed
+    files_changed:
+      - RL/cli/train_offline.py
+      - ara/trace/exploration_tree.yaml
+
+claims_touched: []
+logic_revisions: []
+key_context:
+  - turn: 1
+    excerpt: "IL terminal checkpoint exists at outputs/franka_duo_dp3_il_50k/checkpoints/050000; offline RL is running from this checkpoint with no eval subprocess."
+  - turn: 2
+    excerpt: "The exported evaluator bundle is loadable with inferred transforms and device-corrected processors; the offline run remains healthy in IQL warm-up."
+  - turn: 3
+    excerpt: "User asked whether training started; verified the offline RL process is active and still in IQL warm-up."
+  - turn: 4
+    excerpt: "Runtime audit found the process active with approximately 18k IQL updates and no errors; unchanged batch/step settings are safest."
+  - turn: 5
+    excerpt: "User asked about checkpoint size and real-machine evaluator progress; verified both from local artifacts and tests."
+open_threads:
+  - "Continue monitoring offline IQL warm-up, actor updates, sync_005...sync_050 snapshots, final checkpoint, and eval-bundle export."
+  - "Investigate the transient status-127 handoff failure if it recurs."
+  - "Offline process currently remains in IQL warm-up; no sync checkpoints are expected until actor updates begin."
+  - "At the measured throughput (~7k IQL updates/hour), the configured 100k IQL warm-up will take roughly 12 hours; changing batch or step counts mid-run would invalidate the requested schedule."
+ai_suggestions_pending: []

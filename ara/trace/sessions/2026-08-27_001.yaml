@@ -1,0 +1,273 @@
+session:
+  id: "2026-08-27_001"
+  date: "2026-08-27"
+  started: "2026-08-27T21:36:28+08:00"
+  last_turn: "2026-08-27T23:55:00+08:00"
+  turn_count: 7
+  summary: >-
+    Reduced the DP3 model contract to 34D state and 18D action, measured the
+    unchanged RL-100-style XYZ PointNet at 59,072 parameters for 2048 points,
+    made 2048 the default processing size, integrated DP3 with offline RL-100
+    paths, made online PPO explicitly real-robot only, and verified RL-100
+    AM-Q's 3D point-cloud latent observation flow and its shared initial
+    conditioning with IL.
+
+events_logged:
+  - turn: 1
+    type: decision
+    id: N92
+    routing: direct
+    provenance: user
+    summary: >-
+      Fix DP3 observation.state at 34 dimensions and action at 18 dimensions;
+      preserve the point-cloud and dual-wrist RGB architecture.
+    evidence:
+      - src/lerobot/policies/dp3/configuration_dp3.py
+      - tests/policies/test_dp3.py
+  - turn: 1
+    type: experiment
+    id: N93
+    routing: direct
+    provenance: ai-executed
+    summary: >-
+      Counted 59,072 trainable parameters in the default XYZ PointNet at an
+      input shape of (2048, 3); point count affects compute, not parameter count.
+    evidence:
+      - ara/evidence/tables/dp3-34d-18d-parameter-count.md
+      - tests/policies/test_dp3.py
+
+  - turn: 3
+    type: decision
+    id: N94
+    routing: direct
+    provenance: ai-executed
+    summary: >-
+      Verified that DP3 retains the standard LeRobot v3 directory and storage
+      contract; its difference is a strict multimodal feature contract and an
+      external processor normalization boundary. The standard training path
+      converts decoded wrist frames from uint8 to float32 [0, 1], then applies
+      VISUAL MEAN_STD before the scratch ResNet18 encoders; the default dataset
+      setting supplies ImageNet statistics, while dataset statistics remain an
+      explicit alternative.
+    evidence:
+      - src/lerobot/policies/dp3/configuration_dp3.py
+      - src/lerobot/policies/dp3/processor_dp3.py
+      - src/lerobot/policies/diffusion/processor_diffusion.py
+      - src/lerobot/policies/diffusion/modeling_diffusion.py
+      - src/lerobot/scripts/lerobot_train.py
+      - src/lerobot/datasets/factory.py
+  - turn: 4
+    type: question
+    id: N96
+    routing: direct
+    provenance: user
+    summary: >-
+      Asked whether DP3 offline and online RL should keep the earlier RL-100
+      reward and terminal-transition contract.
+    evidence:
+      - RL/adapters/lerobot_v3.py
+      - docs/superpowers/specs/2026-08-17-rl100-diffusion-rl-migration-design.md
+  - turn: 4
+    type: experiment
+    id: N97
+    routing: direct
+    provenance: ai-executed
+    summary: >-
+      Audited the existing RL adapters and found sparse reward support is
+      reusable, but DP3 point/RGB conditioning and its 34D/18D online path are
+      not wired yet.
+    evidence:
+      - RL/adapters/checkpoint.py
+      - RL/policy/diffusion_adapter.py
+      - RL/cli/train_online.py
+      - RL/adapters/lerobot_v3.py
+  - turn: 5
+    type: decision
+    id: N98
+    routing: direct
+    provenance: user
+    summary: >-
+      Constrain online DP3 PPO to a caller-provided real-robot environment;
+      no implicit simulator, with one-world operation as the default.
+    evidence:
+      - RL/cli/train_online.py
+      - RL/adapters/real_robot.py
+  - turn: 5
+    type: experiment
+    id: N99
+    routing: direct
+    provenance: ai-executed
+    summary: >-
+      Validated DP3 checkpoint dispatch, multimodal offline IQL/actor and AM-Q
+      smoke paths, real-robot adapter contracts, 65 focused tests, and 323 RL
+      tests with 2 skips; Ruff and targeted mypy passed.
+    evidence:
+      - tests/rl100/test_real_robot_adapter.py
+      - tests/rl100/test_offline_trainer.py
+      - tests/rl100/test_online_trainer.py
+      - tests/policies/test_dp3.py
+  - turn: 6
+    type: decision
+    id: N100
+    routing: direct
+    provenance: user
+    summary: >-
+      Confirmed that AM-Q is intended to support the RL-100 3D point-cloud
+      policy path rather than being limited to state-only observations.
+    evidence:
+      - /tmp/RL-100/RL-100/rl_100/policy/rl100_3d.py
+  - turn: 6
+    type: experiment
+    id: N101
+    routing: direct
+    provenance: ai-executed
+    summary: >-
+      Audited RL-100 3D AM-Q: normalize raw history, encode each frame with
+      DP3 PointNet/optional RGB/state branches, flatten latent history, then
+      run latent dynamics and IQL Q scoring without generating future raw
+      visuals.
+    evidence:
+      - /tmp/RL-100/RL-100/rl_100/policy/rl100_3d.py
+      - /tmp/RL-100/RL-100/rl_100/unidpg/transition_model/dynamics/ensemble_dynamics_for_batch.py
+      - RL/algorithms/amq.py
+  - turn: 7
+    type: experiment
+    id: N102
+    routing: direct
+    provenance: ai-executed
+    summary: >-
+      Compared IL and AM-Q conditioning: the initial raw observation contract
+      and normalization are identical, while AM-Q switches to latent-only
+      conditioning after the first dynamics transition.
+    evidence:
+      - src/lerobot/policies/dp3/modeling_dp3.py
+      - RL/policy/diffusion_adapter.py
+      - RL/algorithms/amq.py
+
+
+ai_actions:
+  - turn: 1
+    action: >-
+      Changed DP3 state/action constants and strict validation to 34/18,
+      migrated focused fixtures and user-facing documentation, added a fixed
+      contract regression, and measured the XYZ PointNet parameter total.
+    provenance: ai-executed
+    files_changed:
+      - src/lerobot/policies/dp3/configuration_dp3.py
+      - tests/policies/test_dp3.py
+      - docs/source/dp3.mdx
+      - examples/franka_duo_real_recorder/README.md
+      - ara/evidence/tables/dp3-34d-18d-parameter-count.md
+  - turn: 2
+    action: >-
+      Changed DP3 and DP3 point-cloud preprocessing defaults from 512 to 2048,
+      updated training/derivation examples, and reran focused validation.
+    provenance: ai-executed
+    files_changed:
+      - src/lerobot/policies/dp3/configuration_dp3.py
+      - src/lerobot/policies/dp3/pointcloud.py
+      - examples/franka_duo_real_recorder/build_pointcloud_dataset.py
+      - docs/source/dp3.mdx
+      - examples/franka_duo_real_recorder/README.md
+
+  - turn: 3
+    action: >-
+      Audited the live DP3, Diffusion processor, dataset factory, decoder, and
+      training-loop paths and documented the v3 compatibility and image
+      normalization behavior for the user.
+    provenance: ai-executed
+    files_changed: []
+  - turn: 4
+    action: >-
+      Audited the RL-100 dataset adapter, checkpoint loader, diffusion adapter,
+      critics, and online CLI to separate the reusable sparse reward contract
+      from the remaining DP3 multimodal integration work.
+    provenance: ai-executed
+    files_changed: []
+  - turn: 5
+    action: >-
+      Replaced the implicit Moya online environment with a required
+      module:callable real-robot factory, defaulted to one world, added the
+      callback adapter and environment reward mode, and removed multimodal
+      DP3 rejection from offline AM-Q by carrying static auxiliary features.
+    provenance: ai-executed
+    files_changed:
+      - RL/cli/train_online.py
+      - RL/adapters/real_robot.py
+      - RL/trainers/online.py
+      - RL/algorithms/amq.py
+      - RL/cli/train_offline.py
+      - RL/README.md
+      - RL/MIGRATION.md
+      - docs/source/dp3.mdx
+      - tests/rl100/test_real_robot_adapter.py
+      - tests/rl100/test_online_trainer.py
+
+  - turn: 6
+    action: >-
+      Cloned and inspected the RL-100 source, traced RL1003D.obs2feature,
+      obs2latent, sample_action, and EnsembleDynamics_batch rollout semantics,
+      and aligned the explanation with the current latent AM-Q implementation.
+      Also made online value preprocessing convert uint8 visual inputs to [0,1],
+      selected DP3FeatureEncoder for the online DP3 value critic, and removed
+      simulator-specific final-observation handling.
+    provenance: ai-executed
+    files_changed:
+      - RL/trainers/online.py
+      - RL/cli/train_online.py
+      - tests/rl100/test_online_trainer.py
+  - turn: 7
+    action: >-
+      Compared DP3DiffusionModel._prepare_global_conditioning with the AM-Q
+      evaluator and latent-conditioned diffusion path, including train/eval
+      augmentation differences and the exact-2048 default.
+    provenance: ai-executed
+    files_changed: []
+
+claims_touched: []
+logic_revisions: []
+key_context:
+  - turn: 1
+    excerpt: >-
+      The user revised the requested DP3 contract to a 34-dimensional state
+      and 18-dimensional action and asked how many parameters the XYZ PointNet
+      needs for 2048 input points.
+  - turn: 2
+    excerpt: >-
+      The user requested full processing by making 2048 the default point
+      count rather than requiring an override.
+  - turn: 3
+    excerpt: >-
+      The user asked how the current DP3 dataset differs from standard LeRobot
+      v3 and whether image normalization is inside the model; live code review
+      established that the v3 file layout is unchanged and normalization is
+      performed by the preprocessor around the model.
+  - turn: 4
+    excerpt: >-
+      The user asked whether the DP3 policy should use the prior RL-100
+      offline/online flow and whether reward must remain in the loaded dataset;
+      the audit separated offline sparse labels, online environment rewards, and
+      the current DP3 adapter gap.
+  - turn: 5
+    excerpt: >-
+      The user clarified that online RL is for the physical Franka Duo and
+      must not use a simulated environment; implementation now requires a
+      caller-owned real-robot env_factory and preserves the RL-100 PPO flow.
+  - turn: 6
+    excerpt: >-
+      The user emphasized that AM-Q in RL-100 is also used for 3D point-cloud
+      policies and asked how its observations are processed.
+  - turn: 7
+    excerpt: >-
+      The user asked whether AM-Q receives the same conditioning observations
+      as the IL diffusion-policy training path.
+
+open_threads:
+  - >-
+    The upstream adapter must define the semantic ordering of the 34D state and
+    18D action; this model-only change intentionally does not invent that mapping.
+  - >-
+    Implement learned point-cloud/RGB dynamics and a multimodal critic if AM-Q
+    should model future visual observations rather than carrying initial
+    auxiliary features.
+ai_suggestions_pending: []

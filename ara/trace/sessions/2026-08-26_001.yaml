@@ -1,0 +1,127 @@
+session:
+  id: "2026-08-26_001"
+  date: "2026-08-26"
+  started: "2026-08-26T17:45:12+08:00"
+  last_turn: "2026-08-26T18:08:10+08:00"
+  turn_count: 3
+  summary: >-
+    Reworked and scoped the LeRobot DP3 policy for real Franka Duo recordings:
+    RL-100-style XYZ from ZED depth, independent scratch ResNet18 wrist views,
+    a 40D pose/joint/gripper state, and 24D actions, then validated the model
+    and data boundaries.
+
+events_logged:
+  - turn: 1
+    type: decision
+    id: N87
+    routing: direct
+    provenance: user
+    summary: >-
+      Fix the DP3 observation/action contract to one point cloud, two wrist RGB
+      streams using non-pretrained ResNet18 encoders, 40D state, and 24D action.
+    evidence:
+      - src/lerobot/policies/dp3/configuration_dp3.py
+      - src/lerobot/policies/dp3/modeling_dp3.py
+  - turn: 1
+    type: experiment
+    id: N88
+    routing: direct
+    provenance: ai-executed
+    summary: >-
+      Implemented the multimodal encoder and RL-100 zero-padding semantics;
+      39 focused tests passed, 4 were skipped, and static/diff checks passed.
+    evidence:
+      - ara/evidence/tables/dp3-dual-wrist-validation.md
+      - tests/policies/test_dp3.py
+      - tests/test_franka_duo_real_recorder.py
+  - turn: 2
+    type: decision
+    id: N89
+    routing: direct
+    provenance: user
+    summary: >-
+      Clarify that the DP3 milestone targets real Franka Duo recordings with
+      ZED Mini depth for the point cloud and left/right wrist-camera RGB.
+    evidence:
+      - examples/franka_duo_real_recorder/README.md
+      - examples/franka_duo_real_recorder/config.yaml
+      - docs/source/dp3.mdx
+
+ai_actions:
+  - turn: 1
+    action: >-
+      Audited the local RL-100 PointNet and sampling implementation, modified
+      DP3 configuration/model/preprocessing, updated documentation, added
+      regression coverage, and ran focused model/processor/recorder validation.
+    provenance: ai-executed
+    files_changed:
+      - src/lerobot/policies/dp3/configuration_dp3.py
+      - src/lerobot/policies/dp3/modeling_dp3.py
+      - src/lerobot/policies/dp3/pointcloud.py
+      - tests/policies/test_dp3.py
+      - tests/test_franka_duo_real_recorder.py
+      - docs/source/dp3.mdx
+      - examples/franka_duo_real_recorder/README.md
+      - ara/evidence/tables/dp3-dual-wrist-validation.md
+  - turn: 2
+    action: >-
+      Clarified the real-robot scope in the DP3 code/docstrings, recorder
+      guide, validation evidence, and research milestone; preserved the
+      distinction between raw 17D recorder data and the 40D/24D model contract.
+    provenance: ai-executed
+    files_changed:
+      - src/lerobot/policies/dp3/configuration_dp3.py
+      - src/lerobot/policies/dp3/modeling_dp3.py
+      - docs/source/dp3.mdx
+      - examples/franka_duo_real_recorder/README.md
+      - ara/evidence/tables/dp3-dual-wrist-validation.md
+      - ara/trace/exploration_tree.yaml
+      - ara/trace/sessions/2026-08-26_001.yaml
+  - turn: 3
+    type: decision
+    id: N90
+    routing: direct
+    provenance: user
+    summary: >-
+      Clarified the 40D state as two current EE xyz-plus-9D-rotation blocks,
+      two seven-joint measured states, and two gripper values; model-only scope
+      remains in force.
+    evidence:
+      - docs/source/dp3.mdx
+      - src/lerobot/policies/dp3/configuration_dp3.py
+  - turn: 3
+    type: experiment
+    id: N91
+    routing: direct
+    provenance: ai-executed
+    summary: >-
+      Re-ran the focused DP3/recorder/processor suite after the clarification:
+      40 passed and 4 skipped; Ruff and diff checks passed.
+    evidence:
+      - ara/evidence/tables/dp3-dual-wrist-validation-followup.md
+      - tests/policies/test_dp3.py
+
+claims_touched: []
+logic_revisions: []
+key_context:
+  - turn: 1
+    excerpt: >-
+      The requested policy must consume one 3D point cloud, two wrist RGB
+      observations through scratch ResNet18 encoders, and 40D state, and must
+      output 24D actions while preserving RL-100 point-cloud processing.
+  - turn: 2
+    excerpt: >-
+      This milestone is for real Franka Duo recordings: ZED Mini depth is the
+      point-cloud source and the left/right wrist cameras are the two RGB
+      sources; the raw recorder's 17D fields still need explicit 40D/24D
+      adaptation.
+
+open_threads:
+  - >-
+      The current Franka recorder emits 17D state/action and its evaluator owns
+      a separate 20D Cartesian action contract; deploying this 40D/24D policy
+      requires an explicit dataset adapter and controller mapping.
+  - >-
+    Data conversion and controller mapping are intentionally outside the
+    model-only scope of this milestone.
+ai_suggestions_pending: []

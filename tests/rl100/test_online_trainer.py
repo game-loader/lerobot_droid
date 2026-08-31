@@ -28,6 +28,7 @@ from RL.trainers.online import (
     _clip_env_action,
     _raw_feature_mapping,
     _reset_history,
+    _select_transition_frames,
     _validate_env_action,
 )
 
@@ -143,6 +144,48 @@ def test_collect_stores_partial_chunks_sparse_reward_and_terminal_state(tmp_path
     assert trainer.counters.environment_steps == 6
 
 
+def test_collect_can_use_environment_rewards(tmp_path: Path) -> None:
+    current = _adapter(tmp_path / "current")
+    old = _adapter(tmp_path / "old")
+    old.policy.load_state_dict(current.policy.state_dict(), strict=True)
+    trainer = OnlineTrainer(
+        current_policy=current,
+        old_policy=old,
+        actor_optimizer=torch.optim.Adam(current.policy.parameters(), lr=1e-4),
+        metrics_path=None,
+        reward_mode="environment",
+    )
+
+    rollout = trainer.collect(_AsyncDoneEnv(), decisions=1, seed=7)
+
+    # The fake environment returns 100 per executed step.  The environment
+    # reward mode accumulates those scalars instead of replacing them with
+    # terminal-success labels.
+    assert rollout.reward[:, :, 0].tolist() == [[100.0, 200.0]]
+
+
+def test_final_obs_selection_is_dimension_agnostic_for_dp3_features() -> None:
+    base = {
+        "observation.state": torch.zeros((2, 34), dtype=torch.float32),
+        "observation.point_cloud": torch.zeros((2, 8, 3), dtype=torch.float32),
+    }
+    final_obs = np.empty(2, dtype=object)
+    final_obs[0] = {
+        "observation.state": np.ones(34, dtype=np.float32),
+        "observation.point_cloud": np.ones((8, 3), dtype=np.float32),
+    }
+    final_obs[1] = None
+    selected = _select_transition_frames(
+        base,
+        {"final_obs": final_obs, "_final_obs": np.asarray([True, False])},
+        np.asarray([True, False]),
+        num_envs=2,
+    )
+    torch.testing.assert_close(selected["observation.state"][0], torch.ones(34))
+    torch.testing.assert_close(selected["observation.point_cloud"][0], torch.ones(8, 3))
+    torch.testing.assert_close(selected["observation.state"][1], torch.zeros(34))
+
+
 def test_done_world_history_advances_with_same_step_reset_frames(tmp_path: Path) -> None:
     current = _adapter(tmp_path / "current")
     old = _adapter(tmp_path / "old")
@@ -218,6 +261,10 @@ def test_online_cli_parser_exposes_smoke_controls(tmp_path: Path) -> None:
             "7",
             "--inference-steps",
             "50",
+            "--env-factory",
+            "tests.rl100.test_online_trainer:_AsyncDoneEnv",
+            "--reward-mode",
+            "environment",
             "--smoke",
         ]
     )
@@ -227,6 +274,8 @@ def test_online_cli_parser_exposes_smoke_controls(tmp_path: Path) -> None:
     assert args.rollout_decisions == 99
     assert args.ppo_epochs == 7
     assert args.inference_steps == 50
+    assert args.env_factory.endswith(":_AsyncDoneEnv")
+    assert args.reward_mode == "environment"
 
 
 def test_online_cli_uses_conservative_actor_defaults(tmp_path: Path) -> None:
@@ -243,6 +292,24 @@ def test_online_cli_uses_conservative_actor_defaults(tmp_path: Path) -> None:
     assert args.ppo_epochs == 1
     assert args.rollout_decisions == 30
     assert args.probability_sigma_min == pytest.approx(0.1)
+    assert args.num_envs == 1
+    assert args.env_device is None
+    assert args.reward_mode == "terminal_success"
+
+
+def test_online_cli_keeps_sim_device_as_non_simulation_factory_hint(tmp_path: Path) -> None:
+    args = _parser().parse_args(
+        [
+            "--checkpoint",
+            str(tmp_path / "checkpoint"),
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--sim-device",
+            "cpu",
+        ]
+    )
+
+    assert args.env_device == "cpu"
 
 
 def test_online_cli_resolves_run_directory_to_final_checkpoint(tmp_path: Path) -> None:

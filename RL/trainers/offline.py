@@ -19,6 +19,7 @@ from torch import Tensor
 
 from RL.algorithms.amq import AMQEvaluator
 from RL.algorithms.dynamics import (
+    DP3FeatureDynamicsEnsemble,
     PolicyPromotionGate,
     PromotionDecision,
     StateDynamicsEnsemble,
@@ -82,7 +83,7 @@ class OfflineTrainer:
         gradient_clip_norm: float = 1.0,
         old_policy_sync_interval: int = 1,
         ppo_epochs: int = 1,
-        dynamics: StateDynamicsEnsemble | None = None,
+        dynamics: StateDynamicsEnsemble | DP3FeatureDynamicsEnsemble | None = None,
         amq_evaluator: AMQEvaluator | None = None,
         promotion_gate: PolicyPromotionGate | None = None,
         tracker: ScalarTracker | None = None,
@@ -180,13 +181,16 @@ class OfflineTrainer:
     def normalized_batch(self, batch: DecisionBatch) -> DecisionBatch:
         if not isinstance(batch, DecisionBatch):
             raise ValueError(f"batch must be a DecisionBatch, got {type(batch).__name__}")
+        device = self.device
         normalized_observation = self.current_policy.checkpoint.normalize_observation(
-            batch.observation
+            batch.observation.to(device, non_blocking=True), convert_visual_uint8=True
         )
         normalized_next = self.current_policy.checkpoint.normalize_observation(
-            batch.next_observation
+            batch.next_observation.to(device, non_blocking=True), convert_visual_uint8=True
         )
-        normalized_action = self.current_policy.checkpoint.normalize_action(batch.action)
+        normalized_action = self.current_policy.checkpoint.normalize_action(
+            batch.action.to(device, non_blocking=True)
+        )
         return dataclasses.replace(
             batch,
             observation=normalized_observation,

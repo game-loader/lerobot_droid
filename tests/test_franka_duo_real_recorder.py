@@ -167,9 +167,7 @@ def test_zero_ros_stamp_is_rejected_as_uninitialized():
     zero = SimpleNamespace(header=SimpleNamespace(stamp=SimpleNamespace(sec=0, nanosec=0)))
     assert _stamp_ns(zero) is None
 
-    positive = SimpleNamespace(
-        header=SimpleNamespace(stamp=SimpleNamespace(sec=2, nanosec=3))
-    )
+    positive = SimpleNamespace(header=SimpleNamespace(stamp=SimpleNamespace(sec=2, nanosec=3)))
     assert _stamp_ns(positive) == 2_000_000_003
 
 
@@ -431,7 +429,7 @@ def test_resume_contract_and_encoder_drop_guard():
     )
 
 
-def test_pointcloud_builder_reads_depth_sidecar_and_preserves_sparse_points(tmp_path: Path):
+def test_pointcloud_builder_reads_depth_sidecar_and_zero_pads_sparse_points(tmp_path: Path):
     episode = tmp_path / "episode_000000"
     episode.mkdir()
     depth = np.ones((1, 2, 2), dtype="<f2")
@@ -468,7 +466,8 @@ def test_pointcloud_builder_reads_depth_sidecar_and_preserves_sparse_points(tmp_
     points = builder({}, episode_index=0, frame_in_episode=0)
 
     assert points.shape == (6, 3)
-    assert np.unique(points, axis=0).shape[0] == 4
+    assert np.unique(points[:4], axis=0).shape[0] == 4
+    np.testing.assert_array_equal(points[4:], np.zeros((2, 3), dtype=np.float32))
     assert builder.source_frame_indices == [(0, 0)]
 
 

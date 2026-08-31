@@ -514,6 +514,18 @@ class _DecisionLocation:
     decision_start: int
 
 
+def _decision_history_indices(
+    location: _DecisionLocation, *, n_obs_steps: int, chunk_size: int
+) -> tuple[list[int], list[int]]:
+    current_local = _history_indices(location.decision_start, n_obs_steps=n_obs_steps)
+    next_anchor = min(location.decision_start + chunk_size, location.episode_length - 1)
+    next_local = _history_indices(next_anchor, n_obs_steps=n_obs_steps)
+    return (
+        [location.episode_start + item for item in current_local],
+        [location.episode_start + item for item in next_local],
+    )
+
+
 def _load_camera_histories(
     dataset: LeRobotDataset,
     *,
@@ -535,6 +547,32 @@ def _load_camera_histories(
             if missing is not None:
                 raise ValueError(f"dataset row {missing} is missing camera feature {key!r}")
             tensor = _stack_values([rows[index][key] for index in indices], key=key).unsqueeze(0)
+            _finite_tensor(key, tensor)
+            features[key] = tensor
+        return features
+
+    return stack(current_indices), stack(next_indices)
+
+
+def _load_cached_camera_histories(
+    cache: Mapping[int, Mapping[str, Tensor]],
+    *,
+    camera_keys: Sequence[str],
+    current_indices: Sequence[int],
+    next_indices: Sequence[int],
+) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
+    def stack(indices: Sequence[int]) -> dict[str, Tensor]:
+        features: dict[str, Tensor] = {}
+        for key in camera_keys:
+            values: list[Tensor] = []
+            for index in indices:
+                try:
+                    values.append(cache[index][key])
+                except KeyError as exc:
+                    raise RuntimeError(
+                        f"camera frame cache is missing index={index} key={key!r}"
+                    ) from exc
+            tensor = torch.stack(values).unsqueeze(0)
             _finite_tensor(key, tensor)
             features[key] = tensor
         return features
@@ -592,6 +630,7 @@ class LeRobotV3DecisionDataset(Dataset[DecisionBatch]):
         locations: Sequence[_DecisionLocation] = (),
         n_obs_steps: int = 2,
         chunk_size: int = 32,
+        camera_frame_cache: Mapping[int, Mapping[str, Tensor]] | None = None,
     ) -> None:
         if not records:
             raise ValueError("decision dataset records must be nonempty")
@@ -602,6 +641,7 @@ class LeRobotV3DecisionDataset(Dataset[DecisionBatch]):
         self._locations = tuple(locations)
         self._n_obs_steps = n_obs_steps
         self._chunk_size = chunk_size
+        self._camera_frame_cache = camera_frame_cache
         if self._camera_keys:
             if self._source_dataset is None:
                 raise ValueError("source_dataset is required when camera_keys are present")
@@ -624,20 +664,35 @@ class LeRobotV3DecisionDataset(Dataset[DecisionBatch]):
         if not isinstance(config, RLConfig):
             raise ValueError(f"config must be an RLConfig, got {type(config).__name__}")
         root = Path(dataset_root)
-        dataset = LeRobotDataset(repo_id, root=root)
+        # PyAV creates an independent decoder per worker and is safe for the
+        # multiprocess DataLoader used by offline RL.  The auto-selected
+        # TorchCodec backend can inherit decoder state across forked workers
+        # and intermittently fail with "Invalid data found when processing
+        # input" on long video histories.
+        dataset = LeRobotDataset(repo_id, root=root, video_backend="pyav", return_uint8=True)
         canonical_fields = _canonical_rl_fields(dataset.features)
         if canonical_fields and any(".incomplete" in part for part in root.parts):
             raise ValueError(f"canonical dataset staging paths are not loadable: {root}")
         if canonical_fields:
             dataset_fps = getattr(dataset, "fps", None)
+            # RL-100's original Moya collector runs at 60 Hz, while the real
+            # Franka Duo recorder emits synchronized RGB/depth frames at 15 Hz.
+            # Both use the same canonical reward/transition fields; accept the
+            # recorder's native rate without weakening validation for unknown
+            # robot types.
+            robot_type = getattr(getattr(dataset, "meta", None), "robot_type", None)
+            allowed_fps = {60}
+            if robot_type == "franka_duo":
+                allowed_fps.add(15)
             if (
                 isinstance(dataset_fps, bool)
                 or not isinstance(dataset_fps, Integral)
-                or int(dataset_fps) != 60
+                or int(dataset_fps) not in allowed_fps
             ):
                 raise ValueError(
-                    "canonical Moya RL datasets must use the 60 Hz control rate, "
-                    f"got fps={dataset_fps!r}"
+                    "canonical RL dataset has unsupported fps for robot_type="
+                    f"{robot_type!r}; expected one of {sorted(allowed_fps)}, got "
+                    f"{dataset_fps!r}"
                 )
         state_shape = _feature_shape(dataset.features, config.state_key)
         action_shape = _feature_shape(dataset.features, "action")
@@ -781,6 +836,72 @@ class LeRobotV3DecisionDataset(Dataset[DecisionBatch]):
             chunk_size=config.chunk_size,
         )
 
+    def required_camera_frame_indices(self) -> tuple[int, ...]:
+        """Return unique source frame indices needed by this decision view."""
+
+        if not self._camera_keys:
+            return ()
+        indices: set[int] = set()
+        for location in self._locations:
+            current_indices, next_indices = _decision_history_indices(
+                location, n_obs_steps=self._n_obs_steps, chunk_size=self._chunk_size
+            )
+            indices.update(current_indices)
+            indices.update(next_indices)
+        return tuple(sorted(indices))
+
+    def preload_camera_frame_cache(self) -> dict[str, int | float]:
+        """Decode required camera frames once and keep raw RGB tensors in RAM.
+
+        This cache is deliberately below the model: it stores decoded wrist RGB
+        frames, not DP3 encoder latents.  The IQL critic can still update its
+        observation encoder exactly as before, while repeated PyAV seeks/decodes
+        on the fixed offline dataset are eliminated.
+        """
+
+        if not self._camera_keys:
+            return {"camera_cache_frames": 0, "camera_cache_bytes": 0.0}
+        if self._source_dataset is None:
+            raise RuntimeError("camera source dataset is unavailable")
+        if self._camera_frame_cache is not None:
+            total_bytes = sum(
+                value.numel() * value.element_size()
+                for frame in self._camera_frame_cache.values()
+                for value in frame.values()
+            )
+            return {
+                "camera_cache_frames": len(self._camera_frame_cache),
+                "camera_cache_bytes": float(total_bytes),
+            }
+
+        cache: dict[int, dict[str, Tensor]] = {}
+        total_bytes = 0
+        for frame_index in self.required_camera_frame_indices():
+            row = self._source_dataset[frame_index]
+            if not isinstance(row, Mapping):
+                raise ValueError(
+                    f"dataset row {frame_index} must be a mapping, got {type(row).__name__}"
+                )
+            frame: dict[str, Tensor] = {}
+            for key in self._camera_keys:
+                if key not in row:
+                    raise ValueError(f"dataset row {frame_index} is missing camera feature {key!r}")
+                value = row[key]
+                tensor = value if isinstance(value, Tensor) else torch.as_tensor(value)
+                tensor = tensor.detach().cpu().contiguous()
+                _finite_tensor(key, tensor)
+                frame[key] = tensor
+                total_bytes += tensor.numel() * tensor.element_size()
+            cache[frame_index] = frame
+
+        self._camera_frame_cache = cache
+        self._summary["camera_cache_frames"] = len(cache)
+        self._summary["camera_cache_bytes"] = float(total_bytes)
+        return {
+            "camera_cache_frames": len(cache),
+            "camera_cache_bytes": float(total_bytes),
+        }
+
     def __len__(self) -> int:
         return len(self._records)
 
@@ -789,23 +910,25 @@ class LeRobotV3DecisionDataset(Dataset[DecisionBatch]):
         if not self._camera_keys:
             return record
         location = self._locations[index]
-        current_local = _history_indices(
-            location.decision_start, n_obs_steps=self._n_obs_steps
+        current_indices, next_indices = _decision_history_indices(
+            location, n_obs_steps=self._n_obs_steps, chunk_size=self._chunk_size
         )
-        next_anchor = min(
-            location.decision_start + self._chunk_size, location.episode_length - 1
-        )
-        next_local = _history_indices(next_anchor, n_obs_steps=self._n_obs_steps)
-        current_indices = [location.episode_start + item for item in current_local]
-        next_indices = [location.episode_start + item for item in next_local]
         if self._source_dataset is None:
             raise RuntimeError("camera source dataset is unavailable")
-        current_camera, next_camera = _load_camera_histories(
-            self._source_dataset,
-            camera_keys=self._camera_keys,
-            current_indices=current_indices,
-            next_indices=next_indices,
-        )
+        if self._camera_frame_cache is not None:
+            current_camera, next_camera = _load_cached_camera_histories(
+                self._camera_frame_cache,
+                camera_keys=self._camera_keys,
+                current_indices=current_indices,
+                next_indices=next_indices,
+            )
+        else:
+            current_camera, next_camera = _load_camera_histories(
+                self._source_dataset,
+                camera_keys=self._camera_keys,
+                current_indices=current_indices,
+                next_indices=next_indices,
+            )
         observation_features = dict(record.observation.features)
         observation_features.update(current_camera)
         next_observation_features = dict(record.next_observation.features)
@@ -875,6 +998,7 @@ class LeRobotV3DecisionDataset(Dataset[DecisionBatch]):
                 locations=locations,
                 n_obs_steps=self._n_obs_steps,
                 chunk_size=self._chunk_size,
+                camera_frame_cache=self._camera_frame_cache,
             )
 
         return view(train_indices), view(validation_indices)

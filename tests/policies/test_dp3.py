@@ -35,6 +35,9 @@ from lerobot.policies.factory import (
 from lerobot.utils.constants import ACTION, OBS_POINT_CLOUD, OBS_STATE
 from lerobot.utils.feature_utils import build_dataset_frame, dataset_to_policy_features
 
+WRIST_LEFT = "observation.images.wrist_left"
+WRIST_RIGHT = "observation.images.wrist_right"
+
 
 def make_tiny_config(**overrides) -> DP3Config:
     kwargs = {
@@ -53,14 +56,17 @@ def make_tiny_config(**overrides) -> DP3Config:
         "point_cloud_encoder_hidden_dims": (8, 16),
         "point_cloud_encoder_output_dim": 8,
         "state_encoder_hidden_dims": (8,),
+        "spatial_softmax_num_keypoints": 4,
+        "use_group_norm": True,
         "pretrained_backbone_weights": None,
         "input_features": {
-            OBS_STATE: PolicyFeature(type=FeatureType.STATE, shape=(7,)),
+            OBS_STATE: PolicyFeature(type=FeatureType.STATE, shape=(34,)),
             OBS_POINT_CLOUD: PolicyFeature(type=FeatureType.POINT_CLOUD, shape=(16, 3)),
             "observation.images.head": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 20, 30)),
-            "observation.images.wrist": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 12, 18)),
+            WRIST_LEFT: PolicyFeature(type=FeatureType.VISUAL, shape=(3, 32, 32)),
+            WRIST_RIGHT: PolicyFeature(type=FeatureType.VISUAL, shape=(3, 32, 32)),
         },
-        "output_features": {ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(4,))},
+        "output_features": {ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(20,))},
     }
     kwargs.update(overrides)
     return DP3Config(**kwargs)
@@ -80,7 +86,7 @@ def test_make_policy_infers_point_cloud_from_v3_metadata():
     config = make_tiny_config(input_features={}, output_features={})
     metadata = SimpleNamespace(
         features={
-            OBS_STATE: {"dtype": "float32", "shape": (7,), "names": [f"s{i}" for i in range(7)]},
+            OBS_STATE: {"dtype": "float32", "shape": (34,), "names": [f"s{i}" for i in range(34)]},
             OBS_POINT_CLOUD: {
                 "dtype": "float32",
                 "shape": (16, 3),
@@ -91,12 +97,17 @@ def test_make_policy_infers_point_cloud_from_v3_metadata():
                 "shape": (20, 30, 3),
                 "names": ["height", "width", "channels"],
             },
-            "observation.images.wrist": {
+            WRIST_LEFT: {
                 "dtype": "video",
-                "shape": (12, 18, 3),
+                "shape": (32, 32, 3),
                 "names": ["height", "width", "channels"],
             },
-            ACTION: {"dtype": "float32", "shape": (4,), "names": [f"a{i}" for i in range(4)]},
+            WRIST_RIGHT: {
+                "dtype": "video",
+                "shape": (32, 32, 3),
+                "names": ["height", "width", "channels"],
+            },
+            ACTION: {"dtype": "float32", "shape": (20,), "names": [f"a{i}" for i in range(20)]},
         },
         stats={},
     )
@@ -109,19 +120,19 @@ def test_make_policy_infers_point_cloud_from_v3_metadata():
 
 def test_point_cloud_dataset_contract_and_inference_frame():
     features = {
-        OBS_STATE: {"dtype": "float32", "shape": (7,), "names": [f"s{i}" for i in range(7)]},
+        OBS_STATE: {"dtype": "float32", "shape": (34,), "names": [f"s{i}" for i in range(34)]},
         OBS_POINT_CLOUD: {
             "dtype": "float32",
             "shape": (16, 3),
             "names": ["point", "xyz"],
         },
-        ACTION: {"dtype": "float32", "shape": (4,), "names": [f"a{i}" for i in range(4)]},
+        ACTION: {"dtype": "float32", "shape": (20,), "names": [f"a{i}" for i in range(20)]},
     }
     policy_features = dataset_to_policy_features(features)
     points = np.arange(48, dtype=np.float32).reshape(16, 3)
     frame = build_dataset_frame(
         features,
-        {**{f"s{i}": float(i) for i in range(7)}, "point_cloud": points},
+        {**{f"s{i}": float(i) for i in range(34)}, "point_cloud": points},
         prefix="observation",
     )
 
@@ -135,13 +146,13 @@ def test_lerobot_v3_roundtrip_preserves_point_cloud(tmp_path):
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     features = {
-        OBS_STATE: {"dtype": "float32", "shape": (7,), "names": [f"s{i}" for i in range(7)]},
+        OBS_STATE: {"dtype": "float32", "shape": (34,), "names": [f"s{i}" for i in range(34)]},
         OBS_POINT_CLOUD: {
             "dtype": "float32",
             "shape": (16, 3),
             "names": ["point", "xyz"],
         },
-        ACTION: {"dtype": "float32", "shape": (4,), "names": [f"a{i}" for i in range(4)]},
+        ACTION: {"dtype": "float32", "shape": (20,), "names": [f"a{i}" for i in range(20)]},
     }
     points = np.arange(48, dtype=np.float32).reshape(16, 3)
     root = tmp_path / "dataset"
@@ -154,9 +165,9 @@ def test_lerobot_v3_roundtrip_preserves_point_cloud(tmp_path):
     )
     dataset.add_frame(
         {
-            OBS_STATE: np.zeros(7, dtype=np.float32),
+            OBS_STATE: np.zeros(34, dtype=np.float32),
             OBS_POINT_CLOUD: points,
-            ACTION: np.zeros(4, dtype=np.float32),
+            ACTION: np.zeros(20, dtype=np.float32),
             "task": "point-cloud smoke test",
         }
     )
@@ -172,8 +183,10 @@ def test_lerobot_v3_roundtrip_preserves_point_cloud(tmp_path):
 def test_dp3_rejects_invalid_point_cloud_contract():
     config = make_tiny_config(
         input_features={
-            OBS_STATE: PolicyFeature(type=FeatureType.STATE, shape=(7,)),
+            OBS_STATE: PolicyFeature(type=FeatureType.STATE, shape=(34,)),
             OBS_POINT_CLOUD: PolicyFeature(type=FeatureType.STATE, shape=(16, 3)),
+            WRIST_LEFT: PolicyFeature(type=FeatureType.VISUAL, shape=(3, 32, 32)),
+            WRIST_RIGHT: PolicyFeature(type=FeatureType.VISUAL, shape=(3, 32, 32)),
         }
     )
 
@@ -188,6 +201,42 @@ def test_pointnet_is_permutation_invariant_without_subsampling():
     permutation = torch.randperm(points.shape[1])
 
     torch.testing.assert_close(encoder(points), encoder(points[:, permutation]))
+
+
+def test_dp3_defaults_match_rl100_pointnet_contract():
+    config = DP3Config(device="cpu", push_to_hub=False)
+
+    assert config.expected_state_dim == 34
+    assert config.expected_action_dim == 20
+    assert config.point_cloud_num_points == 2048
+    assert config.point_cloud_encoder_hidden_dims == (64, 128, 256)
+    assert config.point_cloud_encoder_output_dim == 64
+    assert config.point_cloud_use_layer_norm is True
+    assert config.point_cloud_random_subsample is False
+    assert config.crop_is_random is False
+
+
+def test_dp3_rejects_stochastic_visual_or_point_augmentation():
+    with pytest.raises(ValueError, match="random image crops"):
+        make_tiny_config(crop_is_random=True).validate_features()
+    with pytest.raises(ValueError, match="random point-cloud subsampling"):
+        make_tiny_config(point_cloud_random_subsample=True).validate_features()
+
+
+def test_dp3_xyz_pointnet_parameter_count_is_independent_of_point_count():
+    config = DP3Config(
+        device="cpu",
+        push_to_hub=False,
+        point_cloud_num_points=2048,
+        input_features={
+            OBS_STATE: PolicyFeature(type=FeatureType.STATE, shape=(34,)),
+            OBS_POINT_CLOUD: PolicyFeature(type=FeatureType.POINT_CLOUD, shape=(2048, 3)),
+        },
+    )
+
+    point_net = PointNetEncoder(config)
+
+    assert sum(parameter.numel() for parameter in point_net.parameters()) == 59_072
 
 
 def test_depth_to_point_cloud_uses_intrinsics_extrinsics_and_rgb():
@@ -229,17 +278,75 @@ def test_depth_to_point_cloud_fixed_sampling_is_reproducible():
     np.testing.assert_array_equal(first, second)
 
 
-def test_dp3_forward_and_select_action_ignore_rgb_modalities():
+def test_depth_to_point_cloud_zero_pads_like_rl100():
+    depth = np.ones((1, 1), dtype=np.float32)
+
+    points = depth_to_point_cloud(depth, np.eye(3, dtype=np.float32), num_points=4, seed=7)
+
+    np.testing.assert_array_equal(points[0], [0.0, 0.0, 1.0])
+    np.testing.assert_array_equal(points[1:], np.zeros((3, 3), dtype=np.float32))
+
+
+def test_depth_to_point_cloud_all_invalid_returns_rl100_zero_cloud():
+    depth = np.zeros((2, 2), dtype=np.float32)
+
+    points = depth_to_point_cloud(depth, np.eye(3, dtype=np.float32), num_points=4)
+
+    assert points.shape == (4, 3)
+    np.testing.assert_array_equal(points, np.zeros((4, 3), dtype=np.float32))
+
+
+def test_dp3_requires_dual_wrist_rgb_and_fixed_state_action_dimensions():
+    missing_wrist = make_tiny_config()
+    del missing_wrist.input_features[WRIST_RIGHT]
+    with pytest.raises(ValueError, match="wrist_right"):
+        missing_wrist.validate_features()
+
+    wrong_state = make_tiny_config()
+    wrong_state.input_features[OBS_STATE] = PolicyFeature(type=FeatureType.STATE, shape=(33,))
+    with pytest.raises(ValueError, match="34-dimensional"):
+        wrong_state.validate_features()
+
+    wrong_action = make_tiny_config(
+        output_features={ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(17,))}
+    )
+    with pytest.raises(ValueError, match="20-dimensional"):
+        wrong_action.validate_features()
+
+    wrong_contract = make_tiny_config(expected_state_dim=40)
+    with pytest.raises(ValueError, match="fixed at 34"):
+        wrong_contract.validate_features()
+
+
+def test_dp3_requires_randomly_initialized_independent_resnet18_encoders():
+    config = make_tiny_config()
+    policy = DP3Policy(config)
+    rgb_encoders = policy.diffusion.observation_encoder.rgb_encoders
+
+    assert config.vision_backbone == "resnet18"
+    assert config.pretrained_backbone_weights is None
+    assert len(rgb_encoders) == 2
+    assert rgb_encoders[0] is not rgb_encoders[1]
+    assert rgb_encoders[0].backbone is not rgb_encoders[1].backbone
+    assert tuple(config.image_features) == (WRIST_LEFT, WRIST_RIGHT)
+
+    pretrained = make_tiny_config(pretrained_backbone_weights="ResNet18_Weights.IMAGENET1K_V1")
+    with pytest.raises(ValueError, match="without pretrained weights"):
+        pretrained.validate_features()
+
+
+def test_dp3_forward_and_select_action_use_point_cloud_dual_wrist_rgb_and_state():
     torch.manual_seed(0)
     config = make_tiny_config()
     policy = DP3Policy(config)
     train_batch = {
-        OBS_STATE: torch.randn(2, config.n_obs_steps, 7),
+        OBS_STATE: torch.randn(2, config.n_obs_steps, 34),
         OBS_POINT_CLOUD: torch.randn(2, config.n_obs_steps, 16, 3),
-        ACTION: torch.randn(2, config.horizon, 4),
+        ACTION: torch.randn(2, config.horizon, 20),
         "action_is_pad": torch.zeros(2, config.horizon, dtype=torch.bool),
         "observation.images.head": torch.randn(2, config.n_obs_steps, 3, 20, 30),
-        "observation.images.wrist": torch.randn(2, config.n_obs_steps, 3, 12, 18),
+        WRIST_LEFT: torch.randn(2, config.n_obs_steps, 3, 32, 32),
+        WRIST_RIGHT: torch.randn(2, config.n_obs_steps, 3, 32, 32),
     }
 
     loss, output = policy(train_batch)
@@ -248,19 +355,24 @@ def test_dp3_forward_and_select_action_ignore_rgb_modalities():
     assert output is None
     assert loss.isfinite()
     assert any(parameter.grad is not None for parameter in policy.parameters())
+    assert all(
+        any(parameter.grad is not None for parameter in encoder.parameters())
+        for encoder in policy.diffusion.observation_encoder.rgb_encoders
+    )
 
     policy.eval()
     policy.reset()
     action = policy.select_action(
         {
-            OBS_STATE: torch.randn(2, 7),
+            OBS_STATE: torch.randn(2, 34),
             OBS_POINT_CLOUD: torch.randn(2, 16, 3),
             "observation.images.head": torch.randn(2, 3, 20, 30),
-            "observation.images.wrist": torch.randn(2, 3, 12, 18),
+            WRIST_LEFT: torch.randn(2, 3, 32, 32),
+            WRIST_RIGHT: torch.randn(2, 3, 32, 32),
         },
-        noise=torch.randn(2, config.horizon, 4),
+        noise=torch.randn(2, config.horizon, 20),
     )
-    assert action.shape == (2, 4)
+    assert action.shape == (2, 20)
 
 
 def test_dp3_checkpoint_roundtrip(tmp_path):

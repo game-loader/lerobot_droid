@@ -160,7 +160,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--repo-id", default=None)
     parser.add_argument("--output-repo-id", default=None)
-    parser.add_argument("--num-points", type=int, default=512)
+    parser.add_argument("--num-points", type=int, default=2048)
     parser.add_argument(
         "--extrinsics", type=_floats, default=None, help="Row-major camera-to-training-frame 4x4"
     )

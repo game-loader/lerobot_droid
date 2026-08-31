@@ -393,6 +393,41 @@ class IQL(nn.Module):
         return self.q_value(observation, action, action_valid)
 
     @torch.no_grad()
+    def min_q_features(
+        self,
+        features: Tensor,
+        action: Tensor,
+        action_valid: Tensor,
+    ) -> Tensor:
+        """Evaluate min-Q from a precomputed observation feature latent.
+
+        RL-100's multimodal AM-Q rollout evolves encoded DP3 features rather
+        than raw point clouds/RGB.  This method keeps the IQL critic reusable
+        in that latent space while ``min_q`` continues to accept raw
+        :class:`ObservationBatch` inputs for ordinary training.
+        """
+
+        if not isinstance(features, Tensor) or features.ndim != 2:
+            raise ValueError(
+                f"features must have shape [batch,feature_dim], got {getattr(features, 'shape', None)}"
+            )
+        if features.shape[-1] != self.feature_encoder.output_dim:
+            raise ValueError(
+                "feature latent width disagrees with encoder: "
+                f"expected {self.feature_encoder.output_dim}, got {features.shape[-1]}"
+            )
+        if not features.is_floating_point() or not torch.isfinite(features).all().item():
+            raise ValueError("features must be finite floating-point values")
+        packed_action = self.action_packer(
+            action.to(self.device), action_valid.to(self.device)
+        )
+        q_input = self._q_input(features.to(self.device), packed_action)
+        result = torch.minimum(self.q1(q_input), self.q2(q_input))
+        if result.ndim != 2 or result.shape[-1] != 1 or not torch.isfinite(result).all().item():
+            raise ValueError("IQL min_q_features must be finite with shape [batch,1]")
+        return result
+
+    @torch.no_grad()
     def advantage(
         self,
         observation: ObservationBatch,

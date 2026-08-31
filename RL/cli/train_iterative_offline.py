@@ -753,8 +753,15 @@ def _canonical_dataset_valid(dataset_root: Path, summary_path: Path, repo_id: st
     if summary.get("complete") is not True:
         raise ValueError(f"dataset summary is not complete: {summary_path}")
     dataset = LeRobotDataset(repo_id, root=dataset_root, download_videos=False)
-    if dataset.fps != 60:
-        raise ValueError(f"canonical Moya dataset must use 60 Hz, got {dataset.fps}")
+    allowed_fps = {60}
+    if getattr(dataset.meta, "robot_type", None) == "franka_duo":
+        allowed_fps.add(15)
+    if dataset.fps not in allowed_fps:
+        raise ValueError(
+            "canonical RL dataset has unsupported fps for "
+            f"robot_type={getattr(dataset.meta, 'robot_type', None)!r}; "
+            f"expected one of {sorted(allowed_fps)}, got {dataset.fps}"
+        )
     expected = summary.get("episodes_saved")
     if isinstance(expected, bool) or not isinstance(expected, int) or expected != dataset.num_episodes:
         raise ValueError(

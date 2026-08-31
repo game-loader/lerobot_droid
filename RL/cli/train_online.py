@@ -4,12 +4,20 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 
-"""Run bounded online diffusion PPO in the fused Moya Newton environment."""
+"""Run bounded online diffusion PPO in a user-provided real-robot environment.
+
+The command never creates a simulator implicitly.  ``--env-factory`` must
+resolve to a callable returning a Gymnasium-compatible vector environment with
+``num_envs``, ``reset()`` and ``step(action)``.  A one-robot adapter should
+expose ``num_envs=1`` and may return unbatched observations.
+"""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
+import inspect
 import json
 import math
 import shutil
@@ -21,8 +29,9 @@ from typing import Any
 
 import torch
 
+from lerobot.policies.dp3.configuration_dp3 import DP3Config
 from RL.adapters.checkpoint import CheckpointAdapter
-from RL.adapters.moya_newton import create_moya_env
+from RL.adapters.real_robot import validate_vector_env
 from RL.checkpointing import (
     LoadedRLCheckpoint,
     RLProvenance,
@@ -31,6 +40,7 @@ from RL.checkpointing import (
 )
 from RL.config import RLConfig, TraceConfig
 from RL.policy.diffusion_adapter import DiffusionRLAdapter
+from RL.policy.observation_encoder import DP3FeatureEncoder
 from RL.trainers.online import OnlineTrainer
 
 
@@ -56,11 +66,24 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--device", default="cuda")
-    parser.add_argument("--sim-device", default="cuda:0")
-    parser.add_argument("--num-envs", type=int, default=16)
-    # Moya uses 32-physics-step action chunks and a 930-step horizon. A
-    # complete sparse-reward episode therefore needs 30 decision rows by
-    # default; smoke mode intentionally overrides this to one.
+    parser.add_argument(
+        "--env-device",
+        "--sim-device",
+        dest="env_device",
+        default=None,
+        help=(
+            "Optional device hint forwarded to the caller-provided environment "
+            "factory. This command never creates or configures a simulator."
+        ),
+    )
+    parser.add_argument(
+        "--num-envs",
+        type=int,
+        default=1,
+        help="Number of real-robot worlds exposed by the environment (default: 1).",
+    )
+    # A decision emits one policy action chunk.  The environment factory may
+    # use ``episode_length`` to impose a task-specific truncation horizon.
     parser.add_argument("--rollout-decisions", type=int, default=30)
     parser.add_argument("--ppo-epochs", type=int, default=1)
     parser.add_argument("--updates", type=int, default=1)
@@ -71,7 +94,24 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--actor-lr", type=float, default=1e-6)
     parser.add_argument("--value-lr", type=float, default=3e-4)
     parser.add_argument("--probability-sigma-min", type=float, default=0.1)
-    parser.add_argument("--episode-length", type=int, default=930)
+    parser.add_argument("--episode-length", type=int, default=None)
+    parser.add_argument(
+        "--env-factory",
+        default=None,
+        help=(
+            "Environment factory as module:callable. The callable must return a "
+            "Gymnasium-compatible vector environment with num_envs, reset(), and step()."
+        ),
+    )
+    parser.add_argument(
+        "--reward-mode",
+        choices=("terminal_success", "environment"),
+        default="terminal_success",
+        help=(
+            "terminal_success preserves the sparse RL-100 reward contract; "
+            "environment accumulates rewards returned by env.step()."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--swanlab-project")
     parser.add_argument("--swanlab-run-name")
@@ -166,6 +206,43 @@ def _swanlab_logger(args: argparse.Namespace) -> tuple[Callable[[Mapping[str, fl
     return log, run
 
 
+def _resolve_callable(spec: str) -> Callable[..., Any]:
+    if not isinstance(spec, str) or ":" not in spec:
+        raise ValueError(f"env-factory must use module:callable syntax, got {spec!r}")
+    module_name, attribute = spec.split(":", 1)
+    if not module_name or not attribute:
+        raise ValueError(f"env-factory must use module:callable syntax, got {spec!r}")
+    module = importlib.import_module(module_name)
+    factory = getattr(module, attribute, None)
+    if not callable(factory):
+        raise ValueError(f"env-factory target is not callable: {spec!r}")
+    return factory
+
+
+def _create_env(args: argparse.Namespace) -> Any:
+    factory = _resolve_callable(args.env_factory)
+    # Forward only generic hints explicitly supplied by the caller.  Do not
+    # force simulation-only ``headless`` kwargs onto a real-robot factory.
+    candidate_kwargs: dict[str, Any] = {"num_envs": args.num_envs}
+    if args.env_device is not None:
+        candidate_kwargs["device"] = args.env_device
+    if args.episode_length is not None:
+        candidate_kwargs["episode_length"] = args.episode_length
+    try:
+        signature = inspect.signature(factory)
+    except (TypeError, ValueError):
+        signature = None
+    if signature is None or any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    ):
+        return factory(**candidate_kwargs)
+    accepted = {
+        name: value for name, value in candidate_kwargs.items() if name in signature.parameters
+    }
+    return factory(**accepted)
+
+
 def _restore_online_state(loaded: LoadedRLCheckpoint, trainer: OnlineTrainer) -> None:
     if loaded.state.stage != "online":
         return
@@ -224,22 +301,27 @@ def _restore_online_state(loaded: LoadedRLCheckpoint, trainer: OnlineTrainer) ->
 
 def run(args: argparse.Namespace) -> Path:
     if args.smoke:
-        args.num_envs = 16
         args.rollout_decisions = 1
         args.ppo_epochs = 1
         args.updates = 1
         args.inference_steps = 2
-        args.minibatch_size = 16
+        args.minibatch_size = args.num_envs
     for name in (
         "num_envs",
         "rollout_decisions",
         "ppo_epochs",
         "updates",
         "inference_steps",
-        "episode_length",
     ):
         if getattr(args, name) <= 0:
             raise ValueError(f"{name} must be positive")
+    if args.episode_length is not None and args.episode_length <= 0:
+        raise ValueError("episode_length must be positive when supplied")
+    if not args.env_factory:
+        raise ValueError(
+            "--env-factory is required for online RL. This command never creates a "
+            "simulator implicitly; provide a real-robot vector environment factory."
+        )
     for name in ("actor_lr", "value_lr"):
         if not math.isfinite(getattr(args, name)) or getattr(args, name) <= 0:
             raise ValueError(f"{name} must be positive and finite")
@@ -264,16 +346,18 @@ def run(args: argparse.Namespace) -> Path:
     policy_config = current.policy.config
     state_feature = policy_config.robot_state_feature
     action_feature = policy_config.action_feature
-    if state_feature is None or tuple(state_feature.shape) != (39,):
-        raise ValueError(f"Moya online training requires a 39D state feature, got {state_feature!r}")
-    if action_feature is None or tuple(action_feature.shape) != (14,):
-        raise ValueError(f"Moya online training requires a 14D action feature, got {action_feature!r}")
+    if state_feature is None or len(state_feature.shape) != 1:
+        raise ValueError(f"online training requires a vector state feature, got {state_feature!r}")
+    if action_feature is None or len(action_feature.shape) != 1:
+        raise ValueError(f"online training requires a vector action feature, got {action_feature!r}")
+    state_dim = state_feature.shape[0]
+    action_dim = action_feature.shape[0]
     rl_config = RLConfig(
         trace=trace_config,
         state_key="observation.state",
         n_obs_steps=policy_config.n_obs_steps,
-        state_dim=39,
-        action_dim=14,
+        state_dim=state_dim,
+        action_dim=action_dim,
         chunk_size=policy_config.n_action_steps,
         gamma=args.gamma,
     )
@@ -297,6 +381,15 @@ def run(args: argparse.Namespace) -> Path:
             current_policy=current,
             old_policy=old,
             actor_optimizer=torch.optim.Adam(current.policy.parameters(), lr=args.actor_lr),
+            # RL-100 3D uses obs2latent for the critic as well as the actor.
+            # Keep the historical state-only critic for standard Diffusion
+            # checkpoints, but make DP3's value function multimodal by
+            # default so online PPO can use the point cloud and both wrists.
+            value_encoder=(
+                DP3FeatureEncoder(current.policy)
+                if isinstance(policy_config, DP3Config)
+                else None
+            ),
             metrics_path=metrics_path,
             gamma=args.gamma,
             gae_lambda=args.gae_lambda,
@@ -305,6 +398,7 @@ def run(args: argparse.Namespace) -> Path:
             seed=args.seed,
             logger=logger,
             debug=args.debug,
+            reward_mode=args.reward_mode,
         )
         for group in trainer.value_optimizer.param_groups:
             group["lr"] = args.value_lr
@@ -313,22 +407,19 @@ def run(args: argparse.Namespace) -> Path:
                 "num_envs": args.num_envs,
                 "rollout_decisions": args.rollout_decisions,
                 "episode_length": args.episode_length,
-                "sim_device": args.sim_device,
+                "env_device": args.env_device,
                 "policy_device": args.device,
                 "actor_lr": args.actor_lr,
                 "value_lr": args.value_lr,
-                "headless": True,
+                "env_factory": args.env_factory,
+                "reward_mode": args.reward_mode,
             }
         )
         if loaded is not None:
             _restore_online_state(loaded, trainer)
 
-        env = create_moya_env(
-            num_envs=args.num_envs,
-            device=args.sim_device,
-            episode_length=args.episode_length,
-            headless=True,
-        )
+        env = _create_env(args)
+        validate_vector_env(env, expected_num_envs=args.num_envs)
         for update in range(args.updates):
             rollout = trainer.collect(
                 env,

@@ -89,3 +89,64 @@ entries:
       - Routed the canonical new-environment evaluation as direct experiment N84 and grounded its 86/100 result in the saved eval_info artifact.
       - Routed the archived old-submodule reproduction and historical 91/100 record as direct experiment N85; the matched old run reached 88%, so single-run variation remains material.
       - Routed the reward-sum and IK observations as direct experiment N86, without crystallizing a causal success claim; repeated matched seeds remain open.
+  - turn: "2026-08-26_001#1"
+    notes:
+      - Routed the user-specified multimodal model contract as decision N87 and the implemented, tested result as experiment N88.
+      - Did not stage a new learning claim: this turn fixed and validated an architecture contract but produced no policy-quality experiment.
+      - Marked O01 and O02 stale after more than five turns without a topic revisit or an active open-thread reference.
+      - Noted but did not repair the pre-existing missing N84-N86 exploration-tree entries because trace files are append-only and that inconsistency predates this turn.
+  - turn: "2026-08-26_001#2"
+    notes:
+      - Routed the user's real-robot scope clarification as decision N89 and bound it to the recorder's ZED depth sidecar plus two wrist RGB streams.
+      - Updated present documentation and code docstrings to distinguish raw recorder 17D state/action from the model's explicit 40D/24D contract.
+      - Kept the dataset adapter and 24D controller mapping as open threads because their semantics were not specified and must not be invented.
+  - turn: "2026-08-26_001#3"
+    notes:
+      - Routed the user's state-layout clarification as decision N90; the model remains shape-locked and does not perform raw-message conversion.
+      - Recorded N91 as a focused validation experiment after adding RL-100 all-invalid-cloud zero padding; the suite passed 40 tests with 4 skips.
+      - Kept the adapter/controller thread explicitly out of scope because the user requested model-only implementation.
+  - turn: "2026-08-27_001#1"
+    notes:
+      - Routed the user's revised DP3 contract as decision N92: state is fixed at 34 dimensions and action at 18 dimensions.
+      - Updated model configuration, regression fixtures, documentation, and strict-contract validation; the point-cloud and RGB branches were left unchanged.
+      - Routed the measured 2048-point XYZ PointNet parameter count as experiment N93; the result is 59,072 trainable parameters and is independent of point count.
+      - Did not modify the raw Franka Duo data adapter or evaluator; the 34D state ordering and 18D action semantics remain upstream contracts.
+  - turn: "2026-08-27_001#2"
+    notes:
+      - Routed the user's default-processing instruction as decision N94: DP3 and its point-cloud preprocessing now default to the full 2048-point XYZ cloud.
+      - Kept the independent evaluator/RL-100 export defaults unchanged because they are separate legacy contracts outside this model change.
+      - Recorded N95 after the 41-test focused suite, Ruff checks, format checks, and diff check passed with the new default.
+  - turn: "2026-08-27_001#4"
+    notes:
+      - Routed the reward-contract question as N96 and the live compatibility audit as N97.
+      - Preserved the existing sparse terminal reward semantics as reusable for offline RL, while distinguishing online environment rewards from dataset columns.
+      - Kept the DP3/RL-100 integration gap open because current checkpoint, conditioning, critic, and online CLI paths still target the earlier Diffusion/Moya contract.
+  - turn: "2026-08-27_001#6"
+    notes:
+      - Routed the user's correction as decision N100: RL-100 AM-Q is explicitly applicable to 3D point-cloud policies.
+      - Recorded N101 as a direct source audit rather than a new performance claim; the key distinction is raw multimodal encoding followed by latent-only dynamics rollout.
+      - Kept the no-visual-decoder limitation explicit: imagined future RGB/point clouds are not reconstructed, so latent critics and actors consume the predicted feature history.
+  - turn: "2026-08-27_001#7"
+    notes:
+      - Routed the IL-versus-AM-Q conditioning comparison as direct experiment N102 rather than a new claim.
+      - Recorded the boundary that raw inputs and normalization match at initialization, while AM-Q imagined steps consume predicted latent histories and use eval-mode preprocessing.
+  - turn: "2026-08-27_002#1"
+    notes:
+      - Routed the user's explicit no-random-crop/no-random-point-subsampling instruction as decision N103; the DP3 config fixes both flags false and tests reject opt-in stochastic augmentation.
+      - Routed the reward-format audit as direct experiment N104 because live adapter checks and the focused suite establish concrete v3 column names, shapes, terminal semantics, and legacy-summary fallback.
+      - Updated DP3 and RL documentation to distinguish one-time reproducible point-cloud preprocessing from the model's deterministic IL path; no new performance claim was staged.
+  - turn: "2026-08-27_003#1"
+    notes:
+      - "Routed IL completion and offline launch as direct experiment nodes because logs and checkpoint artifacts provide concrete evidence."
+      - "Recorded the transient status-127 handoff as a dead-end rather than silently overwriting it; a subsequent rerun from 050000 started successfully."
+      - "Kept offline completion and sync checkpoint generation open because the run is still in IQL warm-up."
+  - turn: "2026-08-27_003#2"
+    notes:
+      - "Recorded the AM-Q interval-bucket fix as an implementation experiment because PPO epochs can skip exact modulo boundaries."
+      - "Recorded evaluator export and tele-data validation directly; no real-robot run was attempted because calibration and relay are hardware-dependent."
+      - "Kept offline completion open: metrics show IQL warm-up only, so sync checkpoints and final bundle do not yet exist."
+  - turn: "2026-08-28_001#1"
+    notes:
+      - "Routed cache-path audit as direct experiment N111 because filesystem timestamps and launcher code provide concrete evidence; patched only environment exports, not model hyperparameters."
+      - "Routed the stopped offline process as dead_end N112 rather than claiming completion; metrics and checkpoint directories lack sync_050/final artifacts."
+      - "Deferred any restart until action20 dataset readiness is known, per the active parent instruction."

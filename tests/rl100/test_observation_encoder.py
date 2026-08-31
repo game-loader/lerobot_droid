@@ -77,6 +77,27 @@ def test_generic_pixels_require_registered_feature_encoder() -> None:
         encoder(observation)
 
 
+def test_state_encoder_can_ignore_auxiliary_policy_modalities() -> None:
+    encoder = StateFeatureEncoder(
+        state_dim=3,
+        n_obs_steps=2,
+        hidden_dims=(8,),
+        output_dim=4,
+        ignore_extra_features=True,
+    )
+    observation = ObservationBatch(
+        {
+            "observation.state": torch.zeros(2, 2, 3),
+            "observation.images.wrist_left": torch.zeros(2, 2, 3, 8, 8),
+            "observation.point_cloud": torch.zeros(2, 2, 16, 3),
+        }
+    )
+
+    output = encoder(observation)
+
+    assert output.shape == (2, 4)
+
+
 class _MeanImageEncoder(ObservationFeatureEncoder):
     @property
     def output_dim(self) -> int:

@@ -1,0 +1,40 @@
+session:
+  id: "2026-08-28_001"
+  date: "2026-08-28"
+  started: "2026-08-28T16:27:00+08:00"
+  last_turn: "2026-08-28T16:31:00+08:00"
+  turn_count: 1
+  summary: Audited dataset cache reuse, patched the launcher for explicit shared HF caches, and found offline RL stopped at sync 11 without a final checkpoint.
+
+events_logged:
+  - turn: 1
+    type: experiment
+    id: N111
+    routing: direct
+    provenance: ai-executed
+    summary: IL/offline launcher lacked explicit HF cache exports; patched to use repository-local shared cache directories.
+  - turn: 1
+    type: dead_end
+    id: N112
+    routing: direct
+    provenance: ai-executed
+    summary: Offline RL process is no longer running and stopped at actor_updates 26248 / sync 11 with only sync_005 and sync_010 checkpoints.
+
+ai_actions:
+  - turn: 1
+    action: Inspected process tables, logs, metrics, checkpoints, and Hugging Face cache timestamps; patched outputs/run_franka_duo_dp3_training.sh to export UV/HF cache paths.
+    provenance: ai-executed
+    files_changed:
+      - outputs/run_franka_duo_dp3_training.sh
+      - .agents/rgb_cache_audit.txt
+
+claims_touched: []
+logic_revisions: []
+key_context:
+  - turn: 1
+    excerpt: "Offline metrics latest progress/old_policy_syncs=11 and no process is alive; cache files were written under /home/droid/.cache/huggingface rather than the repository cache."
+open_threads:
+  - "Determine whether action20 dataset is ready and whether to resume/relaunch offline RL from sync_010 or IL 050000."
+  - "Confirm final checkpoint and eval bundle after offline RL reaches the requested sync target."
+ai_suggestions_pending:
+  - "Use explicit repository-local HF cache exports for any resumed IL/offline runs."

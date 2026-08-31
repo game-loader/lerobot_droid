@@ -3,14 +3,16 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 
-"""State-only AM-Q evaluation for offline diffusion-policy promotion.
+"""AM-Q evaluation for offline diffusion-policy promotion.
 
 AM-Q is an offline policy-selection gate, not the actor advantage. A learned
-state dynamics ensemble imagines the result of policy action chunks and the
-IQL critic scores the same candidate and behavior policies on paired initial
+dynamics ensemble imagines the result of policy action chunks and the IQL
+critic scores the same candidate and behavior policies on paired initial
 states. The score is the batch expectation of the per-trajectory sum of Q
-values. Image-conditioned rollout is intentionally left as an extension
-point: imagined observations currently contain the normalized state history.
+values. State-only policies use state-history dynamics; DP3 uses latent
+multimodal dynamics (PointNet XYZ + dual-wrist RGB + state). Raw visual
+observations are encoded once to initialize the latent; dynamics never
+synthesizes raw point clouds or images.
 """
 
 from __future__ import annotations
@@ -20,10 +22,9 @@ from dataclasses import dataclass
 
 import torch
 
-from RL.algorithms.dynamics import StateDynamicsEnsemble
+from RL.algorithms.dynamics import DP3FeatureDynamicsEnsemble, StateDynamicsEnsemble
 from RL.algorithms.iql import IQL, _finite_float, _positive_int
 from RL.policy.diffusion_adapter import DiffusionRLAdapter
-from RL.policy.observation_encoder import is_image_feature
 from RL.types import ObservationBatch
 
 
@@ -47,24 +48,39 @@ class AMQResult:
         }
 
 
-def _state_observation(observation: ObservationBatch, *, state_key: str) -> ObservationBatch:
+def _state_observation(
+    observation: ObservationBatch,
+    *,
+    state_key: str,
+    preserve_modalities: bool = False,
+) -> ObservationBatch:
     if not isinstance(observation, ObservationBatch):
         raise ValueError(
             f"observation must be an ObservationBatch, got {type(observation).__name__}"
         )
     if state_key not in observation.features:
         raise ValueError(f"observation is missing state_key={state_key!r}")
-    image_keys = [
-        key
-        for key, value in observation.features.items()
-        if key != state_key and is_image_feature(key, value)
-    ]
-    if image_keys:
-        raise ValueError(
-            "state-only AM-Q rollout cannot imagine image observations; "
-            f"register an image encoder first (keys={image_keys})"
-        )
-    return ObservationBatch({state_key: observation.features[state_key]})
+    if not preserve_modalities:
+        # Preserve the historical state-only helper contract for callers that
+        # explicitly request a critic/dynamics observation.
+        from RL.policy.observation_encoder import is_image_feature
+
+        image_keys = [
+            key
+            for key, value in observation.features.items()
+            if key != state_key and is_image_feature(key, value)
+        ]
+        if image_keys:
+            raise ValueError(
+                "state-only AM-Q rollout cannot imagine image observations; "
+                f"register an image encoder first (keys={image_keys})"
+            )
+        return ObservationBatch({state_key: observation.features[state_key]})
+
+    # Keep auxiliary modalities for policy conditioning. Dynamics/IQL
+    # encoders may intentionally ignore them, while a multimodal actor (DP3)
+    # still needs point-cloud/RGB inputs during imagined rollouts.
+    return ObservationBatch(dict(observation.features))
 
 
 class AMQEvaluator:
@@ -73,7 +89,7 @@ class AMQEvaluator:
     def __init__(
         self,
         *,
-        dynamics: StateDynamicsEnsemble,
+        dynamics: StateDynamicsEnsemble | DP3FeatureDynamicsEnsemble,
         iql: IQL,
         candidate_policy: DiffusionRLAdapter,
         behavior_policy: DiffusionRLAdapter,
@@ -82,8 +98,10 @@ class AMQEvaluator:
         state_key: str = "observation.state",
         discounted: bool = False,
     ) -> None:
-        if not isinstance(dynamics, StateDynamicsEnsemble):
-            raise ValueError("dynamics must be a StateDynamicsEnsemble")
+        if not isinstance(dynamics, (StateDynamicsEnsemble, DP3FeatureDynamicsEnsemble)):
+            raise ValueError(
+                "dynamics must be a StateDynamicsEnsemble or DP3FeatureDynamicsEnsemble"
+            )
         if not isinstance(iql, IQL):
             raise ValueError("iql must be an IQL instance")
         for name, policy in (
@@ -92,12 +110,6 @@ class AMQEvaluator:
         ):
             if not isinstance(policy, DiffusionRLAdapter):
                 raise ValueError(f"{name} must be a DiffusionRLAdapter")
-            image_features = tuple(policy.policy.config.image_features)
-            if image_features:
-                raise ValueError(
-                    "state-only AM-Q does not support image-conditioned policies; "
-                    f"{name} declares image features {image_features!r}"
-                )
         candidate_policy.assert_transition_compatible(behavior_policy)
         if not torch.equal(
             candidate_policy.checkpoint.active_action_mask,
@@ -116,13 +128,17 @@ class AMQEvaluator:
             raise ValueError("policy n_action_steps must match dynamics chunk_size")
         if behavior_policy.policy.config.n_action_steps != dynamics.action_packer.chunk_size:
             raise ValueError("behavior policy n_action_steps must match dynamics chunk_size")
+        dynamics_state_dim = getattr(dynamics, "state_dim", None)
         for name, policy in (
             ("candidate_policy", candidate_policy),
             ("behavior_policy", behavior_policy),
         ):
             state_feature = policy.policy.config.robot_state_feature
             action_feature = policy.policy.config.action_feature
-            if state_feature is None or tuple(state_feature.shape) != (dynamics.state_dim,):
+            if state_feature is None or (
+                dynamics_state_dim is not None
+                and tuple(state_feature.shape) != (dynamics_state_dim,)
+            ):
                 raise ValueError(
                     f"{name} state feature shape is incompatible with dynamics"
                 )
@@ -148,16 +164,21 @@ class AMQEvaluator:
         self.rollout_horizon = rollout_horizon
         self.state_key = state_key
         self.discounted = discounted
+        self.latent_mode = isinstance(dynamics, DP3FeatureDynamicsEnsemble)
 
     @property
     def device(self) -> torch.device:
         return self.dynamics.device
 
     def _normalized_initial(self, observation: ObservationBatch, *, normalized: bool) -> ObservationBatch:
-        state = _state_observation(observation, state_key=self.state_key)
+        state = _state_observation(
+            observation, state_key=self.state_key, preserve_modalities=True
+        )
         if normalized:
             return state.to(self.device)
-        return self.behavior_policy.checkpoint.normalize_observation(state).to(self.device)
+        return self.behavior_policy.checkpoint.normalize_observation(
+            state, convert_visual_uint8=True
+        ).to(self.device)
 
     @torch.no_grad()
     def evaluate(
@@ -168,7 +189,12 @@ class AMQEvaluator:
         normalized: bool = False,
         seed: int = 0,
     ) -> AMQResult:
-        """Run a deterministic-seed, state-only model rollout and score min-Q."""
+        """Run a deterministic-seed rollout and score min-Q.
+
+        DP3 rollouts evolve the encoded multimodal latent directly. Raw visual
+        tensors are encoded only at initialization; no visual decoder is
+        required during imagined steps.
+        """
 
         if policy not in (self.candidate_policy, self.behavior_policy):
             raise ValueError("policy must be the configured candidate or behavior adapter")
@@ -176,6 +202,16 @@ class AMQEvaluator:
             raise ValueError("seed must be an integer")
         state_history = self._normalized_initial(observation, normalized=normalized)
         batch_size = state_history.batch_size()
+        if self.latent_mode:
+            # RL-100's 3D AM-Q evolves the flattened DP3 encoder latent.  The
+            # raw multimodal observation is retained for actor conditioning
+            # because LeRobot's denoiser does not expose a raw-visual decoder.
+            latent = self.dynamics.encode_observation(state_history)
+            latent_history = latent.reshape(
+                batch_size,
+                self.dynamics.n_obs_steps,
+                self.dynamics.latent_dim,
+            )
         action_dim = policy.policy.config.action_feature.shape[0]
         chunk_size = policy.policy.config.n_action_steps
         action_valid = torch.ones(
@@ -197,13 +233,27 @@ class AMQEvaluator:
                 break
             # The dynamics state is normalized; policy sampling expects raw
             # observations and performs checkpoint normalization internally.
-            raw_state = policy.checkpoint.unnormalize_observation(state_history)
-            trace = policy.sample_trace(raw_state, generator=generator)
+            if self.latent_mode:
+                trace = policy.sample_trace_from_features(
+                    latent_history.reshape(batch_size, -1),
+                    generator=generator,
+                )
+            else:
+                raw_state = policy.checkpoint.unnormalize_observation(state_history)
+                trace = policy.sample_trace(raw_state, generator=generator)
             action = trace.final_actions[:, policy.execution_slice, :]
             if action.shape != (batch_size, chunk_size, action_dim):
                 raise ValueError(f"policy executable action has unexpected shape {tuple(action.shape)}")
-            prediction = self.dynamics.predict(state_history, action, action_valid)
-            q_value = self.iql.min_q(state_history, action, action_valid).squeeze(-1)
+            if self.latent_mode:
+                prediction = self.dynamics.predict_latent(
+                    latent_history.reshape(batch_size, -1), action, action_valid
+                )
+                q_value = self.iql.min_q_features(
+                    latent_history.reshape(batch_size, -1), action, action_valid
+                ).squeeze(-1)
+            else:
+                prediction = self.dynamics.predict(state_history, action, action_valid)
+                q_value = self.iql.min_q(state_history, action, action_valid).squeeze(-1)
             # RL-100's AM-Q is the mean Q over the modeled rollout, without a
             # Bellman discount. Keep an opt-in discounted mode for experiments
             # that want the environment's gamma semantics instead.
@@ -215,9 +265,14 @@ class AMQEvaluator:
             reward_sum = reward_sum + (reward_probability * active_float).sum()
             done_sum = done_sum + (done_probability * active_float).sum()
             active_count = active_count + active_float.sum()
-            next_state_ensemble = self.dynamics.next_state_history(
-                state_history, prediction
-            )
+            if self.latent_mode:
+                next_state_ensemble = self.dynamics.next_feature_history(
+                    latent_history, prediction
+                )
+            else:
+                next_state_ensemble = self.dynamics.next_state_history(
+                    state_history, prediction
+                )
             disagreement = next_state_ensemble.var(
                 dim=0, unbiased=False
             ).mean(dim=(-1, -2))
@@ -225,16 +280,22 @@ class AMQEvaluator:
                 max_disagreement, torch.where(active, disagreement, 0.0)
             )
             predicted_next_state = next_state_ensemble.mean(dim=0)
-            current_state = state_history.features[self.state_key]
             terminated = terminated | (done_probability >= 0.5)
-            active_rows = (alive > 0).view(-1, 1, 1) & ~terminated.view(-1, 1, 1)
-            state_history = ObservationBatch(
-                {
-                    self.state_key: torch.where(
-                        active_rows, predicted_next_state, current_state
-                    )
-                }
-            )
+            if self.latent_mode:
+                active_rows = (alive > 0).view(-1, 1, 1) & ~terminated.view(-1, 1, 1)
+                latent_history = torch.where(
+                    active_rows,
+                    predicted_next_state,
+                    latent_history,
+                )
+            else:
+                current_state = state_history.features[self.state_key]
+                active_rows = (alive > 0).view(-1, 1, 1) & ~terminated.view(-1, 1, 1)
+                next_features = dict(state_history.features)
+                next_features[self.state_key] = torch.where(
+                    active_rows, predicted_next_state, current_state
+                )
+                state_history = ObservationBatch(next_features)
             # A hard model terminal ends the imagined trajectory.  Do not let
             # the residual sigmoid continuation weight leak Q terms from later
             # steps after a terminal prediction; soft nonterminal probabilities

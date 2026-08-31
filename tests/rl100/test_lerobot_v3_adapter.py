@@ -664,3 +664,41 @@ def test_camera_features_are_detected_from_metadata_and_loaded_lazily(
     assert "observation.image" in decision.observation.features
     assert "observation.image" in decision.next_observation.features
     assert sorted(set(source.decoded_indices)) == [0, 1, 2]
+
+
+def test_camera_frame_cache_predecodes_required_rows_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "episodes": [
+                    _episode_metadata(episode_index=0),
+                    _episode_metadata(episode_index=1, true_grasp_ever=False),
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(lerobot_v3, "LeRobotDataset", _FakeCameraLeRobotDataset)
+
+    dataset = LeRobotV3DecisionDataset.from_root(
+        dataset_root=tmp_path / "dataset",
+        repo_id="test/camera-cache",
+        summary_path=summary_path,
+        config=RLConfig(state_dim=3, action_dim=2, chunk_size=2),
+    )
+    source = _FakeCameraLeRobotDataset.last_instance
+    assert source is not None
+
+    summary = dataset.preload_camera_frame_cache()
+    assert summary["camera_cache_frames"] == 5
+    assert source.decoded_indices == [0, 1, 2, 3, 4]
+    source.decoded_indices.clear()
+
+    decision = dataset[0]
+
+    assert decision.observation.features["observation.image"].dtype == torch.uint8
+    assert source.decoded_indices == []
+    assert dataset.inspection_summary()["camera_cache_frames"] == 5

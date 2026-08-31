@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+import time
 from pprint import pformat
 
 import torch
@@ -122,6 +123,20 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
         logging.info(
             "Multiple datasets were provided. Applied the following index mapping to the provided datasets: "
             f"{pformat(dataset.repo_id_to_index, indent=2)}"
+        )
+
+    if cfg.dataset.camera_cache in {"ram", "disk"}:
+        if not isinstance(dataset, LeRobotDataset):
+            raise ValueError("camera_cache='ram' is only supported for a single LeRobotDataset")
+        started = time.monotonic()
+        if cfg.dataset.camera_cache == "disk":
+            summary = dataset.preload_camera_frame_cache_disk()
+        else:
+            summary = dataset.preload_camera_frame_cache()
+        logging.info(
+            "Preloaded raw camera frame cache: %s (%.1fs)",
+            summary,
+            time.monotonic() - started,
         )
 
     if cfg.dataset.use_imagenet_stats:

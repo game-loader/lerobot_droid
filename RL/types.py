@@ -113,8 +113,21 @@ class ObservationBatch:
     def __reduce__(self) -> tuple[type[ObservationBatch], tuple[dict[str, Tensor]]]:
         return type(self), (dict(self.features),)
 
-    def to(self, device: torch.device | str) -> ObservationBatch:
-        return ObservationBatch({key: value.to(device) for key, value in self.features.items()})
+    def to(self, device: torch.device | str, *, non_blocking: bool = False) -> ObservationBatch:
+        return ObservationBatch(
+            {key: value.to(device, non_blocking=non_blocking) for key, value in self.features.items()}
+        )
+
+    def pin_memory(self) -> ObservationBatch:
+        def pin(value: Tensor) -> Tensor:
+            if value.device.type != "cpu":
+                return value
+            try:
+                return value.pin_memory()
+            except RuntimeError:
+                return value
+
+        return ObservationBatch({key: pin(value) for key, value in self.features.items()})
 
     def index_select(self, indices: Tensor) -> ObservationBatch:
         _validate_tensor("indices", indices, ndim=1)
@@ -245,16 +258,36 @@ class DecisionBatch:
                 f"{expected_action_valid_shape}, got {tuple(self.action_valid.shape)}"
             )
 
-    def to(self, device: torch.device | str) -> DecisionBatch:
+    def to(self, device: torch.device | str, *, non_blocking: bool = False) -> DecisionBatch:
         return dataclasses.replace(
             self,
-            observation=self.observation.to(device),
-            next_observation=self.next_observation.to(device),
-            action=self.action.to(device),
-            action_valid=self.action_valid.to(device),
-            reward=self.reward.to(device),
-            done=self.done.to(device),
-            discount=self.discount.to(device),
+            observation=self.observation.to(device, non_blocking=non_blocking),
+            next_observation=self.next_observation.to(device, non_blocking=non_blocking),
+            action=self.action.to(device, non_blocking=non_blocking),
+            action_valid=self.action_valid.to(device, non_blocking=non_blocking),
+            reward=self.reward.to(device, non_blocking=non_blocking),
+            done=self.done.to(device, non_blocking=non_blocking),
+            discount=self.discount.to(device, non_blocking=non_blocking),
+        )
+
+    def pin_memory(self) -> DecisionBatch:
+        def pin(value: Tensor) -> Tensor:
+            if value.device.type != "cpu":
+                return value
+            try:
+                return value.pin_memory()
+            except RuntimeError:
+                return value
+
+        return dataclasses.replace(
+            self,
+            observation=self.observation.pin_memory(),
+            next_observation=self.next_observation.pin_memory(),
+            action=pin(self.action),
+            action_valid=pin(self.action_valid),
+            reward=pin(self.reward),
+            done=pin(self.done),
+            discount=pin(self.discount),
         )
 
 

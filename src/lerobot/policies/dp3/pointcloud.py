@@ -38,7 +38,7 @@ def depth_to_point_cloud(
     workspace_max: Sequence[float] | NDArray[np.floating] | None = None,
     min_depth: float = 0.05,
     max_depth: float = 5.0,
-    num_points: int | None = 512,
+    num_points: int | None = 2048,
     seed: int | None = None,
 ) -> NDArray[np.float32]:
     """Deproject one depth image into a fixed-size XYZ or XYZRGB point set.
@@ -46,6 +46,8 @@ def depth_to_point_cloud(
     ``camera_matrix`` accepts either ROS ``CameraInfo.k`` flattened row-major
     or a 3x3 matrix. ``extrinsics``, when supplied, transforms homogeneous
     camera optical-frame points into the desired stable training frame.
+    Oversized clouds are uniformly sampled without replacement; sparse clouds
+    are zero-padded to match RL-100's fixed-size point-cloud contract.
     """
 
     depth_array = np.asarray(depth)
@@ -91,9 +93,6 @@ def depth_to_point_cloud(
         keep = np.all(points <= upper, axis=1)
         points, rows, columns = points[keep], rows[keep], columns[keep]
 
-    if points.shape[0] == 0:
-        raise ValueError("No valid depth points remain after filtering.")
-
     features = points
     if rgb is not None:
         rgb_array = np.asarray(rgb)
@@ -109,10 +108,12 @@ def depth_to_point_cloud(
         indices = rng.choice(features.shape[0], size=num_points, replace=False)
         features = features[indices]
     elif num_points is not None and features.shape[0] < num_points:
-        rng = np.random.default_rng(seed)
-        padding = rng.choice(features.shape[0], size=num_points - features.shape[0], replace=True)
-        indices = np.concatenate((np.arange(features.shape[0]), padding))
-        rng.shuffle(indices)
-        features = features[indices]
+        # Match RL-100's point_cloud_sampling contract: sparse clouds are
+        # padded with zero points rather than duplicating measured geometry.
+        padding = np.zeros(
+            (num_points - features.shape[0], features.shape[1]),
+            dtype=features.dtype,
+        )
+        features = np.concatenate((features, padding), axis=0)
 
     return np.ascontiguousarray(features, dtype=np.float32)
