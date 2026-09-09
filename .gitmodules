@@ -1,0 +1,3 @@
+[submodule "third_party/moya_newton_sim"]
+	path = third_party/moya_newton_sim
+	url = git@gitlab.com:game-loader/moya_newton.git

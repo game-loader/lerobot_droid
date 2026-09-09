@@ -55,3 +55,20 @@ pre-commit run --all-files                           # Lint + format (ruff, typo
 - **Optional dependencies**: many policies, envs, and robots are behind extras (e.g., `lerobot[aloha]`, see `pyproject.toml`). Guard optional imports with `TYPE_CHECKING or _foo_available` at module top + a `require_package(...)` check at use time. Reuse the `_foo_available` flags in `utils/import_utils.py`; don't call `is_package_available`.
 - **Video decoding**: datasets can store observations as video files. `LeRobotDataset` handles frame extraction, but tests need ffmpeg installed.
 - **Prioritize use of `uv run`** to execute Python commands (not raw `python` or `pip`).
+
+## Custom Branch
+
+- This is the personal `0.6.2+droid.1` distribution. Keep upstream behavior unless
+  a custom feature explicitly needs an extension; see `docs/CUSTOM_VERSION.md`.
+- `RL/` is a separate packaged research extension, not the upstream `src/lerobot/rl/`.
+- Run `bash scripts/test_custom_version.sh` after cross-module changes. Do not
+  launch robots, production training or inference services as part of this suite.
+- Never silently substitute MLP placeholders for real PTv3/Sonata backbones.
+- Research-significant decisions and verification milestones are recorded under
+  `ara/` using `/research-manager` at the end of the turn. The historical branch
+  retains the earlier research artifact and experimental outputs; this branch's
+  artifact starts with the upstream migration and does not re-certify past claims.
+- Use `/research-foresight` for artifact-grounded research questions,
+  `/research-visualizer` for trajectory inspection, and `/rigor-reviewer` before
+  trusting or publishing research claims. Do not publish the private simulator or
+  assets without checking their separate licensing.

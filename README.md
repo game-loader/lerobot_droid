@@ -1,3 +1,14 @@
+# LeRobot Droid
+
+Personal research distribution **0.6.2+droid.1**, based on Hugging Face LeRobot
+`2774d9bd` (2026-09-07). Adds DP3, Franka Duo tooling, RL-100, SmolVLA offline RL,
+Moya Newton integration, and a trusted-network inference service.
+
+See [migration and installation notes](docs/CUSTOM_VERSION.md) for supported
+contracts, validation and limitations. This is not an official Hugging Face
+release; badges and PyPI instructions below describe the upstream project.
+Use this repository's locked environment to install the custom version.
+
 <p align="center">
   <img alt="LeRobot, Hugging Face Robotics Library" src="./media/readme/lerobot-logo-thumbnail.png" width="100%">
 </p>

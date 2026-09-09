@@ -176,3 +176,12 @@ outputs/
 *.urdf
 *.xml
 *.part
+
+# Local custom-branch runtimes and artifacts (not source packages).
+.worktrees/
+.uv-cache/
+.hf-datasets-cache/
+.camera_frame_cache/
+/datasets/
+/pretrained_weights/
+*.tar.zst

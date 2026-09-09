@@ -49,6 +49,7 @@ class DatasetConfig:
     # When True, RGB video frames are returned as uint8 tensors (0-255) instead of float32 (0.0-1.0).
     # This reduces memory and speeds up DataLoader IPC. The training pipeline handles the conversion.
     return_uint8: bool = False
+    camera_cache: str = "none"
     # Physical unit depth maps are dequantized to at load time: "mm" (millimeters) or "m" (metres).
     # Has no effect on datasets without depth cameras.
     depth_output_unit: str = DEFAULT_DEPTH_UNIT
@@ -57,6 +58,10 @@ class DatasetConfig:
     eval_split: float = 0.0
 
     def __post_init__(self) -> None:
+        if self.camera_cache not in {"none", "ram", "disk"}:
+            raise ValueError("camera_cache must be 'none', 'ram', or 'disk'")
+        if self.streaming and self.camera_cache != "none":
+            raise ValueError("Camera cache does not support streaming datasets")
         if self.repo_type not in ("dataset", "bucket"):
             raise ValueError(f"repo_type must be 'dataset' or 'bucket', got {self.repo_type!r}")
         if self.eval_split != 0.0 and self.streaming:

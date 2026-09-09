@@ -53,6 +53,25 @@ from ..utils import (
 from .configuration_diffusion import DiffusionConfig
 
 
+def resize_images_for_stacking(batch: dict[str, Tensor], config: DiffusionConfig) -> dict[str, Tensor]:
+    """Resize each camera independently before stacking multi-camera inputs."""
+    if not config.image_features or config.resize_shape is None:
+        return batch
+    resized = dict(batch)
+    target = tuple(config.resize_shape)
+    for key in config.image_features:
+        image = resized[key]
+        if image.ndim not in (4, 5):
+            raise ValueError(f"Image feature {key!r} must be [B,C,H,W] or [B,S,C,H,W], got {image.shape}")
+        if image.shape[-2:] == target:
+            continue
+        leading_shape = image.shape[:-3]
+        resized[key] = torchvision.transforms.functional.resize(
+            image.reshape(-1, *image.shape[-3:]), target, antialias=True
+        ).reshape(*leading_shape, image.shape[-3], *target)
+    return resized
+
+
 class DiffusionPolicy(PreTrainedPolicy):
     """
     Diffusion Policy as per "Diffusion Policy: Visuomotor Policy Learning via Action Diffusion"
@@ -112,7 +131,7 @@ class DiffusionPolicy(PreTrainedPolicy):
         if queues_populated:
             batch = {k: torch.stack(list(self._queues[k]), dim=1) for k in batch if k in self._queues}
         else:
-            batch = dict(batch)
+            batch = dict(resize_images_for_stacking(batch, self.config))
             if self.config.image_features:
                 for key in self.config.image_features:
                     if batch[key].ndim == 4:
@@ -147,6 +166,7 @@ class DiffusionPolicy(PreTrainedPolicy):
         if ACTION in batch:
             batch.pop(ACTION)
 
+        batch = resize_images_for_stacking(batch, self.config)
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch[OBS_IMAGES] = torch.stack([batch[key] for key in self.config.image_features], dim=-4)
@@ -162,6 +182,7 @@ class DiffusionPolicy(PreTrainedPolicy):
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, None]:
         """Run the batch through the model and compute the loss for training or validation."""
+        batch = resize_images_for_stacking(batch, self.config)
         if self.config.image_features:
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             for key in self.config.image_features:
@@ -348,7 +369,6 @@ class DiffusionModel(nn.Module):
         """
         # Input validation.
         assert set(batch).issuperset({OBS_STATE, ACTION, "action_is_pad"})
-        assert OBS_IMAGES in batch or OBS_ENV_STATE in batch
         n_obs_steps = batch[OBS_STATE].shape[1]
         horizon = batch[ACTION].shape[1]
         assert horizon == self.config.horizon

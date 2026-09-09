@@ -27,7 +27,7 @@ import numpy as np
 
 from lerobot.configs import FeatureType, PolicyFeature
 
-from .constants import ACTION, DEFAULT_FEATURES, OBS_ENV_STATE, OBS_STR
+from .constants import ACTION, DEFAULT_FEATURES, OBS_ENV_STATE, OBS_POINT_CLOUD, OBS_STR
 
 
 def _validate_feature_names(features: dict[str, dict]) -> None:
@@ -132,6 +132,9 @@ def build_dataset_frame(
             frame[key] = np.array([values[name] for name in ft["names"]], dtype=np.float32)
         elif ft["dtype"] in ["image", "video"]:
             frame[key] = values[key.removeprefix(f"{prefix}.images.")]
+        elif key == OBS_POINT_CLOUD and ft["dtype"] == "float32" and len(ft["shape"]) == 2:
+            value_key = key if key in values else key.removeprefix(f"{prefix}.")
+            frame[key] = np.asarray(values[value_key], dtype=np.float32)
 
     return frame
 
@@ -165,6 +168,8 @@ def dataset_to_policy_features(features: dict[str, dict]) -> dict[str, PolicyFea
                 # Backward compatibility for "channel" which is an error introduced in LeRobotDataset v2.0 for ported datasets.
                 if names[2] in ["channel", "channels"]:  # (h, w, c) -> (c, h, w)
                     shape = (shape[2], shape[0], shape[1])
+        elif key == OBS_POINT_CLOUD:
+            type = FeatureType.POINT_CLOUD
         elif key == OBS_ENV_STATE:
             type = FeatureType.ENV
         elif key.startswith(OBS_STR):

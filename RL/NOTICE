@@ -1,0 +1,18 @@
+RL-100 Diffusion RL Migration
+
+This directory contains a rewritten and adapted implementation of method-level
+ideas described by the RL-100 project:
+
+  Lei-Kun/RL-100
+  https://github.com/Lei-Kun/RL-100
+  algorithm reference commit: 7c5df9a5d3111e5fa8d2fe814c4fdcb3acfa3f26
+  audited source checkout: 3d52f73be4a1f7c27ed3bb32280adb36428f57e5
+
+The upstream project is distributed under the Apache License, Version 2.0.
+No RL-100 point-cloud, PointNet, runner, or vendored package files are copied
+into this directory. The target modules are rewritten for LeRobot's state and
+image observation dictionaries, Diffusion Policy processors, the 14D Moya
+action contract, and Python 3.12/uv.
+
+This migration also uses and retains attribution for the surrounding LeRobot
+and diffusers projects under their respective licenses.

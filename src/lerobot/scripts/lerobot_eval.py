@@ -164,6 +164,18 @@ def _build_raw_frame(
     return frame
 
 
+def resolve_max_episodes_rendered(env_cfg, requested: int) -> int:
+    if requested < 0:
+        raise ValueError("requested rendered episodes must be non-negative")
+    return requested if env_cfg.supports_rendering else 0
+
+
+def _save_eval_info(info: dict, output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with (output_dir / "eval_info.json").open("w") as handle:
+        json.dump(info, handle, indent=2)
+
+
 def rollout(
     env: gym.vector.VectorEnv,
     policy: PreTrainedPolicy,
@@ -783,7 +795,7 @@ def eval_main(cfg: EvalPipelineConfig):
     env_preprocessor, env_postprocessor = make_env_pre_post_processors(env_cfg=cfg.env, policy_cfg=cfg.policy)
 
     recording_dir = Path(cfg.output_dir) / "recordings" if cfg.eval.recording else None
-    max_episodes_rendered = 0 if cfg.eval.recording else 10
+    max_episodes_rendered = 0 if cfg.eval.recording else resolve_max_episodes_rendered(cfg.env, 10)
     videos_dir = None if cfg.eval.recording else Path(cfg.output_dir) / "videos"
 
     with torch.no_grad(), torch.autocast(device_type=device.type) if cfg.policy.use_amp else nullcontext():
@@ -816,8 +828,7 @@ def eval_main(cfg: EvalPipelineConfig):
     close_envs(envs)
 
     # Save info
-    with open(Path(cfg.output_dir) / "eval_info.json", "w") as f:
-        json.dump(info, f, indent=2)
+    _save_eval_info(info, Path(cfg.output_dir))
 
     logging.info("End of eval")
 
@@ -910,7 +921,7 @@ def run_one(
     This function is intentionally module-level to make it easy to test.
     """
     task_videos_dir = None
-    if videos_dir is not None:
+    if videos_dir is not None and max_episodes_rendered > 0:
         task_videos_dir = videos_dir / f"{task_group}_{task_id}"
         task_videos_dir.mkdir(parents=True, exist_ok=True)
 
@@ -963,6 +974,7 @@ def eval_policy_all(
     return_episode_data: bool = False,
     start_seed: int | None = None,
     max_parallel_tasks: int = 1,
+    close_envs_after_eval: bool = True,
 ) -> dict:
     """
     Evaluate a nested `envs` dict: {task_group: {task_id: vec_env}}.
@@ -1042,14 +1054,15 @@ def eval_policy_all(
                     _accumulate_to(tg, metrics)
                     per_task_infos.append({"task_group": tg, "task_id": tid, "metrics": metrics})
                 finally:
-                    env.close()
-                    # Prefetch next task's workers *after* closing current env to prevent
-                    # GPU memory overlap between consecutive tasks.
-                    if i + 1 < len(tasks):
-                        next_env = tasks[i + 1][2]
-                        if hasattr(next_env, "_ensure"):
-                            prefetch_thread = threading.Thread(target=next_env._ensure, daemon=True)
-                            prefetch_thread.start()
+                    if close_envs_after_eval:
+                        env.close()
+                # Prefetch only after success and closing the current environment,
+                # avoiding both GPU memory overlap and new workers on failure.
+                if close_envs_after_eval and i + 1 < len(tasks):
+                    next_env = tasks[i + 1][2]
+                    if hasattr(next_env, "_ensure"):
+                        prefetch_thread = threading.Thread(target=next_env._ensure, daemon=True)
+                        prefetch_thread.start()
         else:
             with cf.ThreadPoolExecutor(max_workers=max_parallel_tasks) as executor:
                 fut2meta = {}
@@ -1063,7 +1076,8 @@ def eval_policy_all(
                         _accumulate_to(tg, metrics)
                         per_task_infos.append({"task_group": tg, "task_id": tid, "metrics": metrics})
                     finally:
-                        env.close()
+                        if close_envs_after_eval:
+                            env.close()
     finally:
         policy.train(was_training)
 

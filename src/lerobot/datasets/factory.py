@@ -102,7 +102,9 @@ def resolve_delta_timestamps(
     return delta_timestamps
 
 
-def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDataset:
+def make_dataset(
+    cfg: TrainPipelineConfig, *, preload_camera_cache: bool = True
+) -> LeRobotDataset | MultiLeRobotDataset:
     """Handles the logic of setting up delta timestamps and image transforms before creating a dataset.
 
     Args:
@@ -131,6 +133,10 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
         episodes = resolve_episode_indices(
             cfg.dataset.episodes, ds_meta.total_episodes, cfg.dataset.exclude_episodes
         )
+        if cfg.dataset.camera_cache != "none" and (
+            cfg.dataset.streaming or ds_meta.storage_format != DEFAULT_STORAGE_FORMAT
+        ):
+            raise ValueError("Camera cache only supports local Parquet map-style datasets")
         if cfg.dataset.streaming and ds_meta.storage_format != DEFAULT_STORAGE_FORMAT:
             raise ValueError(
                 f"dataset.streaming=True is not supported for storage_format="
@@ -192,7 +198,16 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
             for stats_type, stats in IMAGENET_STATS.items():
                 dataset.meta.stats[key][stats_type] = torch.tensor(stats, dtype=torch.float32)
 
+    if preload_camera_cache:
+        _preload_camera_cache(dataset, cfg.dataset.camera_cache)
     return dataset
+
+
+def _preload_camera_cache(dataset, mode: str) -> None:
+    if mode == "ram":
+        logging.info("Camera cache: %s", dataset.preload_camera_frame_cache())
+    elif mode == "disk":
+        logging.info("Camera cache: %s", dataset.preload_camera_frame_cache_disk())
 
 
 def make_train_eval_datasets(
@@ -203,7 +218,7 @@ def make_train_eval_datasets(
     The last ceil(n_episodes * eval_split) episodes per task are held out for evaluation.
     If eval_split == 0.0, returns (full_dataset, None).
     """
-    full_dataset = make_dataset(cfg)
+    full_dataset = make_dataset(cfg, preload_camera_cache=cfg.dataset.eval_split == 0.0)
 
     if cfg.dataset.eval_split == 0.0:
         return full_dataset, None
@@ -277,4 +292,6 @@ def make_train_eval_datasets(
                 for stats_type, stats in IMAGENET_STATS.items():
                     ds.meta.stats[key][stats_type] = torch.tensor(stats, dtype=torch.float32)
 
+    for dataset in (train_dataset, eval_dataset):
+        _preload_camera_cache(dataset, cfg.dataset.camera_cache)
     return train_dataset, eval_dataset

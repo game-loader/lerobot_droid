@@ -29,6 +29,7 @@ from lerobot.configs import (
     DepthEncoderConfig,
 )
 
+from .camera_cache import preload_camera_cache
 from .dataset_metadata import LeRobotDatasetMetadata
 from .depth_utils import MM_PER_METRE, dequantize_depth
 from .feature_utils import (
@@ -123,6 +124,7 @@ class DatasetReader(BaseDatasetReader):
         image_transforms: Callable | None,
         return_uint8: bool = False,
         depth_output_unit: str = DEFAULT_DEPTH_UNIT,
+        camera_frame_cache=None,
     ):
         """Initialize the reader with metadata, filtering, and transform config.
 
@@ -153,6 +155,7 @@ class DatasetReader(BaseDatasetReader):
         self.set_image_transforms(image_transforms)
         self._return_uint8 = return_uint8
         self._depth_output_unit = depth_output_unit
+        self._camera_frame_cache = camera_frame_cache
 
         self.hf_dataset: datasets.Dataset | None = None
         self._absolute_to_relative_idx: dict[int, int] | None = None
@@ -373,7 +376,24 @@ class DatasetReader(BaseDatasetReader):
             result[key] = torch.stack(self._column_view(key)[relative_indices][key])
         return result
 
-    def _query_videos(self, query_timestamps: dict[str, list[float]], ep_idx: int) -> dict[str, torch.Tensor]:
+    def preload_camera_frame_cache(self) -> dict[str, int | float]:
+        """Cache selected raw RGB rows in RAM without applying image transforms."""
+        self._camera_frame_cache, summary = preload_camera_cache(self)
+        return summary
+
+    def preload_camera_frame_cache_disk(self) -> dict[str, int | float]:
+        """Cache selected raw RGB rows in validated, reusable memory-mapped files."""
+        self._camera_frame_cache, summary = preload_camera_cache(self, disk=True)
+        return summary
+
+    def _query_videos(
+        self,
+        query_timestamps: dict[str, list[float]],
+        ep_idx: int,
+        *,
+        abs_idx: int | None = None,
+        query_indices: dict[str, list[int]] | None = None,
+    ) -> dict[str, torch.Tensor]:
         """Note: When using data workers (e.g. DataLoader with num_workers>0), do not call this function
         in the main process (e.g. by using a second Dataloader with num_workers=0). It will result in a
         Segmentation Fault.
@@ -381,6 +401,17 @@ class DatasetReader(BaseDatasetReader):
         ep = self._meta.episodes[ep_idx]
 
         def _decode_single(vid_key: str, query_ts: list[float]) -> tuple[str, torch.Tensor]:
+            if self._camera_frame_cache is not None and vid_key not in self._meta.depth_keys:
+                if abs_idx is None:
+                    raise ValueError("abs_idx is required when using a camera frame cache")
+                indices = (query_indices or {}).get(vid_key, [abs_idx])
+                try:
+                    frames = torch.stack([self._camera_frame_cache[index][vid_key] for index in indices])
+                except KeyError as exc:
+                    raise RuntimeError(f"Camera cache is missing rows for {vid_key!r}") from exc
+                if not self._return_uint8:
+                    frames = frames.float().div_(255)
+                return vid_key, frames.squeeze(0)
             from_timestamp = ep[f"videos/{vid_key}/from_timestamp"]
             shifted_query_ts = [from_timestamp + ts for ts in query_ts]
             video_path = self.root / self._meta.get_video_file_path(ep_idx, vid_key)
@@ -440,7 +471,9 @@ class DatasetReader(BaseDatasetReader):
         if len(self._meta.video_keys) > 0:
             current_ts = item["timestamp"].item()
             query_timestamps = self._get_query_timestamps(current_ts, query_indices)
-            video_frames = self._query_videos(query_timestamps, ep_idx)
+            video_frames = self._query_videos(
+                query_timestamps, ep_idx, abs_idx=abs_idx, query_indices=query_indices
+            )
             item = {**video_frames, **item}
 
         if self._image_transforms is not None:

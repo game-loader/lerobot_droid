@@ -106,6 +106,18 @@ def _migrate_legacy_rabc_fields(config: dict[str, Any]) -> dict[str, Any] | None
     return migrated_config
 
 
+def _migrate_legacy_eval_frequency(config: dict[str, Any]) -> dict[str, Any] | None:
+    """Read 0.5 training checkpoints without changing their evaluation cadence."""
+    if "eval_freq" not in config:
+        return None
+    migrated = dict(config)
+    old_frequency = migrated.pop("eval_freq")
+    if "env_eval_freq" in migrated and migrated["env_eval_freq"] != old_frequency:
+        raise ValueError("Conflicting eval_freq and env_eval_freq in training checkpoint")
+    migrated["env_eval_freq"] = old_frequency
+    return migrated
+
+
 @dataclass
 class TrainPipelineConfig(HubMixin):
     dataset: DatasetConfig
@@ -152,6 +164,8 @@ class TrainPipelineConfig(HubMixin):
     # Checkpoint is saved every `save_freq` training iterations and after the last training step.
     # A non-positive value disables periodic saving, keeping only the final checkpoint.
     save_freq: int = 20_000
+    # Keep the IL checkpoint coordinate system when expanding the training dataset.
+    preserve_pretrained_processor_stats: bool = False
     # Model-artifact format inside checkpoints; non-default values require a sharded run.
     checkpoint_format: CheckpointFormat = CheckpointFormat.SAFETENSORS
     use_policy_training_preset: bool = True
@@ -284,6 +298,17 @@ class TrainPipelineConfig(HubMixin):
             )
 
         active_cfg = self.trainable_config
+        if self.preserve_pretrained_processor_stats:
+            if self.resume:
+                raise ValueError("preserve_pretrained_processor_stats is incompatible with resume=true")
+            if self.is_reward_model_training:
+                raise ValueError("preserve_pretrained_processor_stats is only supported for policy training")
+            if active_cfg.pretrained_path is None:
+                raise ValueError("preserve_pretrained_processor_stats requires a pretrained --policy.path")
+            if getattr(active_cfg, "use_relative_actions", False):
+                raise ValueError(
+                    "preserve_pretrained_processor_stats cannot override relative-action processors"
+                )
         if self.rename_map and active_cfg.pretrained_path is None:
             raise ValueError(
                 "`rename_map` requires a pretrained policy checkpoint. "
@@ -453,6 +478,11 @@ class TrainPipelineConfig(HubMixin):
             with open(config_file) as f:
                 config = json.load(f)
             migrated_config = _migrate_legacy_rabc_fields(config)
+            frequency_config = _migrate_legacy_eval_frequency(
+                migrated_config if migrated_config is not None else config
+            )
+            if frequency_config is not None:
+                migrated_config = frequency_config
             if migrated_config is not None:
                 with tempfile.NamedTemporaryFile("w+", delete=False, suffix=".json") as f:
                     json.dump(migrated_config, f)

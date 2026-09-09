@@ -33,7 +33,8 @@ import logging
 import sys
 import time
 from collections.abc import Iterator
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
+from pathlib import Path
 from pprint import pformat
 from typing import TYPE_CHECKING, Any
 
@@ -94,9 +95,73 @@ if TYPE_CHECKING or _peft_available:
 else:
     PeftModel = None
 
-from .lerobot_eval import eval_policy_all
+from lerobot.utils.eval_provenance import build_eval_provenance, write_eval_provenance
+
+from .lerobot_eval import _save_eval_info, eval_policy_all, resolve_max_episodes_rendered
 
 EMA_STATE_FILENAME = "ema_state.pt"
+
+
+def _save_periodic_eval_provenance(
+    *, cfg: TrainPipelineConfig, checkpoint_dir: Path | None, eval_dir: Path
+) -> Path | None:
+    """Bind a periodic evaluation to the exact exported policy weights."""
+    if checkpoint_dir is None or cfg.is_reward_model_training or cfg.policy is None or cfg.env is None:
+        return None
+    inference_steps = getattr(cfg.policy, "num_inference_steps", None)
+    env_device = getattr(cfg.env, "device", None)
+    if inference_steps is None or cfg.policy.device is None or env_device is None or cfg.seed is None:
+        return None
+    if not (eval_dir / "eval_info.json").is_file():
+        raise RuntimeError(f"cannot write evaluation provenance without eval_info.json: {eval_dir}")
+    checkpoint = checkpoint_dir / "pretrained_model"
+    if not (checkpoint / "model.safetensors").is_file():
+        # DCP-only checkpoints have no standalone policy bundle to fingerprint.
+        return None
+    payload = build_eval_provenance(
+        checkpoint,
+        episodes=cfg.eval.n_episodes,
+        batch_size=cfg.eval.batch_size,
+        inference_steps=inference_steps,
+        policy_device=cfg.policy.device,
+        env_device=str(env_device),
+        env_type=cfg.env.type,
+        seed=cfg.seed,
+    )
+    return write_eval_provenance(eval_dir, payload)
+
+
+def _policy_processor_factory_kwargs(
+    *,
+    preserve_pretrained_processor_stats: bool,
+    processor_pretrained_path: Any,
+    resume: bool,
+    dataset_stats: dict[str, Any],
+    device_type: str,
+    rename_map: dict[str, str],
+    input_features: dict[str, Any],
+    output_features: dict[str, Any],
+    normalization_mapping: dict[Any, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Compatibility helper for custom iterative IL callers."""
+    processor_kwargs, postprocessor_kwargs = {}, {}
+    if processor_pretrained_path is None:
+        return {"dataset_stats": dataset_stats}, postprocessor_kwargs
+    overrides = {
+        "device_processor": {"device": device_type},
+        "rename_observations_processor": {"rename_map": rename_map},
+    }
+    if not preserve_pretrained_processor_stats:
+        normalizer = {"features": {**input_features, **output_features}, "norm_map": normalization_mapping}
+        unnormalizer = {"features": output_features, "norm_map": normalization_mapping}
+        if not resume:
+            processor_kwargs["dataset_stats"] = dataset_stats
+            normalizer["stats"] = dataset_stats
+            unnormalizer["stats"] = dataset_stats
+        overrides["normalizer_processor"] = normalizer
+        postprocessor_kwargs["postprocessor_overrides"] = {"unnormalizer_processor": unnormalizer}
+    processor_kwargs["preprocessor_overrides"] = overrides
+    return processor_kwargs, postprocessor_kwargs
 
 
 @contextmanager
@@ -383,6 +448,12 @@ def make_dataloaders(
 
 @parser.wrap()
 def train(cfg: TrainPipelineConfig):
+    """Train with a run-scoped owner for any reusable evaluation environments."""
+    with ExitStack() as eval_env_stack:
+        return _train_impl(cfg, eval_env_stack)
+
+
+def _train_impl(cfg: TrainPipelineConfig, eval_env_stack: ExitStack):
     """
     Main function to train a policy.
 
@@ -400,6 +471,7 @@ def train(cfg: TrainPipelineConfig):
             recorded in the checkpoint's `train_config.json`; when `cfg.job.is_remote`, the run is
             dispatched to HF Jobs instead of executing locally.
     """
+    reusable_eval_env = None
     if cfg.job.is_remote:
         return submit_to_hf(cfg)
 
@@ -498,7 +570,7 @@ def train(cfg: TrainPipelineConfig):
 
     processor_kwargs = ProcessorConfigKwargs()
     processor_dataset_stats = rename_stats(dataset.meta.stats, cfg.rename_map)
-    if (processor_pretrained_path and not cfg.resume) or not processor_pretrained_path:
+    if not processor_pretrained_path or (not cfg.resume and not cfg.preserve_pretrained_processor_stats):
         processor_kwargs["dataset_stats"] = processor_dataset_stats
     if cfg.is_reward_model_training:
         processor_kwargs["dataset_meta"] = dataset.meta
@@ -521,7 +593,7 @@ def train(cfg: TrainPipelineConfig):
         # been adapted by the policy (e.g. EVO1 pads state/action stats to max_state_dim),
         # and force-feeding raw dataset stats over them crashes normalization (#4006).
         # This mirrors the `dataset_stats` kwarg above, which is also skipped on resume.
-        if not cfg.resume:
+        if not cfg.resume and not cfg.preserve_pretrained_processor_stats:
             preprocessor_overrides["normalizer_processor"]["stats"] = processor_dataset_stats
             postprocessor_overrides["unnormalizer_processor"]["stats"] = processor_dataset_stats
         if getattr(active_cfg, "use_relative_actions", False):
@@ -533,6 +605,9 @@ def train(cfg: TrainPipelineConfig):
             postprocessor_overrides["absolute_actions_processor"] = {"enabled": True}
         processor_kwargs["preprocessor_overrides"] = preprocessor_overrides
         processor_kwargs["postprocessor_overrides"] = postprocessor_overrides
+        if cfg.preserve_pretrained_processor_stats:
+            preprocessor_overrides.pop("normalizer_processor")
+            postprocessor_overrides.pop("unnormalizer_processor")
 
     if cfg.is_reward_model_training:
         preprocessor, postprocessor = make_reward_pre_post_processors(
@@ -856,7 +931,11 @@ def train(cfg: TrainPipelineConfig):
                 if use_ema_for_eval:
                     logging.info("Evaluating the EMA weights")
                 weights_cm = _ema_weights(ema, eval_policy_model) if use_ema_for_eval else nullcontext()
-                with weights_cm, _make_eval_envs(cfg) as eval_env, torch.no_grad(), accelerator.autocast():
+                reuse_env = cfg.env.supports_eval_env_reuse
+                if reuse_env and reusable_eval_env is None:
+                    reusable_eval_env = eval_env_stack.enter_context(_make_eval_envs(cfg))
+                env_cm = nullcontext(reusable_eval_env) if reuse_env else _make_eval_envs(cfg)
+                with weights_cm, env_cm as eval_env, torch.no_grad(), accelerator.autocast():
                     eval_info = eval_policy_all(
                         envs=eval_env,  # dict[suite][task_id] -> vec_env
                         policy=eval_policy_model,
@@ -866,12 +945,17 @@ def train(cfg: TrainPipelineConfig):
                         postprocessor=postprocessor,
                         n_episodes=cfg.eval.n_episodes,
                         videos_dir=cfg.output_dir / "eval" / f"videos_step_{step_id}",
-                        max_episodes_rendered=4,
+                        max_episodes_rendered=resolve_max_episodes_rendered(cfg.env, 4),
                         start_seed=cfg.seed,
                         max_parallel_tasks=cfg.env.max_parallel_tasks,
+                        close_envs_after_eval=not reuse_env,
                     )
                 # overall metrics (suite-agnostic)
-                aggregated = eval_info["overall"]
+                eval_dir = cfg.output_dir / "eval" / f"step_{step_id}"
+                _save_eval_info(eval_info, eval_dir)
+                if cfg.save_checkpoint and is_saving_step and not use_ema_for_eval:
+                    _save_periodic_eval_provenance(cfg=cfg, checkpoint_dir=checkpoint_dir, eval_dir=eval_dir)
+                aggregated = dict(eval_info["overall"])
 
                 # optional: per-suite logging
                 for suite, suite_info in eval_info.items():
@@ -897,7 +981,8 @@ def train(cfg: TrainPipelineConfig):
                 if wandb_logger:
                     wandb_log_dict = {**eval_tracker.to_dict(), **eval_info}
                     wandb_logger.log_dict(wandb_log_dict, step, mode="eval")
-                    wandb_logger.log_video(eval_info["overall"]["video_paths"][0], step, mode="eval")
+                    if eval_info["overall"]["video_paths"]:
+                        wandb_logger.log_video(eval_info["overall"]["video_paths"][0], step, mode="eval")
 
             accelerator.wait_for_everyone()
 

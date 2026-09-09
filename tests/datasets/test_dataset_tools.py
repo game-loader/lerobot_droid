@@ -584,6 +584,8 @@ def test_remove_required_feature(sample_dataset, tmp_path):
 
 def test_remove_camera_feature(sample_dataset, tmp_path):
     """Test removing a camera feature."""
+    import pandas as pd
+
     camera_keys = sample_dataset.meta.camera_keys
     if not camera_keys:
         pytest.skip("No camera keys in dataset")
@@ -608,6 +610,14 @@ def test_remove_camera_feature(sample_dataset, tmp_path):
 
     sample_item = dataset_without_camera[0]
     assert camera_to_remove not in sample_item
+
+    for source_path in (sample_dataset.root / "meta/episodes").rglob("*.parquet"):
+        relative_path = source_path.relative_to(sample_dataset.root)
+        source = pd.read_parquet(source_path)
+        result = pd.read_parquet(dataset_without_camera.root / relative_path)
+        removed_prefixes = (f"stats/{camera_to_remove}/", f"videos/{camera_to_remove}/")
+        expected_columns = [column for column in source.columns if not column.startswith(removed_prefixes)]
+        pd.testing.assert_frame_equal(result, source[expected_columns])
 
 
 def test_complex_workflow_integration(sample_dataset, tmp_path):

@@ -1124,6 +1124,20 @@ def _copy_episodes_metadata_and_stats(
     dst_episodes_dir = dst_meta.root / "meta/episodes"
     if episodes_dir.exists():
         shutil.copytree(episodes_dir, dst_episodes_dir, dirs_exist_ok=True)
+        removed_features = set(src_dataset.meta.features) - set(dst_meta.features)
+        removed_video_keys = removed_features & set(src_dataset.meta.video_keys)
+        prefixes = [*(f"stats/{key}/" for key in removed_features)]
+        prefixes.extend(f"videos/{key}/" for key in removed_video_keys)
+        if prefixes:
+            for parquet_path in sorted(dst_episodes_dir.rglob("*.parquet")):
+                episode_df = pd.read_parquet(parquet_path)
+                stale_columns = [
+                    column
+                    for column in episode_df.columns
+                    if any(str(column).startswith(prefix) for prefix in prefixes)
+                ]
+                if stale_columns:
+                    episode_df.drop(columns=stale_columns).to_parquet(parquet_path, index=False)
 
     dst_meta.info.total_episodes = src_dataset.meta.total_episodes
     dst_meta.info.total_frames = src_dataset.meta.total_frames

@@ -74,6 +74,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         *,
         repo_type: str = "dataset",
         token: str | bool | None = None,
+        camera_frame_cache=None,
     ):
         """
         2 modes are available for instantiating this class, depending on 2 different use cases:
@@ -287,6 +288,9 @@ class LeRobotDataset(torch.utils.data.Dataset):
             )
 
         is_default_format = self.meta.storage_format == DEFAULT_STORAGE_FORMAT
+        if camera_frame_cache is not None and not is_default_format:
+            raise ValueError("camera_frame_cache only supports the local Parquet reader")
+        self._camera_frame_cache = camera_frame_cache
         reader_kwargs = {
             "meta": self.meta,
             "episodes": episodes,
@@ -297,7 +301,9 @@ class LeRobotDataset(torch.utils.data.Dataset):
             "depth_output_unit": depth_output_unit,
         }
         if is_default_format:
-            reader_kwargs.update(root=self.root, video_backend=self._video_backend)
+            reader_kwargs.update(
+                root=self.root, video_backend=self._video_backend, camera_frame_cache=camera_frame_cache
+            )
         else:
             # non-default formats read the data in place at its root
             reader_kwargs.update(root=self._storage_root or root, revision=revision, token=token)
@@ -394,8 +400,27 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 image_transforms=self.image_transforms,
                 return_uint8=self._return_uint8,
                 depth_output_unit=self._depth_output_unit,
+                camera_frame_cache=getattr(self, "_camera_frame_cache", None),
             )
         return self.reader
+
+    def preload_camera_frame_cache(self) -> dict[str, int | float]:
+        """Decode selected RGB frames into RAM before DataLoader workers start."""
+        reader = self._ensure_reader()
+        if not isinstance(reader, DatasetReader):
+            raise ValueError("Camera cache only supports the local Parquet reader")
+        summary = reader.preload_camera_frame_cache()
+        self._camera_frame_cache = reader._camera_frame_cache
+        return summary
+
+    def preload_camera_frame_cache_disk(self) -> dict[str, int | float]:
+        """Decode selected RGB frames into reusable process-safe memory maps."""
+        reader = self._ensure_reader()
+        if not isinstance(reader, DatasetReader):
+            raise ValueError("Camera cache only supports the local Parquet reader")
+        summary = reader.preload_camera_frame_cache_disk()
+        self._camera_frame_cache = reader._camera_frame_cache
+        return summary
 
     @staticmethod
     def _build_streaming_encoder(
