@@ -1,0 +1,12 @@
+observations:
+  - id: O01
+    timestamp: "2026-09-09T17:12:37+08:00"
+    provenance: ai-suggested
+    content: Historical PTv3/Sonata files instantiate MLP placeholders, so their presence does not establish pretrained Transformer support; the new branch fails closed by default.
+    context: Code audit during the user-approved upstream migration; see docs/EXPERIMENTAL_POINT_ENCODERS.md and the guarded encoder constructors.
+    potential_type: constraint
+    bound_to: [N01, N02]
+    promoted: false
+    promoted_to: null
+    crystallized_via: null
+    stale: false

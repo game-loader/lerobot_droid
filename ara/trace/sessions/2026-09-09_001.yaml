@@ -1,0 +1,27 @@
+session:
+  id: "2026-09-09_001"
+  date: "2026-09-09"
+  started: "2026-09-09T17:12:37+08:00"
+  last_turn: "2026-09-09T17:12:37+08:00"
+  turn_count: 1
+  summary: Forward-ported custom robotics extensions to upstream0.6.2 and verified software/checkpoint compatibility without modifying original research artifacts.
+events_logged:
+  - {turn: 1, type: decision, id: N01, routing: direct, provenance: user, summary: "Approve isolated migration with subagents"}
+  - {turn: 1, type: experiment, id: N02, routing: direct, provenance: ai-executed, summary: "Consolidated software regression and package verification"}
+  - {turn: 1, type: experiment, id: N03, routing: direct, provenance: ai-executed, summary: "Strict production checkpoint loading and bounded numerical smoke"}
+  - {turn: 1, type: observation, id: O01, routing: staged, provenance: ai-suggested, summary: "Distinguish inherited encoder placeholders from actual pretrained backbones"}
+ai_actions:
+  - turn: 1
+    action: Created an independent worktree; delegated policy, RL and hardware migration; integrated upstream dataset/train APIs; tested and committed local version without pushing or replacing main.
+    provenance: ai-executed
+    files_changed: ["../../src/lerobot", "../../RL", "../../tests", "../../examples", "../../pyproject.toml", "../../uv.lock", "../../docs", "../"]
+claims_touched: []
+logic_revisions: []
+key_context:
+  - turn: 1
+    excerpt: User approved starting the proposed latest-upstream custom migration and explicitly requested subagent assistance.
+open_threads:
+  - Validate calibrated real-robot observation/action contracts before deployment.
+  - Genuine pretrained PTv3/Sonata adapters remain unimplemented.
+  - Gated PaliGemma reference tests and multi-GPU/simulator/hardware acceptance require external resources.
+ai_suggestions_pending: []

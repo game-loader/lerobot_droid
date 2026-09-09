@@ -1,0 +1,8 @@
+sessions:
+  - id: "2026-09-09_001"
+    date: "2026-09-09"
+    summary: Isolated upstream0.6.2 forward port with software and checkpoint verification.
+    turn_count: 1
+    events_count: 4
+    claims_touched: []
+    open_threads: 3

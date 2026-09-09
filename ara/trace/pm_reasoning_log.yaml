@@ -1,0 +1,8 @@
+entries:
+  - turn: "2026-09-09_001#1"
+    notes:
+      - New worktree artifact is scoped to migration; old dirty research artifact and experiments are not overwritten or copied without their evidence.
+      - Recorded user approval as a decision and software/checkpoint outputs as direct experiment facts.
+      - Did not promote software smokes into policy quality, real-world safety or broad performance claims.
+      - Staged placeholder audit as a constraint; no inferred user endorsement of experimental encoder performance.
+      - Recording timestamps are end-of-turn timestamps, not invented experiment start times.

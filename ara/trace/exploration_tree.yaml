@@ -1,0 +1,28 @@
+tree:
+  - id: N01
+    type: decision
+    title: Forward-port custom extensions onto current official LeRobot
+    provenance: user
+    timestamp: "2026-09-09T17:12:37+08:00"
+    choice: Use an independent branch/worktree and delegate bounded migration subtasks.
+    alternatives: [Overwrite the historical dirty checkout, merge obsolete infrastructure over upstream]
+    evidence: ["User approval in current conversation", "../../docs/CUSTOM_VERSION.md"]
+    status: resolved
+  - id: N02
+    type: experiment
+    title: Validate migrated software and retain upstream training behavior
+    provenance: ai-executed
+    timestamp: "2026-09-09T17:12:37+08:00"
+    also_depends_on: [N01]
+    result: "Final suite: 1246 passed, 21 skipped, 2 deselected, 20 subtests passed; 9 warnings. Initial gated PI reference tests failed with HTTP 401, not a migration assertion failure."
+    evidence: ["../evidence/migration-pytest.xml", "../../docs/CUSTOM_VERSION_VALIDATION.md", "../../scripts/test_custom_version.sh"]
+    status: resolved
+  - id: N03
+    type: experiment
+    title: Check actual policy checkpoint loading across branches
+    provenance: ai-executed
+    timestamp: "2026-09-09T17:12:37+08:00"
+    also_depends_on: [N01]
+    result: "Production DP3 and SmolVLA strictly load offline on CPU and predict finite outputs. DP3 fixed-input/fixed-noise one-step source-target action is torch.equal with maximum absolute difference 0.0. No task-success measurement."
+    evidence: ["../src/execution/checkpoint_smoke.py", "../../docs/CUSTOM_VERSION_VALIDATION.md"]
+    status: resolved
