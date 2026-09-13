@@ -150,7 +150,7 @@ RL 随机采样与确定性部署之间仍需真实 rollout 验证，不能只�
 使用现有 CUDA 环境，无需重新同步/裁剪依赖。若缺少依赖，可保留已有包安装：
 
 ```bash
-uv sync --locked --inexact --extra training --extra smolvla-server --extra test
+uv sync --locked --inexact --extra smolvla-rl --extra test
 ```
 
 先仅训练 IQL（示例总步数，不是已经验证最优的超参数）：

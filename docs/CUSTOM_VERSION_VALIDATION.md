@@ -1,4 +1,8 @@
-# Migration Validation
+# Migration Validation (Historical Full Migration)
+
+This records `0.6.2+droid.1` before the release scope was narrowed. Franka-specific
+tools/tests and the dedicated server were subsequently excluded, and IMF-AttnRes
+was added. See `MAIN_RELEASE_VALIDATION.md` for the current main release results.
 
 Validation date: 2026-09-09. Source and target refs are recorded in
 [CUSTOM_VERSION.md](CUSTOM_VERSION.md). Tests below use a separate target `.venv`:
@@ -47,7 +51,7 @@ models were downloaded, checkpoint files edited, training jobs or servers launch
 ## Reproduce
 
 ```bash
-uv sync --locked --extra training --extra dp3 --extra smolvla-server --extra test --extra dev
+uv sync --locked --extra training --extra dp3 --extra imf-attnres-vlm --extra test --extra dev
 bash scripts/test_custom_version.sh
 uv lock --check
 uv build --wheel

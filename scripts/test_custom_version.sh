@@ -7,10 +7,9 @@ cd "$(dirname "$0")/.."
 exec uv run --no-sync pytest \
   tests/rl100 \
   tests/policies/test_dp3.py tests/policies/test_diffusion_state_only.py \
+  tests/policies/imf_attnres tests/processor/test_imf_attnres_processor.py \
   tests/envs/test_moya_newton.py \
-  tests/test_franka_duo_real_recorder.py tests/test_franka_duo_manual_recorder.py \
-  tests/test_franka_duo_validator.py tests/test_franka_duo_eval.py \
-  tests/scripts/test_smolvla_server.py tests/scripts/test_lerobot_eval_rendering.py \
+  tests/scripts/test_lerobot_eval_rendering.py \
   tests/scripts/test_custom_train_integration.py \
   tests/datasets/test_camera_cache.py tests/datasets/test_dataset_reader.py \
   tests/datasets/test_dataset_tools.py tests/configs tests/processor \

@@ -277,6 +277,11 @@ def update_policy(
                     output_dict = {}
                 for key, value in weight_stats.items():
                     output_dict[f"sample_weight_{key}"] = value
+            elif (
+                getattr(accelerator.unwrap_model(policy, keep_fp32_wrapper=True), "name", None)
+                == "imf-attnres"
+            ):
+                loss, output_dict = policy(batch, current_step=train_metrics.steps)
             else:
                 loss, output_dict = policy(batch)
 

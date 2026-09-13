@@ -1,8 +1,9 @@
 # LeRobot Droid
 
-Personal research distribution **0.6.2+droid.1**, based on Hugging Face LeRobot
-`2774d9bd` (2026-09-07). Adds DP3, Franka Duo tooling, RL-100, SmolVLA offline RL,
-Moya Newton integration, and a trusted-network inference service.
+Personal research distribution **0.6.2+droid.2**, based on Hugging Face LeRobot
+`2774d9bd` (2026-09-07). Adds DP3, IMF-AttnRes, RL-100, SmolVLA offline RL,
+Moya Newton integration, and shared data/training extensions. Franka-specific
+acquisition and deployment tools are excluded from this release.
 
 See [migration and installation notes](docs/CUSTOM_VERSION.md) for supported
 contracts, validation and limitations. This is not an official Hugging Face

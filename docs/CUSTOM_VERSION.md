@@ -1,4 +1,4 @@
-# LeRobot Droid 0.6.2+droid.1
+# LeRobot Droid 0.6.2+droid.2
 
 ## Lineage and Scope
 
@@ -9,6 +9,10 @@
 - Migration branch: `feat/upstream-0.6-custom`. The original checkout, local
   datasets, weights, running services and training outputs are left in place.
 - `origin` remains the personal repository; `upstream` points to Hugging Face.
+- Main release: `release/dp3-rl-main`, with IMF-AttnRes from
+  `origin/feat/imf-attnres-smolvla-layerwise` at `4da33bb2`. Franka ROS/TMR
+  acquisition, conversion and deployment tools, and the dedicated SmolVLA server
+  are excluded. They remain in `feat/upstream-0.6-custom` and the old source branch.
 
 This is a selective forward port, not a merge of old infrastructure over new
 infrastructure. Upstream model families, native depth/Lance storage, distributed
@@ -20,19 +24,19 @@ No claim is made that the migrated policies improve task success.
 From this branch's checkout:
 
 ```bash
-uv sync --locked --extra training --extra dp3 --extra smolvla-server --extra test --extra dev
+uv sync --locked --extra training --extra dp3 --extra imf-attnres-vlm --extra test --extra dev
 uv run --no-sync lerobot-info
 ```
 
-The package remains named `lerobot`, with local version `0.6.2+droid.1`; it replaces
+The package remains named `lerobot`, with local version `0.6.2+droid.2`; it replaces
 the official package only in the environment where it is installed. Use a separate
 virtual environment from the historical branch. The `RL` Python package is also
 included in wheels, unlike the original source-only layout.
 
-Optional extras: `dp3`, `rl100`, `smolvla-rl`, `smolvla-server`, `moya_newton`.
+Optional extras: `dp3`, `imf-attnres`, `imf-attnres-vlm`, `rl100`, `smolvla-rl`, `moya_newton`.
 Moya is intentionally not installed by the command above: it additionally needs
-the private simulator submodule and site assets. ROS 2 and robot drivers are site
-dependencies, not installed by these Python extras.
+the private simulator submodule and site assets. Hardware drivers are outside
+this release's scope.
 
 ## Custom Modules
 
@@ -40,17 +44,15 @@ dependencies, not installed by these Python extras.
 | --- | --- |
 | DP3 | Native convention-based policy discovery; PointNet, optional wrist RGB, U-Net/Transformer denoising |
 | Diffusion | State-only conditioning and per-camera resize before stacking; upstream batch inference and gradient checkpointing retained |
-| Franka Duo | ROS 2/TMR acquisition, timestamp/depth audit, FK, derived point clouds, evaluation examples |
+| IMF-AttnRes | MeanFlow/JVP action policy, AttnRes backbones, optional SmolVLM flat-token/layerwise conditioning |
 | RL-100 | Separate `RL/` package; IQL, dynamics/AM-Q, masked DDIM/PPO, iterative IL and real-environment adapter |
 | SmolVLA RL | Upstream native `DynamicCache` adapter, frozen shared conditioning, token-query critics and prefix dynamics |
-| SmolVLA server | `lerobot-smolvla-server`, binary MessagePack/WebSocket; no robot control in the server |
 | Moya Newton | Pinned submodule, fused vector environment, headless evaluation and sparse collection |
 | Data cache | Opt-in raw RGB RAM/disk cache below transforms for local Parquet/video datasets |
 | Training | Preserve checkpoint normalization during iterative IL, environment reuse, periodic evaluation JSON and checkpoint hashes |
 
 See [RL migration](../RL/MIGRATION.md), [SmolVLA RL](../RL/smolvla/README.md),
-[Franka setup](../examples/franka_duo_real_recorder/README.md),
-[server protocol](../examples/tutorial/smolvla/README_server.md), and
+[IMF-AttnRes](source/imf_attnres.mdx), and
 [experimental encoders](EXPERIMENTAL_POINT_ENCODERS.md).
 
 ## Compatibility Boundaries
@@ -58,9 +60,8 @@ See [RL migration](../RL/MIGRATION.md), [SmolVLA RL](../RL/smolvla/README.md),
 - Current DP3 is **34D state / 20D action**. Historical 18D DP3 checkpoints are
   not automatically remapped: changing an action head would change learned
   semantics. A separate explicit model/data migration is required.
-- Raw Franka recorder state/action can be 17D; Cartesian policies use derived
-  contracts. The raw recorder/evaluator does not automatically produce DP3's 34D
-  state. Provide a calibrated, explicit observation/control adapter before deployment.
+- The generic RL real-environment callback adapter is retained; it is not a
+  Franka driver. Provide a calibrated observation/control adapter before deployment.
 - PointNet DP3 checkpoints with the current 34D/20D contract have tiny and actual
   production-checkpoint strict-load smokes. The tested production DP3 also matches
   the old branch exactly for a fixed-input, fixed-noise, one-step sample. An actual
@@ -83,8 +84,6 @@ See [RL migration](../RL/MIGRATION.md), [SmolVLA RL](../RL/smolvla/README.md),
   than real backbones. The migration fails closed by default, rejects real
   pretrained weights in those placeholders, and disables misleading launchers.
   Production pretrained PTv3/Sonata support remains unimplemented.
-- The inference server has no TLS/authentication. Restrict it to trusted networks;
-  callers own synchronization, coordinate transforms, control and hardware safety.
 - Private Moya simulator/assets licensing must be resolved before redistribution.
   The Apache-2.0 upstream license and RL attribution notice are retained.
 
@@ -95,9 +94,8 @@ Run the migration-focused regression set from the new checkout:
 ```bash
 uv run --no-sync pytest tests/rl100 tests/policies/test_dp3.py \
   tests/policies/test_diffusion_state_only.py tests/envs/test_moya_newton.py \
-  tests/test_franka_duo_real_recorder.py tests/test_franka_duo_manual_recorder.py \
-  tests/test_franka_duo_validator.py tests/test_franka_duo_eval.py \
-  tests/scripts/test_smolvla_server.py tests/scripts/test_lerobot_eval_rendering.py \
+  tests/policies/imf_attnres tests/processor/test_imf_attnres_processor.py \
+  tests/scripts/test_lerobot_eval_rendering.py \
   tests/configs/test_custom_train_migration.py -q
 ```
 

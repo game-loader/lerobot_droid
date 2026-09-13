@@ -58,7 +58,7 @@ pre-commit run --all-files                           # Lint + format (ruff, typo
 
 ## Custom Branch
 
-- This is the personal `0.6.2+droid.1` distribution. Keep upstream behavior unless
+- This is the personal `0.6.2+droid.2` distribution. Keep upstream behavior unless
   a custom feature explicitly needs an extension; see `docs/CUSTOM_VERSION.md`.
 - `RL/` is a separate packaged research extension, not the upstream `src/lerobot/rl/`.
 - Run `bash scripts/test_custom_version.sh` after cross-module changes. Do not
