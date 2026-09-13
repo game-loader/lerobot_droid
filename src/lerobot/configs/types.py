@@ -20,6 +20,7 @@ from enum import Enum
 class FeatureType(str, Enum):
     STATE = "STATE"
     VISUAL = "VISUAL"
+    POINT_CLOUD = "POINT_CLOUD"
     ENV = "ENV"
     ACTION = "ACTION"
     REWARD = "REWARD"

@@ -37,9 +37,7 @@ def decision_batch() -> DecisionBatch:
     next_state = state + 0.05 * torch.randn_like(state)
     return DecisionBatch(
         observation=ObservationBatch({"observation.state": state}),
-        next_observation=ObservationBatch(
-            {"observation.state": next_state}
-        ),
+        next_observation=ObservationBatch({"observation.state": next_state}),
         action=torch.randn(batch_size, 4, 14),
         action_valid=torch.tensor(
             [
@@ -59,9 +57,7 @@ def decision_batch() -> DecisionBatch:
 
 def _make_dynamics() -> StateDynamicsEnsemble:
     return StateDynamicsEnsemble(
-        feature_encoder=StateFeatureEncoder(
-            state_dim=3, n_obs_steps=2, hidden_dims=(16,), output_dim=8
-        ),
+        feature_encoder=StateFeatureEncoder(state_dim=3, n_obs_steps=2, hidden_dims=(16,), output_dim=8),
         state_dim=3,
         n_obs_steps=2,
         action_dim=14,
@@ -102,9 +98,7 @@ def test_dynamics_predicts_next_state_history_reward_and_done(
         decision_batch.action,
         decision_batch.action_valid,
     )
-    next_state = dynamics.next_state_history(
-        decision_batch.observation, prediction
-    )
+    next_state = dynamics.next_state_history(decision_batch.observation, prediction)
 
     assert prediction.state_delta.shape == (3, 6, 2, 3)
     assert prediction.reward_logit.shape == (3, 6, 1)
@@ -117,9 +111,7 @@ def test_dynamics_update_is_finite_and_keeps_encoder_frozen(
     decision_batch: DecisionBatch,
 ) -> None:
     dynamics = _make_dynamics()
-    before = [
-        parameter.detach().clone() for parameter in dynamics.feature_encoder.parameters()
-    ]
+    before = [parameter.detach().clone() for parameter in dynamics.feature_encoder.parameters()]
 
     metrics = dynamics.update(decision_batch)
     validation = dynamics.validation_loss(decision_batch)
@@ -136,20 +128,14 @@ def test_dynamics_update_is_finite_and_keeps_encoder_frozen(
     assert all(not parameter.requires_grad for parameter in dynamics.feature_encoder.parameters())
     dynamics.train()
     assert not dynamics.feature_encoder.training
-    for previous, current in zip(
-        before, dynamics.feature_encoder.parameters(), strict=True
-    ):
+    for previous, current in zip(before, dynamics.feature_encoder.parameters(), strict=True):
         torch.testing.assert_close(previous, current)
 
 
 def test_dynamics_feature_encoder_can_follow_trained_iql_encoder() -> None:
-    source = StateFeatureEncoder(
-        state_dim=3, n_obs_steps=2, hidden_dims=(16,), output_dim=8
-    )
+    source = StateFeatureEncoder(state_dim=3, n_obs_steps=2, hidden_dims=(16,), output_dim=8)
     dynamics = StateDynamicsEnsemble(
-        feature_encoder=StateFeatureEncoder(
-            state_dim=3, n_obs_steps=2, hidden_dims=(16,), output_dim=8
-        ),
+        feature_encoder=StateFeatureEncoder(state_dim=3, n_obs_steps=2, hidden_dims=(16,), output_dim=8),
         state_dim=3,
         n_obs_steps=2,
         action_dim=14,
@@ -161,9 +147,7 @@ def test_dynamics_feature_encoder_can_follow_trained_iql_encoder() -> None:
     with torch.no_grad():
         next(source.parameters()).add_(0.25)
     dynamics.sync_feature_encoder(source)
-    for expected, actual in zip(
-        source.parameters(), dynamics.feature_encoder.parameters(), strict=True
-    ):
+    for expected, actual in zip(source.parameters(), dynamics.feature_encoder.parameters(), strict=True):
         torch.testing.assert_close(expected, actual)
     assert all(not parameter.requires_grad for parameter in dynamics.feature_encoder.parameters())
 
@@ -188,21 +172,16 @@ def test_dynamics_update_is_transactional_when_later_member_loss_overflows(
     assert torch.isfinite(prediction.state_delta).all()
 
     parameters_before = {
-        name: parameter.detach().clone()
-        for name, parameter in dynamics.members.named_parameters()
+        name: parameter.detach().clone() for name, parameter in dynamics.members.named_parameters()
     }
-    optimizers_before = [
-        copy.deepcopy(optimizer.state_dict()) for optimizer in dynamics.optimizers
-    ]
+    optimizers_before = [copy.deepcopy(optimizer.state_dict()) for optimizer in dynamics.optimizers]
 
     with pytest.raises(ValueError, match=r"member 2.*state_loss"):
         dynamics.update(decision_batch)
 
     for name, parameter in dynamics.members.named_parameters():
         assert torch.equal(parameter, parameters_before[name])
-    for optimizer_before, optimizer in zip(
-        optimizers_before, dynamics.optimizers, strict=True
-    ):
+    for optimizer_before, optimizer in zip(optimizers_before, dynamics.optimizers, strict=True):
         _assert_nested_exact(optimizer_before, optimizer.state_dict())
 
 
@@ -214,16 +193,11 @@ def test_dynamics_update_is_transactional_when_later_member_gradient_overflows(
     assert math.isfinite(dynamics.validation_loss(decision_batch))
     final_layer = dynamics.members[-1].network[-1]
     assert isinstance(final_layer, torch.nn.Linear)
-    hook = final_layer.weight.register_hook(
-        lambda gradient: torch.full_like(gradient, torch.inf)
-    )
+    hook = final_layer.weight.register_hook(lambda gradient: torch.full_like(gradient, torch.inf))
     parameters_before = {
-        name: parameter.detach().clone()
-        for name, parameter in dynamics.members.named_parameters()
+        name: parameter.detach().clone() for name, parameter in dynamics.members.named_parameters()
     }
-    optimizers_before = [
-        copy.deepcopy(optimizer.state_dict()) for optimizer in dynamics.optimizers
-    ]
+    optimizers_before = [copy.deepcopy(optimizer.state_dict()) for optimizer in dynamics.optimizers]
 
     try:
         with pytest.raises(ValueError, match=r"member 2.*gradient.*finite"):
@@ -234,9 +208,7 @@ def test_dynamics_update_is_transactional_when_later_member_gradient_overflows(
     for name, parameter in dynamics.members.named_parameters():
         assert torch.equal(parameter, parameters_before[name])
         assert parameter.grad is None
-    for optimizer_before, optimizer in zip(
-        optimizers_before, dynamics.optimizers, strict=True
-    ):
+    for optimizer_before, optimizer in zip(optimizers_before, dynamics.optimizers, strict=True):
         _assert_nested_exact(optimizer_before, optimizer.state_dict())
 
 
@@ -263,9 +235,7 @@ def test_dynamics_ignores_inactive_and_padded_action_values(
     changed = decision_batch.action.clone()
     changed[..., 3:12] = 1e6
     changed[~decision_batch.action_valid] = -1e6
-    updated = dynamics.predict(
-        decision_batch.observation, changed, decision_batch.action_valid
-    )
+    updated = dynamics.predict(decision_batch.observation, changed, decision_batch.action_valid)
 
     torch.testing.assert_close(updated.state_delta, baseline.state_delta)
     torch.testing.assert_close(updated.reward_logit, baseline.reward_logit)
@@ -315,9 +285,7 @@ def test_promotion_gate_uses_stronger_critic_reference_and_rejects_nonfinite() -
 
 
 def test_promotion_gate_handles_zero_baseline_and_validation_boundary() -> None:
-    gate = PolicyPromotionGate(
-        relative_margin=0.05, max_validation_loss=0.1, epsilon=1e-6
-    )
+    gate = PolicyPromotionGate(relative_margin=0.05, max_validation_loss=0.1, epsilon=1e-6)
 
     equal = gate.decide(
         candidate_return=0.0,

@@ -16,6 +16,9 @@ from types import SimpleNamespace
 
 import pytest
 
+pytest.importorskip("datasets", exc_type=ModuleNotFoundError)
+pytest.importorskip("diffusers", exc_type=ModuleNotFoundError)
+
 from RL.cli import train_offline
 from RL.cli.train_offline import _parse_newton_eval_info, _parser, _run_newton_eval
 from RL.tracking import SwanLabConfig, create_swanlab_tracker

@@ -13,6 +13,8 @@ from pathlib import Path
 import pytest
 import torch
 
+pytest.importorskip("diffusers", exc_type=ModuleNotFoundError)
+
 from lerobot.configs.types import FeatureType, PolicyFeature
 from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
@@ -219,9 +221,7 @@ def test_checkpoint_rejects_symlinked_processor_state(tmp_path: Path) -> None:
 def test_checkpoint_rejects_processor_fingerprint_provenance_mismatch(tmp_path: Path) -> None:
     source = _tiny_adapter(tmp_path / "source")
     provenance = _provenance(source)
-    provenance = RLProvenance(
-        **(provenance.to_dict() | {"processor_fingerprint": "f" * 64})
-    )
+    provenance = RLProvenance(**(provenance.to_dict() | {"processor_fingerprint": "f" * 64}))
 
     with pytest.raises(ValueError, match="processor fingerprint"):
         save_rl_checkpoint(

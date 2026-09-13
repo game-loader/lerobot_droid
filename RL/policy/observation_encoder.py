@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import copy
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 
@@ -81,6 +82,7 @@ class StateFeatureEncoder(ObservationFeatureEncoder):
         output_dim: int,
         state_key: str = "observation.state",
         image_encoder: ObservationFeatureEncoder | None = None,
+        ignore_extra_features: bool = False,
     ) -> None:
         super().__init__()
         _positive_int("state_dim", state_dim)
@@ -88,6 +90,8 @@ class StateFeatureEncoder(ObservationFeatureEncoder):
         _positive_int("output_dim", output_dim)
         if not isinstance(state_key, str) or not state_key:
             raise ValueError(f"state_key must be a nonempty string, got {state_key!r}")
+        if not isinstance(ignore_extra_features, bool):
+            raise ValueError("ignore_extra_features must be a bool")
         hidden_dims = tuple(hidden_dims)
         for index, hidden_dim in enumerate(hidden_dims):
             _positive_int(f"hidden_dims[{index}]", hidden_dim)
@@ -95,6 +99,7 @@ class StateFeatureEncoder(ObservationFeatureEncoder):
         self.n_obs_steps = n_obs_steps
         self.state_key = state_key
         self.image_encoder = image_encoder
+        self.ignore_extra_features = ignore_extra_features
         self._output_dim = output_dim
 
         layers: list[nn.Module] = []
@@ -116,20 +121,15 @@ class StateFeatureEncoder(ObservationFeatureEncoder):
 
     def forward(self, observation: ObservationBatch) -> Tensor:
         if not isinstance(observation, ObservationBatch):
-            raise ValueError(
-                f"observation must be an ObservationBatch, got {type(observation).__name__}"
-            )
+            raise ValueError(f"observation must be an ObservationBatch, got {type(observation).__name__}")
         if self.state_key not in observation.features:
             raise ValueError(
-                f"observation is missing state_key={self.state_key!r}: "
-                f"actual={sorted(observation.features)}"
+                f"observation is missing state_key={self.state_key!r}: actual={sorted(observation.features)}"
             )
         state = observation.features[self.state_key]
         expected_shape = (observation.batch_size(), self.n_obs_steps, self.state_dim)
         if state.shape != expected_shape:
-            raise ValueError(
-                f"{self.state_key} must have shape {expected_shape}, got {tuple(state.shape)}"
-            )
+            raise ValueError(f"{self.state_key} must have shape {expected_shape}, got {tuple(state.shape)}")
         if not state.is_floating_point():
             raise ValueError(f"{self.state_key} must have a floating-point dtype, got {state.dtype}")
         state_features = self.state_network(state.flatten(start_dim=1))
@@ -142,12 +142,10 @@ class StateFeatureEncoder(ObservationFeatureEncoder):
                 )
             return state_features
         if self.image_encoder is None or self.fusion is None:
-            raise ImageEncoderRequiredError(
-                f"image feature encoder is required for keys {image_keys}"
-            )
-        image_observation = ObservationBatch(
-            {key: observation.features[key] for key in image_keys}
-        )
+            if self.ignore_extra_features:
+                return state_features
+            raise ImageEncoderRequiredError(f"image feature encoder is required for keys {image_keys}")
+        image_observation = ObservationBatch({key: observation.features[key] for key in image_keys})
         image_features = self.image_encoder(image_observation)
         expected_image_shape = (observation.batch_size(), self.image_encoder.output_dim)
         if image_features.shape != expected_image_shape:
@@ -163,3 +161,64 @@ class StateFeatureEncoder(ObservationFeatureEncoder):
         if image_features.dtype != state_features.dtype:
             image_features = image_features.to(dtype=state_features.dtype)
         return self.fusion(torch.cat((state_features, image_features), dim=-1))
+
+
+class DP3FeatureEncoder(ObservationFeatureEncoder):
+    """Frozen-copy DP3 observation encoder that emits flattened latent history.
+
+    RL-100's 3D dynamics are trained in the policy feature space rather than
+    directly on raw point clouds/RGB.  This adapter mirrors the LeRobot DP3
+    encoder and accepts an :class:`ObservationBatch` with
+    ``observation.state``, ``observation.point_cloud`` and the two wrist RGB
+    streams.  The wrapped encoder is deep-copied so off-policy updates never
+    mutate the actor's representation; in offline RL the copy is additionally
+    frozen so the IQL/dynamics/actor all reason over one stable latent.
+    """
+
+    def __init__(self, policy: nn.Module) -> None:
+        super().__init__()
+        config = getattr(policy, "config", None)
+        diffusion = getattr(policy, "diffusion", None)
+        encoder = getattr(diffusion, "observation_encoder", None)
+        if config is None or diffusion is None or encoder is None:
+            raise ValueError("policy must expose config and diffusion.observation_encoder")
+        if not hasattr(encoder, "output_dim"):
+            raise ValueError("DP3 observation encoder must expose output_dim")
+        self.config = config
+        self.encoder = copy.deepcopy(encoder)
+        self.n_obs_steps = int(config.n_obs_steps)
+        self.state_key = "observation.state"
+        self.point_cloud_key = str(config.point_cloud_key)
+        self.image_keys = tuple(config.wrist_image_keys)
+        self._output_dim = int(encoder.output_dim) * self.n_obs_steps
+
+    @property
+    def output_dim(self) -> int:
+        return self._output_dim
+
+    def forward(self, observation: ObservationBatch) -> Tensor:
+        if not isinstance(observation, ObservationBatch):
+            raise ValueError(f"observation must be an ObservationBatch, got {type(observation).__name__}")
+        required = (self.state_key, self.point_cloud_key, *self.image_keys)
+        missing = [key for key in required if key not in observation.features]
+        if missing:
+            raise ValueError(f"DP3 observation is missing feature(s): {missing}")
+        state = observation.features[self.state_key]
+        point_cloud = observation.features[self.point_cloud_key]
+        images = [observation.features[key] for key in self.image_keys]
+        expected_prefix = (observation.batch_size(), self.n_obs_steps)
+        if state.shape[:2] != expected_prefix or point_cloud.shape[:2] != expected_prefix:
+            raise ValueError(
+                "DP3 state and point-cloud histories must have shape "
+                f"[batch,{self.n_obs_steps},...], got {tuple(state.shape)} and {tuple(point_cloud.shape)}"
+            )
+        if any(image.shape[:2] != expected_prefix for image in images):
+            raise ValueError("DP3 wrist RGB histories must have [batch,n_obs_steps,...] axes")
+        batch_size = state.shape[0]
+        stacked_images = torch.stack(images, dim=2)
+        encoded = self.encoder(
+            state.reshape(batch_size * self.n_obs_steps, state.shape[-1]),
+            point_cloud.reshape(batch_size * self.n_obs_steps, *point_cloud.shape[-2:]),
+            stacked_images.reshape(batch_size * self.n_obs_steps, *stacked_images.shape[-4:]),
+        )
+        return encoded.reshape(batch_size, self.n_obs_steps, -1).flatten(start_dim=1)

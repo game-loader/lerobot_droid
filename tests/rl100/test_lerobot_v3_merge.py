@@ -7,6 +7,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+pytest.importorskip("datasets", exc_type=ModuleNotFoundError)
+
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from RL.datasets.merge_lerobot_v3 import (
     LeRobotV3MergeSource,

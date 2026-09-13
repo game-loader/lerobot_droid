@@ -44,9 +44,7 @@ def _finite_number(name: str, value: float, *, positive: bool = False) -> float:
     return converted
 
 
-def _validate_tensor_pair(
-    model_output: Tensor, sample: Tensor, *, check_finite: bool
-) -> None:
+def _validate_tensor_pair(model_output: Tensor, sample: Tensor, *, check_finite: bool) -> None:
     for name, value in (("model_output", model_output), ("sample", sample)):
         if not isinstance(value, Tensor) or not value.is_floating_point():
             raise ValueError(f"{name} must be a floating-point torch.Tensor")
@@ -63,27 +61,21 @@ def _validate_tensor_pair(
         raise ValueError("model_output and sample must share device and dtype")
 
 
-def _validate_generator_device(
-    generator: torch.Generator | None, device: torch.device
-) -> None:
+def _validate_generator_device(generator: torch.Generator | None, device: torch.device) -> None:
     if generator is None:
         return
     if not isinstance(generator, torch.Generator):
         raise ValueError(f"generator must be a torch.Generator, got {type(generator).__name__}")
     generator_device = torch.device(generator.device)
     if generator_device.type != device.type:
-        raise ValueError(
-            f"generator device {generator_device} does not match sample device {device}"
-        )
+        raise ValueError(f"generator device {generator_device} does not match sample device {device}")
     if (
         generator_device.type == "cuda"
         and generator_device.index is not None
         and device.index is not None
         and generator_device.index != device.index
     ):
-        raise ValueError(
-            f"generator device {generator_device} does not match sample device {device}"
-        )
+        raise ValueError(f"generator device {generator_device} does not match sample device {device}")
 
 
 def stochastic_ddim_step(
@@ -116,14 +108,10 @@ def stochastic_ddim_step(
         raise ValueError(f"timestep must be an integer, got {timestep!r}")
     num_train_timesteps = int(scheduler.config.num_train_timesteps)
     if not 0 <= timestep < num_train_timesteps:
-        raise ValueError(
-            f"timestep must be in [0, {num_train_timesteps}), got {timestep!r}"
-        )
+        raise ValueError(f"timestep must be in [0, {num_train_timesteps}), got {timestep!r}")
     if previous_timestep is not None:
         if isinstance(previous_timestep, bool) or not isinstance(previous_timestep, int):
-            raise ValueError(
-                f"previous_timestep must be an integer or None, got {previous_timestep!r}"
-            )
+            raise ValueError(f"previous_timestep must be an integer or None, got {previous_timestep!r}")
         if not 0 <= previous_timestep < timestep:
             raise ValueError(
                 "previous_timestep must be nonnegative and smaller than timestep, "
@@ -135,15 +123,11 @@ def stochastic_ddim_step(
     sigma_min = _finite_number("sigma_min", sigma_min, positive=True)
     sigma_max = _finite_number("sigma_max", sigma_max, positive=True)
     if sigma_max < sigma_min:
-        raise ValueError(
-            f"sigma_max must be at least sigma_min ({sigma_min}), got {sigma_max}"
-        )
+        raise ValueError(f"sigma_max must be at least sigma_min ({sigma_min}), got {sigma_max}")
     probability_sigma_min = (
         sigma_min
         if probability_sigma_min is None
-        else _finite_number(
-            "probability_sigma_min", probability_sigma_min, positive=True
-        )
+        else _finite_number("probability_sigma_min", probability_sigma_min, positive=True)
     )
     if bool(getattr(scheduler.config, "thresholding", False)):
         raise ValueError("DDIM thresholding is not supported by the RL transition")
@@ -198,11 +182,7 @@ def stochastic_ddim_step(
     # DPPO-style surrogate likelihood: preserve rollout noise while preventing
     # near-deterministic tail transitions from dominating the policy ratio.
     residual = (previous_sample.detach() - mean) / probability_std
-    log_prob = (
-        -0.5 * residual.square()
-        - probability_std.log()
-        - 0.5 * math.log(2.0 * math.pi)
-    )
+    log_prob = -0.5 * residual.square() - probability_std.log() - 0.5 * math.log(2.0 * math.pi)
     if check_finite:
         for name, value in (
             ("previous_sample", previous_sample),

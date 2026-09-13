@@ -10,6 +10,10 @@ from typing import Any
 
 import pytest
 
+pytest.importorskip("datasets", exc_type=ModuleNotFoundError)
+pytest.importorskip("diffusers", exc_type=ModuleNotFoundError)
+pytest.importorskip("accelerate", exc_type=ModuleNotFoundError)
+
 from lerobot.scripts.lerobot_train import _save_periodic_eval_provenance
 from RL.cli import train_iterative_offline as iterative
 from RL.cli.train_iterative_offline import (

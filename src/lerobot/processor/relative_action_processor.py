@@ -20,7 +20,7 @@ import torch
 from torch import Tensor
 
 from lerobot.configs import PipelineFeatureType, PolicyFeature
-from lerobot.types import EnvTransition, TransitionKey
+from lerobot.lerobot_types import EnvTransition, TransitionKey
 from lerobot.utils.constants import OBS_STATE
 
 from .delta_action_processor import MapDeltaActionToRobotActionStep, MapTensorToDeltaActionDictStep
@@ -81,7 +81,7 @@ def to_absolute_actions(actions: Tensor, state: Tensor, mask: Sequence[bool]) ->
     return actions
 
 
-@ProcessorStepRegistry.register("delta_actions_processor")
+@ProcessorStepRegistry.register("relative_actions_processor")
 @dataclass
 class RelativeActionsProcessorStep(ProcessorStep):
     """Converts absolute actions to relative actions (action -= state) for masked dimensions.

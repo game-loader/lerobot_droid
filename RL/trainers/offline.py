@@ -19,6 +19,7 @@ from torch import Tensor
 
 from RL.algorithms.amq import AMQEvaluator
 from RL.algorithms.dynamics import (
+    DP3FeatureDynamicsEnsemble,
     PolicyPromotionGate,
     PromotionDecision,
     StateDynamicsEnsemble,
@@ -52,14 +53,15 @@ def _info_metrics(prefix: str, metrics: Mapping[str, float]) -> dict[str, float]
 def _validate_optimizer_parameters(
     optimizer: torch.optim.Optimizer, module: torch.nn.Module, *, name: str
 ) -> None:
-    module_parameters = list(module.parameters())
-    optimizer_parameters = [
-        parameter for group in optimizer.param_groups for parameter in group["params"]
-    ]
+    # Frozen submodules (e.g. a frozen observation encoder) are not returned by
+    # ``module.parameters()`` but remain part of the module, so compare only the
+    # trainable subset an optimizer is expected to own.
+    module_parameters = [parameter for parameter in module.parameters() if parameter.requires_grad]
+    optimizer_parameters = [parameter for group in optimizer.param_groups for parameter in group["params"]]
     optimizer_ids = [id(parameter) for parameter in optimizer_parameters]
     module_ids = [id(parameter) for parameter in module_parameters]
     if len(optimizer_ids) != len(set(optimizer_ids)) or set(optimizer_ids) != set(module_ids):
-        raise ValueError(f"{name} optimizer parameters must exactly match the module parameters")
+        raise ValueError(f"{name} optimizer parameters must exactly match the trainable module parameters")
 
 
 class OfflineTrainer:
@@ -82,7 +84,7 @@ class OfflineTrainer:
         gradient_clip_norm: float = 1.0,
         old_policy_sync_interval: int = 1,
         ppo_epochs: int = 1,
-        dynamics: StateDynamicsEnsemble | None = None,
+        dynamics: StateDynamicsEnsemble | DP3FeatureDynamicsEnsemble | None = None,
         amq_evaluator: AMQEvaluator | None = None,
         promotion_gate: PolicyPromotionGate | None = None,
         tracker: ScalarTracker | None = None,
@@ -152,9 +154,7 @@ class OfflineTrainer:
                 amq_evaluator.candidate_policy is not current_policy
                 or amq_evaluator.behavior_policy is not old_policy
             ):
-                raise ValueError(
-                    "AMQEvaluator must reference the trainer's current and old policies"
-                )
+                raise ValueError("AMQEvaluator must reference the trainer's current and old policies")
         self.amq_evaluator = amq_evaluator
         self.promotion_gate = promotion_gate
         self.tracker = tracker
@@ -165,9 +165,7 @@ class OfflineTrainer:
             "old_replay_abs_delta_max": 0.0,
             "old_replay_abs_delta_mean": 0.0,
         }
-        self._transition_info = (
-            current_policy.denoising_step_diagnostics() if debug else ()
-        )
+        self._transition_info = current_policy.denoising_step_diagnostics() if debug else ()
         self.metrics_path.parent.mkdir(parents=True, exist_ok=True)
         self.old_policy.policy.eval()
         for parameter in self.old_policy.policy.parameters():
@@ -180,13 +178,16 @@ class OfflineTrainer:
     def normalized_batch(self, batch: DecisionBatch) -> DecisionBatch:
         if not isinstance(batch, DecisionBatch):
             raise ValueError(f"batch must be a DecisionBatch, got {type(batch).__name__}")
+        device = self.device
         normalized_observation = self.current_policy.checkpoint.normalize_observation(
-            batch.observation
+            batch.observation.to(device, non_blocking=True), convert_visual_uint8=True
         )
         normalized_next = self.current_policy.checkpoint.normalize_observation(
-            batch.next_observation
+            batch.next_observation.to(device, non_blocking=True), convert_visual_uint8=True
         )
-        normalized_action = self.current_policy.checkpoint.normalize_action(batch.action)
+        normalized_action = self.current_policy.checkpoint.normalize_action(
+            batch.action.to(device, non_blocking=True)
+        )
         return dataclasses.replace(
             batch,
             observation=normalized_observation,
@@ -205,9 +206,7 @@ class OfflineTrainer:
             raise ValueError(f"phase_id must be a nonnegative integer, got {phase_id!r}")
         return phase_id
 
-    def record_metrics(
-        self, metrics: Mapping[str, float], phase_id: int = 2
-    ) -> dict[str, float]:
+    def record_metrics(self, metrics: Mapping[str, float], phase_id: int = 2) -> dict[str, float]:
         """Persist one post-update row, then mirror it remotely.
 
         The local row and counter are committed before a tracker is called so
@@ -324,9 +323,7 @@ class OfflineTrainer:
                 # any behavior synchronization, so ratio/KL compare distinct
                 # policies on exactly the stored old transition.
                 with torch.no_grad():
-                    last_post_log_prob = self.current_policy.recompute_log_prob(
-                        batch.observation, trace
-                    )
+                    last_post_log_prob = self.current_policy.recompute_log_prob(batch.observation, trace)
 
         except Exception:
             self.actor_optimizer.zero_grad(set_to_none=True)
@@ -338,9 +335,7 @@ class OfflineTrainer:
             actor_updates=self.counters.actor_updates + epochs,
             decisions_seen=self.counters.decisions_seen + batch.action.shape[0],
         )
-        old_log_prob = trace.old_log_prob.to(
-            device=last_post_log_prob.device, dtype=last_post_log_prob.dtype
-        )
+        old_log_prob = trace.old_log_prob.to(device=last_post_log_prob.device, dtype=last_post_log_prob.dtype)
         post_new_executable = self.current_policy.executable_log_prob(last_post_log_prob)
         post_old_executable = self.current_policy.executable_log_prob(old_log_prob)
         aggregate = denoising_ppo_metrics(
@@ -460,13 +455,9 @@ class OfflineTrainer:
         if self.amq_evaluator is None or self.promotion_gate is None or self.dynamics is None:
             raise RuntimeError("AM-Q evaluation requires dynamics, evaluator, and promotion gate")
         normalized = self.normalized_batch(batch)
-        candidate, behavior = self.amq_evaluator.paired(
-            batch.observation, normalized=False, seed=seed
-        )
+        candidate, behavior = self.amq_evaluator.paired(batch.observation, normalized=False, seed=seed)
         critic_return = float(
-            self.iql.q_value(
-                normalized.observation, normalized.action, normalized.action_valid
-            ).mean().item()
+            self.iql.q_value(normalized.observation, normalized.action, normalized.action_valid).mean().item()
         )
         validation_loss = self.dynamics.validation_loss(normalized)
         decision = self.promotion_gate.decide(
@@ -530,9 +521,7 @@ class OfflineTrainer:
         metrics.update(self.train_actor_step(batch, generator=generator))
         if self.dynamics is not None:
             metrics.update(self.train_dynamics_step(batch))
-        self.counters = dataclasses.replace(
-            self.counters, global_updates=self.counters.global_updates + 1
-        )
+        self.counters = dataclasses.replace(self.counters, global_updates=self.counters.global_updates + 1)
         self.record_metrics(metrics, phase_id=2)
         return _finite_metrics(metrics)
 

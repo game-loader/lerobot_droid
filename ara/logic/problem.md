@@ -1,6 +1,6 @@
 # Problem
 
-The migrated diffusion-PPO actor became numerically unstable during offline
-training: KL estimates grew rapidly, while the existing scalar logs did not
-identify whether the cause was action-chunk joint probability reduction,
-individual denoising transitions, stochastic DDIM scale, or snapshot replay.
+Retain the user's DP3, Franka Duo, RL-100, SmolVLA offline-RL, simulator and
+inference extensions while adopting current upstream infrastructure without
+overwriting the old dirty checkout. Separate software compatibility evidence
+from real-world task-success evidence and preserve explicit data contracts.

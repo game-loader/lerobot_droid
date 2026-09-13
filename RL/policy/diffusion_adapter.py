@@ -20,7 +20,7 @@ from collections.abc import Iterator, Sequence
 
 import torch
 from diffusers import DDIMScheduler
-from torch import Tensor
+from torch import Tensor, nn
 
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 from lerobot.policies.utils import get_device_from_parameters, get_dtype_from_parameters
@@ -31,9 +31,7 @@ from RL.policy.ddim import _validate_generator_device, stochastic_ddim_step
 from RL.types import DenoisingTrace, ObservationBatch
 
 
-def _stack_policy_images(
-    batch: dict[str, Tensor], *, image_keys: Sequence[str], n_obs_steps: int
-) -> Tensor:
+def _stack_policy_images(batch: dict[str, Tensor], *, image_keys: Sequence[str], n_obs_steps: int) -> Tensor:
     if n_obs_steps <= 0:
         raise ValueError(f"n_obs_steps must be positive, got {n_obs_steps}")
     images: list[Tensor] = []
@@ -45,8 +43,7 @@ def _stack_policy_images(
             image = image.unsqueeze(1)
         if image.ndim != 5 or image.shape[1] != n_obs_steps:
             raise ValueError(
-                f"{key} must have shape [batch,{n_obs_steps},channels,height,width], "
-                f"got {tuple(image.shape)}"
+                f"{key} must have shape [batch,{n_obs_steps},channels,height,width], got {tuple(image.shape)}"
             )
         images.append(image)
     if not images:
@@ -62,13 +59,9 @@ class DiffusionRLAdapter:
 
     def __init__(self, checkpoint: CheckpointAdapter, trace_config: TraceConfig) -> None:
         if not isinstance(checkpoint, CheckpointAdapter):
-            raise ValueError(
-                f"checkpoint must be a CheckpointAdapter, got {type(checkpoint).__name__}"
-            )
+            raise ValueError(f"checkpoint must be a CheckpointAdapter, got {type(checkpoint).__name__}")
         if not isinstance(trace_config, TraceConfig):
-            raise ValueError(
-                f"trace_config must be a TraceConfig, got {type(trace_config).__name__}"
-            )
+            raise ValueError(f"trace_config must be a TraceConfig, got {type(trace_config).__name__}")
         self.checkpoint = checkpoint
         self.trace_config = trace_config
         config = checkpoint.policy.config
@@ -101,9 +94,7 @@ class DiffusionRLAdapter:
             thresholding=bool(getattr(source_scheduler, "thresholding", False)),
             clip_sample_range=config.clip_sample_range,
             timestep_spacing=str(getattr(source_scheduler, "timestep_spacing", "leading")),
-            rescale_betas_zero_snr=bool(
-                getattr(source_scheduler, "rescale_betas_zero_snr", False)
-            ),
+            rescale_betas_zero_snr=bool(getattr(source_scheduler, "rescale_betas_zero_snr", False)),
         )
         self.scheduler.set_timesteps(trace_config.num_inference_steps)
         self._timesteps = tuple(int(timestep) for timestep in self.scheduler.timesteps.tolist())
@@ -111,9 +102,7 @@ class DiffusionRLAdapter:
             raise ValueError("DDIM inference schedule must be nonempty")
         if any(
             current <= following
-            for current, following in zip(
-                self._timesteps, self._timesteps[1:], strict=False
-            )
+            for current, following in zip(self._timesteps, self._timesteps[1:], strict=False)
         ):
             raise ValueError(f"DDIM timesteps must be strictly descending, got {self._timesteps}")
         checkpoint.policy.eval()
@@ -135,9 +124,7 @@ class DiffusionRLAdapter:
 
         result: list[dict[str, float]] = []
         for index, timestep in enumerate(self._timesteps):
-            previous_timestep = (
-                self._timesteps[index + 1] if index + 1 < len(self._timesteps) else None
-            )
+            previous_timestep = self._timesteps[index + 1] if index + 1 < len(self._timesteps) else None
             alpha_t = self.scheduler.alphas_cumprod[timestep].detach().float().cpu()
             alpha_previous = (
                 self.scheduler.final_alpha_cumprod.detach().float().cpu()
@@ -145,39 +132,25 @@ class DiffusionRLAdapter:
                 else self.scheduler.alphas_cumprod[previous_timestep].detach().float().cpu()
             )
             beta_t = (1.0 - alpha_t).clamp_min(torch.finfo(alpha_t.dtype).eps)
-            variance = ((1.0 - alpha_previous) / beta_t) * (
-                1.0 - alpha_t / alpha_previous
-            )
-            raw_sigma = float(
-                (self.trace_config.eta * variance.clamp_min(0).sqrt()).item()
-            )
-            effective_sigma = min(
-                max(raw_sigma, self.trace_config.sigma_min), self.trace_config.sigma_max
-            )
-            probability_sigma = max(
-                effective_sigma, self.trace_config.probability_sigma_min
-            )
+            variance = ((1.0 - alpha_previous) / beta_t) * (1.0 - alpha_t / alpha_previous)
+            raw_sigma = float((self.trace_config.eta * variance.clamp_min(0).sqrt()).item())
+            effective_sigma = min(max(raw_sigma, self.trace_config.sigma_min), self.trace_config.sigma_max)
+            probability_sigma = max(effective_sigma, self.trace_config.probability_sigma_min)
             result.append(
                 {
                     "step": float(index),
                     "timestep": float(timestep),
-                    "previous_timestep": float(
-                        -1 if previous_timestep is None else previous_timestep
-                    ),
+                    "previous_timestep": float(-1 if previous_timestep is None else previous_timestep),
                     "sigma_raw": raw_sigma,
                     "sigma_effective": effective_sigma,
                     "sigma_inverse_square": 1.0 / (effective_sigma * effective_sigma),
                     "sigma_sample_raw": raw_sigma,
                     "sigma_sample_effective": effective_sigma,
-                    "sigma_sample_inverse_square": 1.0
-                    / (effective_sigma * effective_sigma),
+                    "sigma_sample_inverse_square": 1.0 / (effective_sigma * effective_sigma),
                     "sigma_probability": probability_sigma,
-                    "sigma_probability_inverse_square": 1.0
-                    / (probability_sigma * probability_sigma),
+                    "sigma_probability_inverse_square": 1.0 / (probability_sigma * probability_sigma),
                     "sigma_probability_floor": self.trace_config.probability_sigma_min,
-                    "sigma_probability_floor_active": float(
-                        probability_sigma > effective_sigma
-                    ),
+                    "sigma_probability_floor_active": float(probability_sigma > effective_sigma),
                     "sigma_clamped_to_min": float(raw_sigma < self.trace_config.sigma_min),
                     "sigma_clamped_to_max": float(raw_sigma > self.trace_config.sigma_max),
                 }
@@ -189,8 +162,7 @@ class DiffusionRLAdapter:
 
         if not isinstance(other, DiffusionRLAdapter):
             raise ValueError(
-                "transition contract peer must be a DiffusionRLAdapter, "
-                f"got {type(other).__name__}"
+                f"transition contract peer must be a DiffusionRLAdapter, got {type(other).__name__}"
             )
         config_fields = (
             "num_train_timesteps",
@@ -206,9 +178,7 @@ class DiffusionRLAdapter:
             "timestep_spacing",
             "rescale_betas_zero_snr",
         )
-        scheduler_contract = tuple(
-            getattr(self.scheduler.config, name, None) for name in config_fields
-        )
+        scheduler_contract = tuple(getattr(self.scheduler.config, name, None) for name in config_fields)
         other_scheduler_contract = tuple(
             getattr(other.scheduler.config, name, None) for name in config_fields
         )
@@ -218,10 +188,8 @@ class DiffusionRLAdapter:
             and self.policy.config.horizon == other.policy.config.horizon
             and self.policy.config.n_obs_steps == other.policy.config.n_obs_steps
             and self.policy.config.n_action_steps == other.policy.config.n_action_steps
-            and self.policy.config.action_feature.shape
-            == other.policy.config.action_feature.shape
-            and self.checkpoint.processor_fingerprint()
-            == other.checkpoint.processor_fingerprint()
+            and self.policy.config.action_feature.shape == other.policy.config.action_feature.shape
+            and self.checkpoint.processor_fingerprint() == other.checkpoint.processor_fingerprint()
             and (
                 self.execution_slice.start,
                 self.execution_slice.stop,
@@ -252,14 +220,40 @@ class DiffusionRLAdapter:
         device = get_device_from_parameters(self.policy)
         return torch.Generator(device=device).manual_seed(seed)
 
+    def freeze_observation_encoder(self) -> None:
+        """Freeze the policy's observation encoder so offline RL keeps the
+        observation representation stable (RL-100 3D mirrors this).
+
+        The base diffusion model stores its image encoder as ``rgb_encoder``
+        (a single module or a ``ModuleList``); DP3 stores a multimodal encoder
+        at ``observation_encoder``.  State-only encoders have no learned vision
+        module, in which case this is a no-op.
+        """
+
+        diffusion = getattr(self.policy, "diffusion", None)
+        if diffusion is None:
+            return
+        encoders: list[nn.Module] = []
+        observation_encoder = getattr(diffusion, "observation_encoder", None)
+        if observation_encoder is not None:
+            encoders.append(observation_encoder)
+        rgb_encoder = getattr(diffusion, "rgb_encoder", None)
+        if rgb_encoder is not None:
+            if isinstance(rgb_encoder, nn.ModuleList):
+                encoders.extend(rgb_encoder)
+            else:
+                encoders.append(rgb_encoder)
+        for encoder in encoders:
+            encoder.eval()
+            for parameter in encoder.parameters():
+                parameter.requires_grad_(False)
+
     def _prepare_global_conditioning(self, observation: ObservationBatch) -> Tensor:
         if not isinstance(observation, ObservationBatch):
-            raise ValueError(
-                f"observation must be an ObservationBatch, got {type(observation).__name__}"
-            )
+            raise ValueError(f"observation must be an ObservationBatch, got {type(observation).__name__}")
         device = get_device_from_parameters(self.policy)
         dtype = get_dtype_from_parameters(self.policy)
-        normalized = self.checkpoint.normalize_observation(observation.to(device))
+        normalized = self.checkpoint.normalize_observation(observation.to(device), convert_visual_uint8=True)
         batch = {
             key: value.to(dtype=dtype) if value.is_floating_point() else value
             for key, value in normalized.features.items()
@@ -273,8 +267,7 @@ class DiffusionRLAdapter:
         )
         if batch[OBS_STATE].shape != expected_state_shape:
             raise ValueError(
-                f"{OBS_STATE} must have shape {expected_state_shape}, "
-                f"got {tuple(batch[OBS_STATE].shape)}"
+                f"{OBS_STATE} must have shape {expected_state_shape}, got {tuple(batch[OBS_STATE].shape)}"
             )
 
         image_keys: Sequence[str] = tuple(self.policy.config.image_features)
@@ -287,24 +280,28 @@ class DiffusionRLAdapter:
         conditioning = self.policy.diffusion._prepare_global_conditioning(batch)
         if conditioning.shape[0] != observation.batch_size():
             raise ValueError(
-                "policy conditioning batch size disagrees with observation, "
-                f"got {tuple(conditioning.shape)}"
+                f"policy conditioning batch size disagrees with observation, got {tuple(conditioning.shape)}"
             )
         if not torch.isfinite(conditioning).all().item():
             raise ValueError("policy conditioning contains non-finite values")
         return conditioning
 
-    def sample_trace(
+    def _sample_trace_with_conditioning(
         self,
-        observation: ObservationBatch,
+        global_cond: Tensor,
         *,
         generator: torch.Generator | None = None,
     ) -> DenoisingTrace:
-        """Sample a detached complete trace from the current policy."""
-
         device = get_device_from_parameters(self.policy)
         dtype = get_dtype_from_parameters(self.policy)
-        batch_size = observation.batch_size()
+        if not isinstance(global_cond, Tensor) or global_cond.ndim != 2:
+            raise ValueError(
+                "global_cond must have shape [batch,conditioning_dim], "
+                f"got {getattr(global_cond, 'shape', None)}"
+            )
+        if not global_cond.is_floating_point() or not torch.isfinite(global_cond).all().item():
+            raise ValueError("global_cond must be finite floating-point values")
+        batch_size = global_cond.shape[0]
         horizon = self.policy.config.horizon
         action_dim = self.policy.config.action_feature.shape[0]
         latents: list[Tensor] = []
@@ -313,7 +310,7 @@ class DiffusionRLAdapter:
         self.policy.eval()
         _validate_generator_device(generator, device)
         with torch.no_grad():
-            global_cond = self._prepare_global_conditioning(observation)
+            global_cond = global_cond.to(device=device, dtype=dtype)
             sample = torch.randn(
                 (batch_size, horizon, action_dim),
                 dtype=dtype,
@@ -321,16 +318,10 @@ class DiffusionRLAdapter:
                 generator=generator,
             )
             for index, timestep in enumerate(self._timesteps):
-                previous_timestep = (
-                    self._timesteps[index + 1] if index + 1 < len(self._timesteps) else None
-                )
+                previous_timestep = self._timesteps[index + 1] if index + 1 < len(self._timesteps) else None
                 latents.append(sample.detach())
-                timestep_batch = torch.full(
-                    (batch_size,), timestep, dtype=torch.long, device=device
-                )
-                model_output = self.policy.diffusion.unet(
-                    sample, timestep_batch, global_cond=global_cond
-                )
+                timestep_batch = torch.full((batch_size,), timestep, dtype=torch.long, device=device)
+                model_output = self.policy.diffusion.unet(sample, timestep_batch, global_cond=global_cond)
                 output = stochastic_ddim_step(
                     scheduler=self.scheduler,
                     model_output=model_output,
@@ -355,6 +346,34 @@ class DiffusionRLAdapter:
             final_actions=sample.detach(),
         )
 
+    def sample_trace(
+        self,
+        observation: ObservationBatch,
+        *,
+        generator: torch.Generator | None = None,
+    ) -> DenoisingTrace:
+        """Sample a detached complete trace from a raw observation."""
+
+        return self._sample_trace_with_conditioning(
+            self._prepare_global_conditioning(observation),
+            generator=generator,
+        )
+
+    def sample_trace_from_features(
+        self,
+        features: Tensor,
+        *,
+        generator: torch.Generator | None = None,
+    ) -> DenoisingTrace:
+        """Sample using a precomputed policy-conditioning latent.
+
+        RL-100's 3D AM-Q rollout evolves DP3 encoder features.  This method
+        bypasses re-encoding static point clouds/RGB and feeds the predicted
+        latent directly to the diffusion denoiser.
+        """
+
+        return self._sample_trace_with_conditioning(features, generator=generator)
+
     def _validate_trace(self, observation: ObservationBatch, trace: DenoisingTrace) -> None:
         if not isinstance(trace, DenoisingTrace):
             raise ValueError(f"trace must be a DenoisingTrace, got {type(trace).__name__}")
@@ -373,17 +392,12 @@ class DiffusionRLAdapter:
             raise ValueError(
                 f"trace timesteps disagree with adapter schedule: {trace_timesteps} != {self._timesteps}"
             )
-        if len(self._timesteps) > 1 and not torch.equal(
-            trace.next_latents[:-1], trace.latents[1:]
-        ):
+        if len(self._timesteps) > 1 and not torch.equal(trace.next_latents[:-1], trace.latents[1:]):
             raise ValueError(
-                "trace transition chain is inconsistent: next_latents[i] must equal "
-                "latents[i + 1]"
+                "trace transition chain is inconsistent: next_latents[i] must equal latents[i + 1]"
             )
         if not torch.equal(trace.final_actions, trace.next_latents[-1]):
-            raise ValueError(
-                "trace final_actions is inconsistent with the final denoising transition"
-            )
+            raise ValueError("trace final_actions is inconsistent with the final denoising transition")
 
     def iter_recomputed_log_prob(
         self, observation: ObservationBatch, trace: DenoisingTrace
@@ -396,17 +410,13 @@ class DiffusionRLAdapter:
         self.policy.eval()
         for index, timestep in enumerate(self._timesteps):
             global_cond = self._prepare_global_conditioning(observation)
-            previous_timestep = (
-                self._timesteps[index + 1] if index + 1 < len(self._timesteps) else None
-            )
+            previous_timestep = self._timesteps[index + 1] if index + 1 < len(self._timesteps) else None
             sample = trace.latents[index].to(device=device, dtype=dtype)
             stored_previous = trace.next_latents[index].to(device=device, dtype=dtype)
             timestep_batch = torch.full(
                 (observation.batch_size(),), timestep, dtype=torch.long, device=device
             )
-            model_output = self.policy.diffusion.unet(
-                sample, timestep_batch, global_cond=global_cond
-            )
+            model_output = self.policy.diffusion.unet(sample, timestep_batch, global_cond=global_cond)
             output = stochastic_ddim_step(
                 scheduler=self.scheduler,
                 model_output=model_output,
@@ -422,9 +432,7 @@ class DiffusionRLAdapter:
             )
             yield output.log_prob.unsqueeze(0)
 
-    def recompute_log_prob(
-        self, observation: ObservationBatch, trace: DenoisingTrace
-    ) -> Tensor:
+    def recompute_log_prob(self, observation: ObservationBatch, trace: DenoisingTrace) -> Tensor:
         """Replay all stored transitions; trainers should prefer the stepwise iterator."""
 
         result = torch.cat(tuple(self.iter_recomputed_log_prob(observation, trace)), dim=0)
@@ -471,9 +479,7 @@ class DiffusionRLAdapter:
             self.policy.config.action_feature.shape[0],
         )
         if tuple(log_prob.shape[-2:]) != expected_tail:
-            raise ValueError(
-                f"log_prob must end in shape {expected_tail}, got {tuple(log_prob.shape)}"
-            )
+            raise ValueError(f"log_prob must end in shape {expected_tail}, got {tuple(log_prob.shape)}")
         return log_prob[:, :, self.execution_slice, :]
 
     def executable_actions(self, trace: DenoisingTrace) -> Tensor:

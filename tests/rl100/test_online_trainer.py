@@ -14,6 +14,8 @@ import numpy as np
 import pytest
 import torch
 
+pytest.importorskip("diffusers", exc_type=ModuleNotFoundError)
+
 from lerobot.configs.types import FeatureType, PolicyFeature
 from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
@@ -28,6 +30,7 @@ from RL.trainers.online import (
     _clip_env_action,
     _raw_feature_mapping,
     _reset_history,
+    _select_transition_frames,
     _validate_env_action,
 )
 
@@ -143,6 +146,48 @@ def test_collect_stores_partial_chunks_sparse_reward_and_terminal_state(tmp_path
     assert trainer.counters.environment_steps == 6
 
 
+def test_collect_can_use_environment_rewards(tmp_path: Path) -> None:
+    current = _adapter(tmp_path / "current")
+    old = _adapter(tmp_path / "old")
+    old.policy.load_state_dict(current.policy.state_dict(), strict=True)
+    trainer = OnlineTrainer(
+        current_policy=current,
+        old_policy=old,
+        actor_optimizer=torch.optim.Adam(current.policy.parameters(), lr=1e-4),
+        metrics_path=None,
+        reward_mode="environment",
+    )
+
+    rollout = trainer.collect(_AsyncDoneEnv(), decisions=1, seed=7)
+
+    # The fake environment returns 100 per executed step.  The environment
+    # reward mode accumulates those scalars instead of replacing them with
+    # terminal-success labels.
+    assert rollout.reward[:, :, 0].tolist() == [[100.0, 200.0]]
+
+
+def test_final_obs_selection_is_dimension_agnostic_for_dp3_features() -> None:
+    base = {
+        "observation.state": torch.zeros((2, 34), dtype=torch.float32),
+        "observation.point_cloud": torch.zeros((2, 8, 3), dtype=torch.float32),
+    }
+    final_obs = np.empty(2, dtype=object)
+    final_obs[0] = {
+        "observation.state": np.ones(34, dtype=np.float32),
+        "observation.point_cloud": np.ones((8, 3), dtype=np.float32),
+    }
+    final_obs[1] = None
+    selected = _select_transition_frames(
+        base,
+        {"final_obs": final_obs, "_final_obs": np.asarray([True, False])},
+        np.asarray([True, False]),
+        num_envs=2,
+    )
+    torch.testing.assert_close(selected["observation.state"][0], torch.ones(34))
+    torch.testing.assert_close(selected["observation.point_cloud"][0], torch.ones(8, 3))
+    torch.testing.assert_close(selected["observation.state"][1], torch.zeros(34))
+
+
 def test_done_world_history_advances_with_same_step_reset_frames(tmp_path: Path) -> None:
     current = _adapter(tmp_path / "current")
     old = _adapter(tmp_path / "old")
@@ -218,6 +263,10 @@ def test_online_cli_parser_exposes_smoke_controls(tmp_path: Path) -> None:
             "7",
             "--inference-steps",
             "50",
+            "--env-factory",
+            "tests.rl100.test_online_trainer:_AsyncDoneEnv",
+            "--reward-mode",
+            "environment",
             "--smoke",
         ]
     )
@@ -227,6 +276,8 @@ def test_online_cli_parser_exposes_smoke_controls(tmp_path: Path) -> None:
     assert args.rollout_decisions == 99
     assert args.ppo_epochs == 7
     assert args.inference_steps == 50
+    assert args.env_factory.endswith(":_AsyncDoneEnv")
+    assert args.reward_mode == "environment"
 
 
 def test_online_cli_uses_conservative_actor_defaults(tmp_path: Path) -> None:
@@ -243,6 +294,24 @@ def test_online_cli_uses_conservative_actor_defaults(tmp_path: Path) -> None:
     assert args.ppo_epochs == 1
     assert args.rollout_decisions == 30
     assert args.probability_sigma_min == pytest.approx(0.1)
+    assert args.num_envs == 1
+    assert args.env_device is None
+    assert args.reward_mode == "terminal_success"
+
+
+def test_online_cli_keeps_sim_device_as_non_simulation_factory_hint(tmp_path: Path) -> None:
+    args = _parser().parse_args(
+        [
+            "--checkpoint",
+            str(tmp_path / "checkpoint"),
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--sim-device",
+            "cpu",
+        ]
+    )
+
+    assert args.env_device == "cpu"
 
 
 def test_online_cli_resolves_run_directory_to_final_checkpoint(tmp_path: Path) -> None:
@@ -297,17 +366,13 @@ def test_online_checkpoint_contains_reloadable_policy_and_value_state(tmp_path: 
         gamma=0.9,
     )
 
-    destination = trainer.save_checkpoint(
-        tmp_path / "checkpoint", provenance=provenance, rl_config=config
-    )
+    destination = trainer.save_checkpoint(tmp_path / "checkpoint", provenance=provenance, rl_config=config)
     loaded = load_rl_checkpoint(destination, device="cpu")
 
     assert (destination / "pretrained_model" / "model.safetensors").is_file()
     assert loaded.state.stage == "online"
     assert loaded.state.sampler_state is not None
-    torch.testing.assert_close(
-        loaded.state.sampler_state["generator"], trainer.sampler_state()["generator"]
-    )
+    torch.testing.assert_close(loaded.state.sampler_state["generator"], trainer.sampler_state()["generator"])
     saved_value = loaded.state.trainer_state["value_network"]
     for key, value in trainer.value_network.state_dict().items():
         torch.testing.assert_close(saved_value[key], value.cpu())
@@ -325,9 +390,7 @@ def test_online_checkpoint_contains_reloadable_policy_and_value_state(tmp_path: 
     _restore_online_state(loaded, resumed)
     assert len(resumed._metrics_snapshot) == resumed.counters.metrics_rows == 1
     reloaded = load_rl_checkpoint(
-        resumed.save_checkpoint(
-            tmp_path / "resumed-checkpoint", provenance=provenance, rl_config=config
-        ),
+        resumed.save_checkpoint(tmp_path / "resumed-checkpoint", provenance=provenance, rl_config=config),
         device="cpu",
     )
     assert reloaded.state.counters.metrics_rows == 1
@@ -379,9 +442,7 @@ def test_rgb_frame_is_not_mistaken_for_three_step_history() -> None:
 def test_generic_pixels_observation_is_preserved() -> None:
     state = np.zeros((2, 39), dtype=np.float32)
     pixels = np.zeros((2, 3, 8, 8), dtype=np.uint8)
-    features = _raw_feature_mapping(
-        {"agent_pos": state, "pixels": pixels}, num_envs=2
-    )
+    features = _raw_feature_mapping({"agent_pos": state, "pixels": pixels}, num_envs=2)
     assert "observation.state" in features
     assert "pixels" in features
 
@@ -408,12 +469,8 @@ def test_action_clipping_projects_to_box_bounds() -> None:
     class Env:
         single_action_space = Space()
 
-    clipped = _clip_env_action(
-        Env(), np.asarray([[-1.5, 0.25], [0.5, 2.0]], dtype=np.float32), num_envs=2
-    )
-    np.testing.assert_array_equal(
-        clipped, np.asarray([[-1.0, 0.25], [0.5, 1.0]], dtype=np.float32)
-    )
+    clipped = _clip_env_action(Env(), np.asarray([[-1.5, 0.25], [0.5, 2.0]], dtype=np.float32), num_envs=2)
+    np.testing.assert_array_equal(clipped, np.asarray([[-1.0, 0.25], [0.5, 1.0]], dtype=np.float32))
 
 
 def test_failed_metric_logger_rolls_back_new_metrics_file(tmp_path: Path) -> None:

@@ -13,6 +13,9 @@ from pathlib import Path
 import pytest
 import torch
 
+pytest.importorskip("datasets", exc_type=ModuleNotFoundError)
+pytest.importorskip("diffusers", exc_type=ModuleNotFoundError)
+
 from lerobot.configs.types import FeatureType, PolicyFeature
 from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy

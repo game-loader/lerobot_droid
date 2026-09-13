@@ -132,9 +132,7 @@ def _missing_swanlab_error() -> RuntimeError:
     )
 
 
-def create_swanlab_tracker(
-    config: SwanLabConfig, run_config: Mapping[str, Any]
-) -> ScalarTracker | None:
+def create_swanlab_tracker(config: SwanLabConfig, run_config: Mapping[str, Any]) -> ScalarTracker | None:
     """Create a SwanLab tracker, keeping non-strict failures best-effort.
 
     Importing SwanLab is deliberately deferred until tracking is requested so

@@ -1,7 +1,14 @@
 # Environment
 
-- Repository: `/home/droid/project/lerobot_droid`
-- Package manager: `uv`
-- Policy device used for smoke runs: NVIDIA GeForce RTX 5090 via CUDA
-- Dataset: `outputs/rl100/collections/moya_diffusion_080000_sparse_100_20260818-135141/dataset`
-- Policy checkpoint: `outputs/train/moya_diffusion_300k_20260815-093537/train/checkpoints/080000/pretrained_model`
+Target worktree: `/home/droid/project/lerobot_droid/.worktrees/upstream-0.6-custom`.
+Source checkout: `/home/droid/project/lerobot_droid`.
+Version: `0.6.2+droid.1`; migration code commit: `ebd5836b`.
+
+The target `.venv` and `.venv-base` are independent of the source environment.
+Pinned dependencies are in `../../uv.lock`; detailed validation environment and
+commands are in `../../docs/CUSTOM_VERSION_VALIDATION.md` and
+`../../scripts/test_custom_version.sh`. Model weights, datasets, simulator assets,
+live services and long-running training jobs were not migrated or modified.
+
+The checkpoint smoke harness is archived under `execution/`. Its absolute paths
+refer to pre-existing local source artifacts, which are not shipped in this repo.

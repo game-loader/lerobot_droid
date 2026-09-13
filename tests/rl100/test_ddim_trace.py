@@ -17,6 +17,9 @@ from pathlib import Path
 
 import pytest
 import torch
+
+pytest.importorskip("diffusers", exc_type=ModuleNotFoundError)
+
 from diffusers import DDIMScheduler
 
 from lerobot.configs.types import FeatureType, PolicyFeature
@@ -223,12 +226,8 @@ def test_stochastic_ddim_rejects_nonfinite_raw_sigma() -> None:
 def test_trace_replay_has_unit_ratio_and_unet_gradients(
     tiny_diffusion_adapter: DiffusionRLAdapter,
 ) -> None:
-    observation = ObservationBatch(
-        {"observation.state": torch.zeros(2, 2, 3)}
-    )
-    trace = tiny_diffusion_adapter.sample_trace(
-        observation, generator=torch.Generator().manual_seed(11)
-    )
+    observation = ObservationBatch({"observation.state": torch.zeros(2, 2, 3)})
+    trace = tiny_diffusion_adapter.sample_trace(observation, generator=torch.Generator().manual_seed(11))
     replayed = tiny_diffusion_adapter.recompute_log_prob(observation, trace)
 
     assert trace.latents.shape == (4, 2, 4, 2)
@@ -279,10 +278,7 @@ def test_adapter_reports_effective_and_raw_sigma_for_each_denoising_step(
     assert diagnostics[-1]["sigma_probability"] == pytest.approx(0.1)
     assert diagnostics[-1]["sigma_probability_inverse_square"] == pytest.approx(100.0)
     assert diagnostics[-1]["sigma_clamped_to_min"] == 1.0
-    assert all(
-        0.01 <= diagnostics[index]["sigma_effective"] <= 0.1
-        for index in range(len(diagnostics))
-    )
+    assert all(0.01 <= diagnostics[index]["sigma_effective"] <= 0.1 for index in range(len(diagnostics)))
 
 
 def test_probability_sigma_does_not_change_sampled_trace(
@@ -310,12 +306,8 @@ def test_probability_sigma_does_not_change_sampled_trace(
     )
     observation = ObservationBatch({"observation.state": torch.zeros(2, 2, 3)})
 
-    sampled = sampling_floor.sample_trace(
-        observation, generator=sampling_floor.make_generator(31)
-    )
-    widened = probability_floor.sample_trace(
-        observation, generator=probability_floor.make_generator(31)
-    )
+    sampled = sampling_floor.sample_trace(observation, generator=sampling_floor.make_generator(31))
+    widened = probability_floor.sample_trace(observation, generator=probability_floor.make_generator(31))
 
     torch.testing.assert_close(widened.latents, sampled.latents, rtol=0, atol=0)
     torch.testing.assert_close(widened.next_latents, sampled.next_latents, rtol=0, atol=0)
@@ -339,9 +331,7 @@ def test_adapter_rejects_trace_with_inconsistent_final_action(
     tiny_diffusion_adapter: DiffusionRLAdapter,
 ) -> None:
     observation = ObservationBatch({"observation.state": torch.zeros(1, 2, 3)})
-    trace = tiny_diffusion_adapter.sample_trace(
-        observation, generator=torch.Generator().manual_seed(23)
-    )
+    trace = tiny_diffusion_adapter.sample_trace(observation, generator=torch.Generator().manual_seed(23))
     invalid = replace(
         trace,
         final_actions=trace.final_actions.clone().add(1.0),
@@ -359,16 +349,10 @@ def test_execution_slice_starts_after_observation_prefix(
 
     torch.testing.assert_close(sliced, full[:, :, 1:3, :])
 
-    observation = ObservationBatch(
-        {"observation.state": torch.zeros(1, 2, 3)}
-    )
-    trace = tiny_diffusion_adapter.sample_trace(
-        observation, generator=torch.Generator().manual_seed(13)
-    )
+    observation = ObservationBatch({"observation.state": torch.zeros(1, 2, 3)})
+    trace = tiny_diffusion_adapter.sample_trace(observation, generator=torch.Generator().manual_seed(13))
     actions = tiny_diffusion_adapter.executable_actions(trace)
-    expected = tiny_diffusion_adapter.checkpoint.unnormalize_action(
-        trace.final_actions[:, 1:3, :]
-    )
+    expected = tiny_diffusion_adapter.checkpoint.unnormalize_action(trace.final_actions[:, 1:3, :])
     assert actions.shape == (1, 2, 2)
     torch.testing.assert_close(actions, expected)
 
@@ -376,9 +360,7 @@ def test_execution_slice_starts_after_observation_prefix(
 def test_stepwise_replay_backpropagates_without_retaining_previous_graphs(
     tiny_diffusion_adapter: DiffusionRLAdapter,
 ) -> None:
-    observation = ObservationBatch(
-        {"observation.state": torch.zeros(2, 2, 3)}
-    )
+    observation = ObservationBatch({"observation.state": torch.zeros(2, 2, 3)})
     trace = tiny_diffusion_adapter.sample_trace(
         observation, generator=tiny_diffusion_adapter.make_generator(17)
     )

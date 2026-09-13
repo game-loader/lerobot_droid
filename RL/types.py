@@ -56,17 +56,13 @@ def _nonfinite_value_summary(value: Tensor) -> str:
 
 def _validate_tensor(name: str, value: Tensor, *, ndim: int | None = None) -> None:
     if not isinstance(value, Tensor):
-        raise ValueError(
-            f"{name} must be a torch.Tensor, got {type(value).__name__}: actual={value!r}"
-        )
+        raise ValueError(f"{name} must be a torch.Tensor, got {type(value).__name__}: actual={value!r}")
     if ndim is not None and value.ndim != ndim:
         raise ValueError(f"{name} must have {ndim} dimensions, got shape {tuple(value.shape)}")
     if value.numel() == 0:
         raise ValueError(f"{name} must be nonempty, got shape {tuple(value.shape)}")
     if not torch.isfinite(value).all().item():
-        raise ValueError(
-            f"{name} must contain only finite values: actual={_nonfinite_value_summary(value)}"
-        )
+        raise ValueError(f"{name} must contain only finite values: actual={_nonfinite_value_summary(value)}")
 
 
 def _validate_floating_tensor(name: str, value: Tensor, *, ndim: int) -> None:
@@ -84,8 +80,7 @@ class ObservationBatch:
     def __post_init__(self) -> None:
         if not isinstance(self.features, dict):
             raise ValueError(
-                f"features must be a dict, got {type(self.features).__name__}: "
-                f"actual={self.features!r}"
+                f"features must be a dict, got {type(self.features).__name__}: actual={self.features!r}"
             )
         features = dict(self.features)
         if not features:
@@ -113,8 +108,21 @@ class ObservationBatch:
     def __reduce__(self) -> tuple[type[ObservationBatch], tuple[dict[str, Tensor]]]:
         return type(self), (dict(self.features),)
 
-    def to(self, device: torch.device | str) -> ObservationBatch:
-        return ObservationBatch({key: value.to(device) for key, value in self.features.items()})
+    def to(self, device: torch.device | str, *, non_blocking: bool = False) -> ObservationBatch:
+        return ObservationBatch(
+            {key: value.to(device, non_blocking=non_blocking) for key, value in self.features.items()}
+        )
+
+    def pin_memory(self) -> ObservationBatch:
+        def pin(value: Tensor) -> Tensor:
+            if value.device.type != "cpu":
+                return value
+            try:
+                return value.pin_memory()
+            except RuntimeError:
+                return value
+
+        return ObservationBatch({key: pin(value) for key, value in self.features.items()})
 
     def index_select(self, indices: Tensor) -> ObservationBatch:
         _validate_tensor("indices", indices, ndim=1)
@@ -219,8 +227,7 @@ class DecisionBatch:
                 state = observation.features[state_key]
             except KeyError as exc:
                 raise ValueError(
-                    f"{observation_name}.state is required for state_key={state_key!r}: "
-                    "actual=<missing>"
+                    f"{observation_name}.state is required for state_key={state_key!r}: actual=<missing>"
                 ) from exc
             if not state.is_floating_point():
                 raise ValueError(
@@ -245,16 +252,36 @@ class DecisionBatch:
                 f"{expected_action_valid_shape}, got {tuple(self.action_valid.shape)}"
             )
 
-    def to(self, device: torch.device | str) -> DecisionBatch:
+    def to(self, device: torch.device | str, *, non_blocking: bool = False) -> DecisionBatch:
         return dataclasses.replace(
             self,
-            observation=self.observation.to(device),
-            next_observation=self.next_observation.to(device),
-            action=self.action.to(device),
-            action_valid=self.action_valid.to(device),
-            reward=self.reward.to(device),
-            done=self.done.to(device),
-            discount=self.discount.to(device),
+            observation=self.observation.to(device, non_blocking=non_blocking),
+            next_observation=self.next_observation.to(device, non_blocking=non_blocking),
+            action=self.action.to(device, non_blocking=non_blocking),
+            action_valid=self.action_valid.to(device, non_blocking=non_blocking),
+            reward=self.reward.to(device, non_blocking=non_blocking),
+            done=self.done.to(device, non_blocking=non_blocking),
+            discount=self.discount.to(device, non_blocking=non_blocking),
+        )
+
+    def pin_memory(self) -> DecisionBatch:
+        def pin(value: Tensor) -> Tensor:
+            if value.device.type != "cpu":
+                return value
+            try:
+                return value.pin_memory()
+            except RuntimeError:
+                return value
+
+        return dataclasses.replace(
+            self,
+            observation=self.observation.pin_memory(),
+            next_observation=self.next_observation.pin_memory(),
+            action=pin(self.action),
+            action_valid=pin(self.action_valid),
+            reward=pin(self.reward),
+            done=pin(self.done),
+            discount=pin(self.discount),
         )
 
 

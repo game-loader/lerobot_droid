@@ -244,9 +244,7 @@ def test_decision_batch_validate_reports_missing_custom_state_key() -> None:
 
 
 def test_decision_batch_validate_rejects_integer_state() -> None:
-    observation = ObservationBatch(
-        {"observation.state": torch.zeros(2, 2, 39, dtype=torch.int64)}
-    )
+    observation = ObservationBatch({"observation.state": torch.zeros(2, 2, 39, dtype=torch.int64)})
     decision = DecisionBatch(
         observation=observation,
         next_observation=observation,

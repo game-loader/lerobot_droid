@@ -72,8 +72,7 @@ def _resolve_policy_checkpoint(path: Path) -> Path:
     if not final.is_symlink() and (final / "model.safetensors").is_file():
         return final
     raise ValueError(
-        "checkpoint must contain model.safetensors (or a pretrained_model subdirectory): "
-        f"{root}"
+        f"checkpoint must contain model.safetensors (or a pretrained_model subdirectory): {root}"
     )
 
 
@@ -91,27 +90,20 @@ def _validate_positive_args(args: argparse.Namespace) -> None:
 class CheckpointPolicyRunner:
     """Run a saved LeRobot Diffusion Policy on raw Moya state batches."""
 
-    def __init__(
-        self, checkpoint: CheckpointAdapter, *, inference_steps: int | None = None
-    ) -> None:
+    def __init__(self, checkpoint: CheckpointAdapter, *, inference_steps: int | None = None) -> None:
         if not isinstance(checkpoint, CheckpointAdapter):
             raise ValueError("checkpoint must be a CheckpointAdapter")
         config = checkpoint.policy.config
         state_feature = config.robot_state_feature
         action_feature = config.action_feature
         if state_feature is None or tuple(state_feature.shape) != (STATE_DIM,):
-            raise ValueError(
-                f"Moya IL collection requires a {STATE_DIM}D robot state, got {state_feature!r}"
-            )
+            raise ValueError(f"Moya IL collection requires a {STATE_DIM}D robot state, got {state_feature!r}")
         if action_feature is None or tuple(action_feature.shape) != (ACTION_DIM,):
-            raise ValueError(
-                f"Moya IL collection requires a {ACTION_DIM}D action, got {action_feature!r}"
-            )
+            raise ValueError(f"Moya IL collection requires a {ACTION_DIM}D action, got {action_feature!r}")
         image_features = tuple(config.image_features)
         if image_features:
             raise ValueError(
-                "Moya IL collection is state-only; checkpoint declares image features "
-                f"{image_features!r}"
+                f"Moya IL collection is state-only; checkpoint declares image features {image_features!r}"
             )
         self.checkpoint = checkpoint
         self.policy = checkpoint.policy
@@ -129,8 +121,7 @@ class CheckpointPolicyRunner:
             (
                 key
                 for key in preferred_state_keys
-                if key in config.input_features
-                and config.input_features[key] == state_feature
+                if key in config.input_features and config.input_features[key] == state_feature
             ),
             None,
         )
@@ -143,8 +134,7 @@ class CheckpointPolicyRunner:
             ]
             if len(candidates) != 1:
                 raise ValueError(
-                    "could not identify the checkpoint state input feature; "
-                    f"candidates={candidates!r}"
+                    f"could not identify the checkpoint state input feature; candidates={candidates!r}"
                 )
             state_key = candidates[0]
         self.state_key = state_key
@@ -176,9 +166,7 @@ class CheckpointPolicyRunner:
             raise ValueError(f"raw state must have shape [batch,{STATE_DIM}], got {states.shape}")
         if not np.all(np.isfinite(states)):
             raise ValueError("raw state must contain only finite values")
-        observation = {
-            self.state_key: torch.as_tensor(states, device=self.device)
-        }
+        observation = {self.state_key: torch.as_tensor(states, device=self.device)}
         with torch.inference_mode():
             processed = self.checkpoint.preprocessor(observation)
             action = self.policy.select_action(processed)
@@ -219,9 +207,7 @@ def _contract_from_env(env: Any) -> dict[str, Any]:
         )
         expected_digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         if digest != expected_digest:
-            raise RuntimeError(
-                "Moya environment contract sha256 does not match schema_version/payload"
-            )
+            raise RuntimeError("Moya environment contract sha256 does not match schema_version/payload")
         return normalized
     except (TypeError, ValueError, KeyError) as exc:
         raise RuntimeError("Moya environment contract must be strict JSON with a hex SHA-256") from exc
@@ -249,13 +235,9 @@ def _summary(
         "checkpoint_model_sha256": _sha256(model_path),
         "checkpoint_config_sha256": _sha256(config_path),
         "processor_fingerprint": adapter.processor_fingerprint(),
-        "active_action_mask": [
-            bool(value) for value in adapter.active_action_mask.detach().cpu().tolist()
-        ],
+        "active_action_mask": [bool(value) for value in adapter.active_action_mask.detach().cpu().tolist()],
         "environment_contract": dict(environment_contract),
-        "environment_contract_schema_version": int(
-            environment_contract["schema_version"]
-        ),
+        "environment_contract_schema_version": int(environment_contract["schema_version"]),
         "environment_contract_sha256": str(environment_contract["sha256"]),
         "episodes_requested": int(args.episodes),
         "num_envs": int(args.num_envs),

@@ -4,6 +4,9 @@ import dataclasses
 import json
 
 import pytest
+from torch import nn
+
+pytest.importorskip("datasets", exc_type=ModuleNotFoundError)
 
 from lerobot.envs import MoyaNewtonEnvConfig, PushtEnv
 from lerobot.scripts import lerobot_eval
@@ -83,7 +86,7 @@ def test_run_one_does_not_create_video_directory_when_rendering_is_disabled(tmp_
         "task_group",
         0,
         None,
-        policy=None,
+        policy=nn.Identity(),
         env_preprocessor=None,
         env_postprocessor=None,
         preprocessor=None,
@@ -114,7 +117,7 @@ def test_eval_policy_all_closes_environments_by_default(monkeypatch, max_paralle
 
     lerobot_eval.eval_policy_all(
         envs={"task_group": envs},
-        policy=None,
+        policy=nn.Identity(),
         env_preprocessor=None,
         env_postprocessor=None,
         preprocessor=None,
@@ -133,7 +136,7 @@ def test_eval_policy_all_can_reuse_environments(monkeypatch, max_parallel_tasks)
     monkeypatch.setattr(lerobot_eval, "run_one", _stub_run_one)
     kwargs = {
         "envs": {"task_group": envs},
-        "policy": None,
+        "policy": nn.Identity(),
         "env_preprocessor": None,
         "env_postprocessor": None,
         "preprocessor": None,
@@ -153,6 +156,7 @@ def test_eval_policy_all_can_reuse_environments(monkeypatch, max_parallel_tasks)
 def test_eval_policy_all_does_not_prefetch_next_environment_after_failure(monkeypatch) -> None:
     first_env = CloseTrackingEnv()
     second_env = CloseTrackingEnv()
+    policy = nn.Identity()
 
     def fail_run_one(_task_group, _task_id, env, **_kwargs):
         env.use_calls += 1
@@ -164,7 +168,7 @@ def test_eval_policy_all_does_not_prefetch_next_environment_after_failure(monkey
     with pytest.raises(RuntimeError, match="task failed"):
         lerobot_eval.eval_policy_all(
             envs={"task_group": {0: first_env, 1: second_env}},
-            policy=None,
+            policy=policy,
             env_preprocessor=None,
             env_postprocessor=None,
             preprocessor=None,
@@ -177,3 +181,4 @@ def test_eval_policy_all_does_not_prefetch_next_environment_after_failure(monkey
     assert first_env.close_calls == 1
     assert second_env.use_calls == 0
     assert second_env.ensure_calls == 0
+    assert policy.training

@@ -48,9 +48,7 @@ def _validate_log_prob(name: str, value: Tensor) -> None:
         raise ValueError(f"{name} must contain only finite values")
 
 
-def reduce_event_log_prob(
-    log_prob: Tensor, *, step_mask: Tensor, action_dim_mask: Tensor
-) -> Tensor:
+def reduce_event_log_prob(log_prob: Tensor, *, step_mask: Tensor, action_dim_mask: Tensor) -> Tensor:
     """Sum valid executable action events while preserving denoising and batch axes."""
 
     _validate_log_prob("log_prob", log_prob)
@@ -276,9 +274,7 @@ def denoising_ppo_loss(
     old_reduced = reduce_event_log_prob(
         old_log_prob, step_mask=step_mask, action_dim_mask=action_dim_mask
     ).detach()
-    new_reduced = reduce_event_log_prob(
-        new_log_prob, step_mask=step_mask, action_dim_mask=action_dim_mask
-    )
+    new_reduced = reduce_event_log_prob(new_log_prob, step_mask=step_mask, action_dim_mask=action_dim_mask)
     log_ratio = new_reduced - old_reduced
     if not torch.isfinite(log_ratio).all().item():
         raise ValueError("PPO log ratio contains non-finite values")
@@ -289,9 +285,7 @@ def denoising_ppo_loss(
     expanded_advantage = advantage.to(device=ratio.device, dtype=ratio.dtype).reshape(1, -1)
     expanded_advantage = expanded_advantage.expand_as(ratio)
     unclipped = ratio * expanded_advantage
-    clipped_log_ratio = log_ratio.clamp(
-        min=math.log1p(-clip_ratio), max=math.log1p(clip_ratio)
-    )
+    clipped_log_ratio = log_ratio.clamp(min=math.log1p(-clip_ratio), max=math.log1p(clip_ratio))
     clipped = torch.exp(clipped_log_ratio) * expanded_advantage
     loss = -torch.minimum(unclipped, clipped).mean()
     if not torch.isfinite(loss).item():

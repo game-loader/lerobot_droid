@@ -20,6 +20,8 @@ import pytest
 import torch
 from torch.utils.data import DataLoader
 
+pytest.importorskip("datasets", exc_type=ModuleNotFoundError)
+
 from RL.adapters import lerobot_v3
 from RL.adapters.lerobot_v3 import (
     LeRobotV3DecisionDataset,
@@ -51,25 +53,19 @@ def _fake_episode(
     include_image: bool = False,
 ) -> dict[str, torch.Tensor]:
     episode = {
-        "observation.state": torch.arange(length * state_dim, dtype=torch.float32).reshape(
-            length, state_dim
-        ),
-        "action": torch.arange(length * action_dim, dtype=torch.float32).reshape(
-            length, action_dim
-        ),
+        "observation.state": torch.arange(length * state_dim, dtype=torch.float32).reshape(length, state_dim),
+        "action": torch.arange(length * action_dim, dtype=torch.float32).reshape(length, action_dim),
         "frame_index": torch.arange(length),
         "episode_index": torch.zeros(length, dtype=torch.int64),
     }
     if include_image:
-        episode["observation.images.front"] = torch.arange(
-            length * 4, dtype=torch.uint8
-        ).reshape(length, 1, 2, 2)
+        episode["observation.images.front"] = torch.arange(length * 4, dtype=torch.uint8).reshape(
+            length, 1, 2, 2
+        )
     return episode
 
 
-def _add_rl_fields(
-    episode: dict[str, torch.Tensor], *, success: bool
-) -> dict[str, torch.Tensor]:
+def _add_rl_fields(episode: dict[str, torch.Tensor], *, success: bool) -> dict[str, torch.Tensor]:
     length = episode["action"].shape[0]
     episode["next.reward"] = torch.zeros(length, 1, dtype=torch.float32)
     episode["next.done"] = torch.zeros(length, 1, dtype=torch.bool)
@@ -328,11 +324,14 @@ def test_build_decisions_rejects_invalid_episode_tensors(problem: str) -> None:
     else:
         episode["episode_index"] = torch.tensor([0, 0, 1])
 
-    with pytest.raises(ValueError, match={
-        "nonfinite": "action",
-        "nonmonotonic": "frame_index",
-        "mixed_episode": "episode_index",
-    }[problem]):
+    with pytest.raises(
+        ValueError,
+        match={
+            "nonfinite": "action",
+            "nonmonotonic": "frame_index",
+            "mixed_episode": "episode_index",
+        }[problem],
+    ):
         build_episode_decisions(
             episode,
             success=True,
@@ -490,9 +489,7 @@ def _write_complete_summary(path: Path, **overrides: object) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def test_canonical_dataset_uses_raw_terminal_fields(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_canonical_dataset_uses_raw_terminal_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     summary_path = tmp_path / "summary.json"
     _write_complete_summary(summary_path)
     monkeypatch.setattr(lerobot_v3, "LeRobotDataset", _FakeCanonicalLeRobotDataset)
@@ -548,9 +545,7 @@ def test_canonical_dataset_requires_completed_matching_summary(
         )
 
 
-def test_canonical_dataset_rejects_staging_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_canonical_dataset_rejects_staging_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     summary_path = tmp_path / "summary.json"
     _write_complete_summary(summary_path)
     monkeypatch.setattr(lerobot_v3, "LeRobotDataset", _FakeCanonicalLeRobotDataset)
@@ -664,3 +659,41 @@ def test_camera_features_are_detected_from_metadata_and_loaded_lazily(
     assert "observation.image" in decision.observation.features
     assert "observation.image" in decision.next_observation.features
     assert sorted(set(source.decoded_indices)) == [0, 1, 2]
+
+
+def test_camera_frame_cache_predecodes_required_rows_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "episodes": [
+                    _episode_metadata(episode_index=0),
+                    _episode_metadata(episode_index=1, true_grasp_ever=False),
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(lerobot_v3, "LeRobotDataset", _FakeCameraLeRobotDataset)
+
+    dataset = LeRobotV3DecisionDataset.from_root(
+        dataset_root=tmp_path / "dataset",
+        repo_id="test/camera-cache",
+        summary_path=summary_path,
+        config=RLConfig(state_dim=3, action_dim=2, chunk_size=2),
+    )
+    source = _FakeCameraLeRobotDataset.last_instance
+    assert source is not None
+
+    summary = dataset.preload_camera_frame_cache()
+    assert summary["camera_cache_frames"] == 5
+    assert source.decoded_indices == [0, 1, 2, 3, 4]
+    source.decoded_indices.clear()
+
+    decision = dataset[0]
+
+    assert decision.observation.features["observation.image"].dtype == torch.uint8
+    assert source.decoded_indices == []
+    assert dataset.inspection_summary()["camera_cache_frames"] == 5

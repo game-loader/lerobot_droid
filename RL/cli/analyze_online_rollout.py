@@ -142,9 +142,7 @@ class _RecordingEnv:
         if not isinstance(result, tuple) or len(result) != 5:
             raise ValueError("Moya step must return five values")
         _observation, _reward, terminated, truncated, info = result
-        fields = {
-            key: _copy_value(info[key]) for key in _RECORD_KEYS if key in info
-        }
+        fields = {key: _copy_value(info[key]) for key in _RECORD_KEYS if key in info}
         self.steps.append(
             {
                 "action": np.asarray(action, dtype=np.float32).copy(),
@@ -219,8 +217,7 @@ def _episode_summary(
     terminal: dict[str, Any] = {}
     for item in steps[: done_index + 1]:
         world_fields = {
-            key: _world_value(value, world_index, num_envs)
-            for key, value in item["info"].items()
+            key: _world_value(value, world_index, num_envs) for key, value in item["info"].items()
         }
         world_fields["action"] = item["action"][world_index].copy()
         trajectory.append(world_fields)
@@ -249,8 +246,14 @@ def _episode_summary(
     true_grasp = _bool(terminal.get("true_grasp_ever", False))
     clear_table = _bool(terminal.get("clear_table_ever", False))
     final_lift = _scalar(terminal.get("charger_lift_height", lift[-1] if len(lift) else 0.0))
-    final_table = int(round(_scalar(terminal.get("charger_table_contacts", table_contacts[-1] if len(table_contacts) else 0))))
-    final_hand = int(round(_scalar(terminal.get("right_hand_charger_contacts", contacts[-1] if len(contacts) else 0))))
+    final_table = int(
+        round(
+            _scalar(terminal.get("charger_table_contacts", table_contacts[-1] if len(table_contacts) else 0))
+        )
+    )
+    final_hand = int(
+        round(_scalar(terminal.get("right_hand_charger_contacts", contacts[-1] if len(contacts) else 0)))
+    )
     terminal_palm = np.asarray(terminal.get("right_palm_position", []), dtype=np.float32)
     terminal_palm_target = np.asarray(terminal.get("right_palm_target", []), dtype=np.float32)
     terminal_wrist = np.asarray(terminal.get("right_wrist_position", []), dtype=np.float32)
@@ -489,16 +492,53 @@ def run(args: argparse.Namespace) -> Path:
             for reason in sorted({reason for item in failures for reason in item["failure_reasons"]})
         },
         "aggregate": {
-            "failure_min_palm_distance_m": float(np.nanmin([item["min_palm_distance_to_charger_m"] for item in failures])) if failures else None,
-            "failure_median_final_palm_residual_m": float(np.nanmedian([item["final_palm_target_residual_m"] for item in failures])) if failures else None,
-            "failure_median_ik_wrist_residual_m": float(np.nanmedian([item["ik_wrist_position_residual_m"] for item in failures])) if failures else None,
-            "failure_median_ik_joint_margin": float(np.nanmedian([item["ik_min_joint_margin"] for item in failures])) if failures else None,
-            "success_median_ik_wrist_residual_m": float(np.nanmedian([item["ik_wrist_position_residual_m"] for item in successes])) if successes else None,
+            "failure_min_palm_distance_m": float(
+                np.nanmin([item["min_palm_distance_to_charger_m"] for item in failures])
+            )
+            if failures
+            else None,
+            "failure_median_final_palm_residual_m": float(
+                np.nanmedian([item["final_palm_target_residual_m"] for item in failures])
+            )
+            if failures
+            else None,
+            "failure_median_ik_wrist_residual_m": float(
+                np.nanmedian([item["ik_wrist_position_residual_m"] for item in failures])
+            )
+            if failures
+            else None,
+            "failure_median_ik_joint_margin": float(
+                np.nanmedian([item["ik_min_joint_margin"] for item in failures])
+            )
+            if failures
+            else None,
+            "success_median_ik_wrist_residual_m": float(
+                np.nanmedian([item["ik_wrist_position_residual_m"] for item in successes])
+            )
+            if successes
+            else None,
         },
         "episodes": summaries,
     }
-    (output / "summary.json").write_text(json.dumps(_jsonable(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(json.dumps({key: payload[key] for key in ("episode_count", "successes", "failures", "failure_with_2mm_ik_reachable", "failure_with_2mm_ik_unreachable")}, indent=2, sort_keys=True))
+    (output / "summary.json").write_text(
+        json.dumps(_jsonable(payload), indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    print(
+        json.dumps(
+            {
+                key: payload[key]
+                for key in (
+                    "episode_count",
+                    "successes",
+                    "failures",
+                    "failure_with_2mm_ik_reachable",
+                    "failure_with_2mm_ik_unreachable",
+                )
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
     return output
 
 

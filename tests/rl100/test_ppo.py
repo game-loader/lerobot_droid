@@ -28,15 +28,11 @@ def test_masked_log_probability_excludes_padding_and_constant_dimensions() -> No
     log_prob[:, :, :, 3:12] = 100.0
     log_prob[:, 0, 2:] = 100.0
     log_prob[:, 1, 3:] = 100.0
-    step_mask = torch.tensor(
-        [[True, True, False, False], [True, True, True, False]]
-    )
+    step_mask = torch.tensor([[True, True, False, False], [True, True, True, False]])
     dim_mask = torch.zeros(14, dtype=torch.bool)
     dim_mask[[0, 1, 2, 12, 13]] = True
 
-    reduced = reduce_event_log_prob(
-        log_prob, step_mask=step_mask, action_dim_mask=dim_mask
-    )
+    reduced = reduce_event_log_prob(log_prob, step_mask=step_mask, action_dim_mask=dim_mask)
 
     assert reduced.shape == (3, 2)
     assert reduced[:, 0].tolist() == [10.0, 10.0, 10.0]
@@ -82,7 +78,9 @@ def test_denoising_ppo_reports_joint_chunk_ratio_quantiles() -> None:
     # Each sample has four executable events.  The ratio must use the
     # complete T_a x D joint log-probability before exponentiation.
     old_log_prob = torch.zeros(1, 4, 2, 2)
-    deltas = torch.tensor([0.0, torch.log(torch.tensor(2.0)), torch.log(torch.tensor(4.0)), -torch.log(torch.tensor(2.0))])
+    deltas = torch.tensor(
+        [0.0, torch.log(torch.tensor(2.0)), torch.log(torch.tensor(4.0)), -torch.log(torch.tensor(2.0))]
+    )
     new_log_prob = deltas.reshape(1, 4, 1, 1).expand_as(old_log_prob) / 4.0
 
     _loss, metrics = denoising_ppo_loss(

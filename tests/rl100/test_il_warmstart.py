@@ -11,6 +11,10 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
+pytest.importorskip("datasets", exc_type=ModuleNotFoundError)
+pytest.importorskip("diffusers", exc_type=ModuleNotFoundError)
+pytest.importorskip("accelerate", exc_type=ModuleNotFoundError)
+
 from lerobot.scripts.lerobot_train import _policy_processor_factory_kwargs
 from RL.cli.train_il_warmstart import build_train_command, processor_fingerprint
 
@@ -88,6 +92,8 @@ def test_il_command_enables_fixed_processor_stats(tmp_path: Path) -> None:
 
     assert "--preserve_pretrained_processor_stats=true" in command
     assert "--resume=false" in command
+    assert "--env_eval_freq=5000" in command
+    assert not any(arg.startswith("--eval_freq=") for arg in command)
     assert f"--policy.path={checkpoint.resolve()}" in command
     assert f"--dataset.root={dataset.resolve()}" in command
 

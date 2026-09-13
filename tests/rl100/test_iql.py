@@ -48,12 +48,8 @@ def decision_batch() -> DecisionBatch:
         ]
     )
     return DecisionBatch(
-        observation=ObservationBatch(
-            {"observation.state": torch.randn(batch_size, 2, 3)}
-        ),
-        next_observation=ObservationBatch(
-            {"observation.state": torch.randn(batch_size, 2, 3)}
-        ),
+        observation=ObservationBatch({"observation.state": torch.randn(batch_size, 2, 3)}),
+        next_observation=ObservationBatch({"observation.state": torch.randn(batch_size, 2, 3)}),
         action=action,
         action_valid=action_valid,
         reward=torch.tensor([[0.0], [1.0], [0.0], [1.0]]),
@@ -64,9 +60,7 @@ def decision_batch() -> DecisionBatch:
 
 def _make_iql() -> IQL:
     return IQL(
-        feature_encoder=StateFeatureEncoder(
-            state_dim=3, n_obs_steps=2, hidden_dims=(16,), output_dim=8
-        ),
+        feature_encoder=StateFeatureEncoder(state_dim=3, n_obs_steps=2, hidden_dims=(16,), output_dim=8),
         action_dim=14,
         chunk_size=4,
         active_action_mask=_active_mask(),
@@ -79,15 +73,10 @@ def _make_iql() -> IQL:
 
 
 def _parameter_snapshot(module: torch.nn.Module) -> dict[str, torch.Tensor]:
-    return {
-        name: parameter.detach().clone()
-        for name, parameter in module.named_parameters()
-    }
+    return {name: parameter.detach().clone() for name, parameter in module.named_parameters()}
 
 
-def _assert_parameters_unchanged(
-    module: torch.nn.Module, before: dict[str, torch.Tensor]
-) -> None:
+def _assert_parameters_unchanged(module: torch.nn.Module, before: dict[str, torch.Tensor]) -> None:
     assert before.keys() == dict(module.named_parameters()).keys()
     for name, parameter in module.named_parameters():
         torch.testing.assert_close(parameter, before[name], rtol=0.0, atol=0.0)
@@ -121,13 +110,9 @@ def _force_large_output(module: torch.nn.Module) -> None:
 
 
 def test_action_packer_excludes_constant_dimensions_and_padding() -> None:
-    packer = ActionPacker(
-        action_dim=14, chunk_size=4, active_action_mask=_active_mask()
-    )
+    packer = ActionPacker(action_dim=14, chunk_size=4, active_action_mask=_active_mask())
     action = torch.arange(2 * 4 * 14, dtype=torch.float32).reshape(2, 4, 14)
-    valid = torch.tensor(
-        [[True, True, False, False], [True, True, True, True]]
-    )
+    valid = torch.tensor([[True, True, False, False], [True, True, True, True]])
     baseline = packer(action, valid)
     changed = action.clone()
     changed[..., 3:12] = 1e6
@@ -140,9 +125,7 @@ def test_action_packer_excludes_constant_dimensions_and_padding() -> None:
 
 
 def test_action_packer_rejects_nonprefix_or_empty_valid_masks() -> None:
-    packer = ActionPacker(
-        action_dim=14, chunk_size=4, active_action_mask=_active_mask()
-    )
+    packer = ActionPacker(action_dim=14, chunk_size=4, active_action_mask=_active_mask())
     action = torch.zeros(1, 4, 14)
 
     with pytest.raises(ValueError, match="prefix"):
@@ -191,16 +174,8 @@ def test_iql_update_and_advantage_are_finite(decision_batch: DecisionBatch) -> N
 
 def test_iql_optimizers_do_not_share_parameters() -> None:
     iql = _make_iql()
-    q_parameters = {
-        id(parameter)
-        for group in iql.q_optimizer.param_groups
-        for parameter in group["params"]
-    }
-    v_parameters = {
-        id(parameter)
-        for group in iql.v_optimizer.param_groups
-        for parameter in group["params"]
-    }
+    q_parameters = {id(parameter) for group in iql.q_optimizer.param_groups for parameter in group["params"]}
+    v_parameters = {id(parameter) for group in iql.v_optimizer.param_groups for parameter in group["params"]}
 
     assert q_parameters.isdisjoint(v_parameters)
     assert all(not parameter.requires_grad for parameter in iql.target_q1.parameters())
@@ -214,9 +189,7 @@ def test_iql_optimizers_do_not_share_parameters() -> None:
 
 def test_iql_advantage_batch_one_falls_back_to_raw_value() -> None:
     iql = _make_iql()
-    observation = ObservationBatch(
-        {"observation.state": torch.zeros(1, 2, 3)}
-    )
+    observation = ObservationBatch({"observation.state": torch.zeros(1, 2, 3)})
     action = torch.zeros(1, 4, 14)
     valid = torch.ones(1, 4, dtype=torch.bool)
 
@@ -242,9 +215,7 @@ def test_iql_q_value_is_raw_conservative_minimum(decision_batch: DecisionBatch) 
             )
         ),
     )
-    actual = iql.q_value(
-        decision_batch.observation, decision_batch.action, decision_batch.action_valid
-    )
+    actual = iql.q_value(decision_batch.observation, decision_batch.action, decision_batch.action_valid)
     torch.testing.assert_close(actual, expected)
     assert not actual.requires_grad
 

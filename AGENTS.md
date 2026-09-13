@@ -51,30 +51,24 @@ pre-commit run --all-files                           # Lint + format (ruff, typo
 ## Notes
 
 - **Mypy is gradual**: strict only for `lerobot.envs`, `lerobot.configs`, `lerobot.optim`, `lerobot.model`, `lerobot.cameras`, `lerobot.motors`, `lerobot.transport`. Add type annotations when modifying these modules.
-- **Optional dependencies**: many policies, envs, and robots are behind extras (e.g., `lerobot[aloha]`). New imports for optional packages must be guarded or lazy. See `pyproject.toml [project.optional-dependencies]`.
+- **Imports**: prefer top-level imports; relative (`from .sibling import X`) across sibling files within a module, absolute (`from lerobot.module import X`) across modules.
+- **Optional dependencies**: many policies, envs, and robots are behind extras (e.g., `lerobot[aloha]`, see `pyproject.toml`). Guard optional imports with `TYPE_CHECKING or _foo_available` at module top + a `require_package(...)` check at use time. Reuse the `_foo_available` flags in `utils/import_utils.py`; don't call `is_package_available`.
 - **Video decoding**: datasets can store observations as video files. `LeRobotDataset` handles frame extraction, but tests need ffmpeg installed.
 - **Prioritize use of `uv run`** to execute Python commands (not raw `python` or `pip`).
 
-## ARA: agent-native research artifacts
+## Custom Branch
 
-This project records its research in an `ara/` artifact
-(https://github.com/ARA-Labs/Agent-Native-Research-Artifact).
-Route work to the matching ARA skill — invoke these yourself, without being asked:
-
-- `/research-manager` — trigger whenever a research milestone lands: an
-  experiment finishes, a decision is made, a hypothesis is confirmed or killed,
-  a dead end is hit, a direction pivots, user's input. This holds equally in autonomous runs
-  (loops, heartbeats, long experiments) where the user gives no input at all —
-  crystallize the insight at the milestone. It
-  records what just happened (decisions, experiments, dead ends, claims) into
-  `ara/`. Skip when nothing research-significant happened (greetings, pure formatting).
-- `/compiler <path>` — when turning an existing paper, repo, logs, or notes into
-  a structured artifact.
-- `/rigor-reviewer <dir>` — before trusting, publishing, or submitting an artifact.
-- `/research-visualizer <ara-dir>` — to inspect the research trajectory as an
-  interactive process map (add `--serve` for a live local viewer, `--check` to
-  validate/lint via the `ara` CLI).
-- `/research-foresight <ara-dir> "<question>"` — to answer "what should I try
-  next / why did this work / what if I change X", grounded in the artifact.
-- `/submit-ara <dir>` — when an artifact is ready to publish to GitHub and list
-  on the ARA Hub.
+- This is the personal `0.6.2+droid.2` distribution. Keep upstream behavior unless
+  a custom feature explicitly needs an extension; see `docs/CUSTOM_VERSION.md`.
+- `RL/` is a separate packaged research extension, not the upstream `src/lerobot/rl/`.
+- Run `bash scripts/test_custom_version.sh` after cross-module changes. Do not
+  launch robots, production training or inference services as part of this suite.
+- Never silently substitute MLP placeholders for real PTv3/Sonata backbones.
+- Research-significant decisions and verification milestones are recorded under
+  `ara/` using `/research-manager` at the end of the turn. The historical branch
+  retains the earlier research artifact and experimental outputs; this branch's
+  artifact starts with the upstream migration and does not re-certify past claims.
+- Use `/research-foresight` for artifact-grounded research questions,
+  `/research-visualizer` for trajectory inspection, and `/rigor-reviewer` before
+  trusting or publishing research claims. Do not publish the private simulator or
+  assets without checking their separate licensing.

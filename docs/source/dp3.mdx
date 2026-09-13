@@ -1,0 +1,179 @@
+# DP3 Point-Cloud and Dual-Wrist Diffusion Policy
+
+This repository provides a LeRobot-native `dp3` policy for training an action
+Diffusion Policy from a fixed-size 3D point cloud, left and right wrist RGB,
+and robot proprioception. It adapts the point-conditioning path used by
+RL-100: a shared point MLP, global max pooling, projection, and concatenation
+with the other encoded observations. Each wrist has an independent ResNet18
+initialized from scratch (`weights=None`). The action denoiser, processors,
+checkpoint layout, and CLI remain standard LeRobot components.
+
+**Target deployment:** this model is prepared for real Franka Duo recordings.
+The ZED Mini depth stream is converted to the single point cloud, while the
+left and right D405 wrist cameras supply the two RGB inputs. The recorder's
+raw 17-dimensional state/action schema is not the model schema; a dataset
+adapter must explicitly produce the 34-dimensional state and 20-dimensional
+action fields before training or deployment.
+
+## Dataset Contract
+
+A LeRobot v3 dataset used for this DP3 model must contain:
+
+| Key                              | dtype         | dataset shape     | Meaning                             |
+| -------------------------------- | ------------- | ----------------- | ----------------------------------- |
+| `observation.point_cloud`        | `float32`     | `(num_points, 3)` | XYZ points in a stable metric frame |
+| `observation.images.wrist_left`  | `video/image` | `(H, W, 3)`       | Left wrist RGB                      |
+| `observation.images.wrist_right` | `video/image` | `(H, W, 3)`       | Right wrist RGB                     |
+| `observation.state`              | `float32`     | `(34,)`           | Robot proprioception                |
+| `action`                         | `float32`     | `(20,)`           | Dual-arm XYZ+rot6d targets and two gripper values |
+
+The upstream Franka Duo adapter supplies the 34-dimensional state ordering.
+The DP3 policy intentionally validates only the vector shape; it does not
+reconstruct poses or infer missing fields from the raw recorder messages.
+Keep the adapter's documented ordering in the dataset metadata and use the
+same ordering at deployment.
+
+The action field's semantic ordering and the conversion from raw Franka Duo
+messages remain the responsibility of the data pipeline.
+
+The default is 2048 XYZ points. The two wrist streams must have matching shapes unless `resize_shape` is configured;
+LeRobot converts their dataset layout to `(3, H, W)` before the model. Other
+camera streams may remain in the source dataset, but they are not included in
+DP3 conditioning. To use different wrist feature names, override both entries
+of `policy.wrist_image_keys`.
+
+## Offline-RL reward contract
+
+For direct RL-100 offline training, keep the normal LeRobot v3 directory
+layout (`meta/`, `data/`, and optionally `videos/`) and add these three
+frame-level features to `meta/info.json` and every `data/**/*.parquet` row:
+
+| Key | dtype | logical shape | Required semantics |
+| --- | --- | --- | --- |
+| `next.reward` | `float32` | `(1,)` | finite transition reward |
+| `next.done` | `bool` | `(1,)` | `true` only on the terminal frame |
+| `next.truncated` | `bool` | `(1,)` | `true` for timeout/failed termination |
+
+The current sparse real-robot contract is: nonterminal rows have
+`reward=0, done=false, truncated=false`; a successful final row is
+`(1, true, false)`; a failed timeout is `(0, true, true)`. The three fields
+are all-or-none. The loader also accepts legacy v3 datasets with none of these
+columns and synthesizes the same sparse labels from the required episode
+summary JSON, but a partially present set is rejected.
+
+The summary JSON is an RL-100 bookkeeping artifact rather than a replacement
+for v3 metadata. Canonical datasets set `complete=true`, include
+`episodes_saved`, and provide one episode record per `episode_index`. The
+current adapter also validates the recorder's five success fields
+(`true_grasp_ever`, `clear_table_ever`, `final_lift_height_m`,
+`final_table_contacts`, and `final_hand_contacts`) and cross-checks them
+against the terminal reward. If a Franka Duo task uses a different success
+definition, provide an adapter-specific summary or change that validation
+before loading it through `LeRobotV3DecisionDataset`.
+
+`vision_backbone`, `pretrained_backbone_weights`, and
+`use_separate_rgb_encoder_per_camera` are validated as `resnet18`, `null`, and
+`true`, respectively. This prevents a training run from silently downloading
+or loading pretrained ResNet weights.
+
+Raw depth is not interchangeable with a point cloud. Before training:
+
+1. Deproject depth with the matching camera intrinsics and depth scale.
+2. Transform points into one stable frame, preferably the robot base frame.
+3. Remove invalid depth and crop to the task workspace.
+4. Convert each frame to exactly the configured point count. The offline
+   preprocessor uses a reproducible fixed-seed selection for oversized clouds
+   and zero-pads sparse clouds. The DP3 model itself performs no per-epoch
+   random point-cloud sampling during IL.
+5. Store the result as `observation.point_cloud` in the v3 parquet data.
+
+Keep camera intrinsics, the depth scale, frame names, and camera-to-base
+extrinsics with the recorded data. Without them, depth cannot be reconstructed
+into geometrically consistent training input.
+
+Franka-specific recording and dataset-conversion tools are not included in this
+release. Prepare the declared state/action features and synchronized point clouds
+with your own calibrated acquisition pipeline. The historical tools remain on
+`feat/upstream-0.6-custom`; do not assume raw recorded joint vectors already match
+the policy's state/action contract.
+
+`depth_to_point_cloud` provides the dependency-free conversion primitive used
+for offline preprocessing:
+
+```python
+from lerobot.policies.dp3 import depth_to_point_cloud
+
+points = depth_to_point_cloud(
+    depth_meters,
+    camera_info["k"],
+    extrinsics=camera_optical_to_robot_base,
+    workspace_min=(-0.8, -0.8, 0.0),
+    workspace_max=(0.8, 0.8, 1.5),
+    num_points=2048,
+)
+```
+
+The `seed` argument controls only this one-time, reproducible offline
+preprocessing step; it is not used by the DP3 model during IL. Set
+`policy.point_cloud_random_subsample=false` (the default); the policy rejects
+stochastic point-cloud subsampling.
+
+## Training
+
+Install the standard training stack and DP3 dependency group:
+
+```bash
+uv sync --locked --extra training --extra dp3
+```
+
+Then train from a local LeRobot v3 dataset:
+
+```bash
+uv run lerobot-train \
+  --policy.type=dp3 \
+  --policy.device=cuda \
+  --policy.point_cloud_num_points=2048 \
+  --dataset.repo_id=local/franka_duo_task \
+  --dataset.root=/path/to/franka_duo_task
+```
+
+The dataset feature shapes are inferred automatically and validated before
+model construction. For a different point count, change both the dataset
+feature shape and `policy.point_cloud_num_points`. State and action dimensions
+are fixed at 34 and 20 for this model. Legacy 18D action checkpoints require an
+explicit model/data migration and are not silently remapped. The experimental
+PTv3/Sonata encoder files are MLP placeholders, disabled by default, not validated
+pretrained Transformer integrations.
+
+DP3 also disables random image crops for IL (`policy.crop_is_random=false`).
+If `crop_shape` is configured, the encoder uses the same center crop in
+training and evaluation; with the default `crop_shape=null`, only the
+configured resize (if any) is applied.
+
+With the default RL-100-style XYZ PointNet (`3 -> 64 -> 128 -> 256`, global
+max pooling, and a 64-dimensional projection), the point-cloud branch has
+59,072 trainable parameters. This count is independent of the number of input
+points: a `(2048, 3)` cloud uses the same 59,072 parameters. The default
+`policy.point_cloud_num_points=2048` processes all 2048 points; lowering that
+setting only changes compute and memory, not the parameter count.
+
+## Compatibility
+
+This policy does not load RL-100 `RL1003D` checkpoints directly. RL-100 uses
+its own Hydra configuration, normalizer, schedulers, and RL training stack.
+The implementation here preserves the point encoder design while using native
+LeRobot configs and checkpoints. It requires only the existing `diffusers`
+extra; PyTorch3D and Open3D are not required.
+
+The policy can nevertheless use this repository's RL-100-compatible offline
+and online trainers through the shared `DiffusionRLAdapter`. Offline IQL/PPO
+accepts the full DP3 observation dictionary; the default critic and dynamics
+model use the 34D state while the actor consumes point cloud and wrist RGB.
+Online PPO is real-robot only: `RL.cli.train_online` requires a caller-provided
+`--env-factory` implementing `reset/step/close` and never creates a simulator.
+
+## References
+
+- [RL-100](https://github.com/lei-kun/RL-100), Apache-2.0
+- [DP3: 3D Diffusion Policy](https://arxiv.org/abs/2403.03954)
+- [Diffusion Policy](https://arxiv.org/abs/2303.04137)

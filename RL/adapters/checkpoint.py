@@ -30,7 +30,7 @@ from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import FeatureType
 from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
-from lerobot.policies.factory import make_pre_post_processors
+from lerobot.policies.factory import get_policy_class, make_pre_post_processors
 from lerobot.processor.normalize_processor import (
     NormalizerProcessorStep,
     UnnormalizerProcessorStep,
@@ -50,8 +50,7 @@ def _processor_artifact_fingerprint(checkpoint: str | Path) -> str:
     path = Path(checkpoint)
     if not path.is_dir():
         raise ValueError(
-            "processor_fingerprint currently requires a local checkpoint directory, "
-            f"got {checkpoint!r}"
+            f"processor_fingerprint currently requires a local checkpoint directory, got {checkpoint!r}"
         )
     root = path.resolve()
     path = root
@@ -59,9 +58,7 @@ def _processor_artifact_fingerprint(checkpoint: str | Path) -> str:
     for config_name in ("policy_preprocessor.json", "policy_postprocessor.json"):
         config_path = (path / config_name).resolve()
         if not config_path.is_relative_to(root):
-            raise ValueError(
-                f"processor config must remain inside the checkpoint: {config_name!r}"
-            )
+            raise ValueError(f"processor config must remain inside the checkpoint: {config_name!r}")
         if not config_path.is_file():
             raise ValueError(f"checkpoint is missing processor config {config_name!r}")
         files.add(config_path)
@@ -77,14 +74,10 @@ def _processor_artifact_fingerprint(checkpoint: str | Path) -> str:
                 continue
             state_name = step["state_file"]
             if not isinstance(state_name, str) or not state_name:
-                raise ValueError(
-                    f"processor config {config_path} has invalid state_file={state_name!r}"
-                )
+                raise ValueError(f"processor config {config_path} has invalid state_file={state_name!r}")
             state_path = (path / state_name).resolve()
             if not state_path.is_relative_to(root):
-                raise ValueError(
-                    f"processor state_file must remain inside the checkpoint: {state_name!r}"
-                )
+                raise ValueError(f"processor state_file must remain inside the checkpoint: {state_name!r}")
             if not state_path.is_file():
                 raise ValueError(f"processor state file is missing: {state_path}")
             files.add(state_path)
@@ -100,9 +93,7 @@ def _processor_artifact_fingerprint(checkpoint: str | Path) -> str:
     return digest.hexdigest()
 
 
-def _active_action_mask_from_ranges(
-    action_min: Tensor, action_max: Tensor, *, tolerance: float
-) -> Tensor:
+def _active_action_mask_from_ranges(action_min: Tensor, action_max: Tensor, *, tolerance: float) -> Tensor:
     if not math.isfinite(tolerance) or tolerance < 0:
         raise ValueError(f"action range tolerance must be finite and nonnegative, got {tolerance!r}")
     if action_min.shape != action_max.shape or action_min.ndim != 1:
@@ -126,9 +117,7 @@ _REQUIRED_STATS = {
 }
 
 
-def _expected_normalization_mode(
-    config: DiffusionConfig, feature_type: FeatureType
-) -> NormalizationMode:
+def _expected_normalization_mode(config: DiffusionConfig, feature_type: FeatureType) -> NormalizationMode:
     return config.normalization_mapping.get(feature_type.value, NormalizationMode.IDENTITY)
 
 
@@ -160,9 +149,7 @@ def _validate_stat_shape(
         )
 
 
-def _validate_normalizer_features(
-    config: DiffusionConfig, normalizer: NormalizerProcessorStep
-) -> None:
+def _validate_normalizer_features(config: DiffusionConfig, normalizer: NormalizerProcessorStep) -> None:
     expected_features = {**config.input_features, **config.output_features}
     actual_keys = set(normalizer.features)
     expected_keys = set(expected_features)
@@ -190,24 +177,19 @@ def _validate_normalizer_features(
         try:
             required_stats = _REQUIRED_STATS[expected_mode]
         except KeyError as exc:
-            raise ValueError(
-                f"unsupported normalization mode for {key}: {expected_mode.value}"
-            ) from exc
+            raise ValueError(f"unsupported normalization mode for {key}: {expected_mode.value}") from exc
         if not required_stats:
             continue
 
         stats = normalizer._tensor_stats.get(key)
         if not stats or any(stat_name not in stats for stat_name in required_stats):
             raise ValueError(
-                f"{key} normalization statistics must contain {required_stats} "
-                f"for {expected_mode.value}"
+                f"{key} normalization statistics must contain {required_stats} for {expected_mode.value}"
             )
         for stat_name in required_stats:
             value = stats[stat_name].detach().cpu()
             if not torch.isfinite(value).all().item():
-                raise ValueError(
-                    f"{key} normalization statistic {stat_name!r} contains non-finite values"
-                )
+                raise ValueError(f"{key} normalization statistic {stat_name!r} contains non-finite values")
             _validate_stat_shape(
                 key,
                 expected_feature.type,
@@ -217,9 +199,7 @@ def _validate_normalizer_features(
             )
 
 
-def _validate_unnormalizer_features(
-    config: DiffusionConfig, unnormalizer: UnnormalizerProcessorStep
-) -> None:
+def _validate_unnormalizer_features(config: DiffusionConfig, unnormalizer: UnnormalizerProcessorStep) -> None:
     expected_features = config.output_features
     actual_keys = set(unnormalizer.features)
     expected_keys = set(expected_features)
@@ -252,16 +232,11 @@ def _validate_processor_compatibility(
         processor_feature = step.features.get("action")
         if processor_feature is None or tuple(processor_feature.shape) != (expected_action_dim,):
             raise ValueError(
-                f"{label} action feature must have shape {(expected_action_dim,)}, "
-                f"got {processor_feature!r}"
+                f"{label} action feature must have shape {(expected_action_dim,)}, got {processor_feature!r}"
             )
     expected_action_mode = _expected_normalization_mode(config, FeatureType.ACTION)
-    normalizer_action_mode = normalizer.norm_map.get(
-        FeatureType.ACTION, NormalizationMode.IDENTITY
-    )
-    unnormalizer_action_mode = unnormalizer.norm_map.get(
-        FeatureType.ACTION, NormalizationMode.IDENTITY
-    )
+    normalizer_action_mode = normalizer.norm_map.get(FeatureType.ACTION, NormalizationMode.IDENTITY)
+    unnormalizer_action_mode = unnormalizer.norm_map.get(FeatureType.ACTION, NormalizationMode.IDENTITY)
     if normalizer_action_mode != expected_action_mode:
         raise ValueError(
             "ACTION normalization mode disagrees with the policy config, "
@@ -277,8 +252,7 @@ def _validate_processor_compatibility(
     required_action_stats = _REQUIRED_STATS[normalizer_action_mode]
     if any(key not in pre_stats or key not in post_stats for key in required_action_stats):
         raise ValueError(
-            "processors are missing required action normalization statistics: "
-            f"{required_action_stats}"
+            f"processors are missing required action normalization statistics: {required_action_stats}"
         )
     for key in required_action_stats:
         pre_value = pre_stats[key].detach().cpu()
@@ -304,6 +278,10 @@ def _validate_processor_compatibility(
 class CheckpointAdapter:
     """Policy plus the exact saved normalization contract used to train it."""
 
+    # DP3Policy subclasses DiffusionPolicy and reuses the same denoising
+    # interface.  Keep this annotation at the common base so standard
+    # DiffusionPolicy checkpoints and multimodal DP3 checkpoints share one
+    # adapter contract.
     policy: DiffusionPolicy
     preprocessor: PolicyProcessorPipeline
     postprocessor: PolicyProcessorPipeline
@@ -322,10 +300,7 @@ class CheckpointAdapter:
         action_range_tolerance: float = 1e-8,
     ) -> CheckpointAdapter:
         if not math.isfinite(action_range_tolerance) or action_range_tolerance < 0:
-            raise ValueError(
-                "action_range_tolerance must be nonnegative, "
-                f"got {action_range_tolerance!r}"
-            )
+            raise ValueError(f"action_range_tolerance must be nonnegative, got {action_range_tolerance!r}")
         source_path = Path(checkpoint)
         if source_path.is_symlink() or not source_path.is_dir():
             raise ValueError(f"checkpoint must be a local directory, got {checkpoint!r}")
@@ -338,11 +313,20 @@ class CheckpointAdapter:
             cli_overrides=[f"--device={device_name}"],
         )
         if not isinstance(config, DiffusionConfig):
-            raise ValueError(
-                f"checkpoint must contain a DiffusionConfig, got {type(config).__name__}"
-            )
+            raise ValueError(f"checkpoint must contain a DiffusionConfig, got {type(config).__name__}")
         config.device = device_name
-        policy = DiffusionPolicy.from_pretrained(checkpoint, config=config, strict=True)
+        # Select the concrete policy implementation encoded by the checkpoint
+        # config.  Calling DiffusionPolicy.from_pretrained unconditionally
+        # would construct a vanilla state/image model and fail strict loading
+        # for DP3 checkpoints whose state dict contains the point-cloud and
+        # dual-wrist encoders.
+        policy_cls = get_policy_class(config.type)
+        if not issubclass(policy_cls, DiffusionPolicy):
+            raise ValueError(
+                "RL diffusion checkpoint adapter only supports DiffusionPolicy "
+                f"implementations, got policy type {config.type!r} ({policy_cls.__name__})"
+            )
+        policy = policy_cls.from_pretrained(checkpoint, config=config, strict=True)
         policy.to(device)
         policy.eval()
         device_override = {"device_processor": {"device": device_name}}
@@ -352,22 +336,15 @@ class CheckpointAdapter:
             preprocessor_overrides=device_override,
             postprocessor_overrides=device_override,
         )
-        normalizer = _single_step(
-            preprocessor, NormalizerProcessorStep, label="preprocessor"
-        )
-        unnormalizer = _single_step(
-            postprocessor, UnnormalizerProcessorStep, label="postprocessor"
-        )
-        action_min, action_max = _validate_processor_compatibility(
-            config, normalizer, unnormalizer
-        )
+        normalizer = _single_step(preprocessor, NormalizerProcessorStep, label="preprocessor")
+        unnormalizer = _single_step(postprocessor, UnnormalizerProcessorStep, label="postprocessor")
+        action_min, action_max = _validate_processor_compatibility(config, normalizer, unnormalizer)
         active_action_mask = _active_action_mask_from_ranges(
             action_min, action_max, tolerance=action_range_tolerance
         )
         if not active_action_mask.any().item():
             raise ValueError(
-                "saved action statistics contain no active dimensions at "
-                f"tolerance={action_range_tolerance}"
+                f"saved action statistics contain no active dimensions at tolerance={action_range_tolerance}"
             )
         return cls(
             policy=policy,
@@ -384,13 +361,24 @@ class CheckpointAdapter:
     def active_action_indices(self) -> Tensor:
         return torch.nonzero(self.active_action_mask, as_tuple=False).flatten()
 
-    def normalize_observation(self, observation: ObservationBatch) -> ObservationBatch:
+    def normalize_observation(
+        self, observation: ObservationBatch, *, convert_visual_uint8: bool = False
+    ) -> ObservationBatch:
         if not isinstance(observation, ObservationBatch):
-            raise ValueError(
-                f"observation must be an ObservationBatch, got {type(observation).__name__}"
-            )
+            raise ValueError(f"observation must be an ObservationBatch, got {type(observation).__name__}")
+        if not isinstance(convert_visual_uint8, bool):
+            raise ValueError("convert_visual_uint8 must be a bool")
         prepared = {
-            key: value.float() if value.is_floating_point() else value
+            key: (
+                value.float() / 255.0
+                if convert_visual_uint8
+                and value.dtype == torch.uint8
+                and self._normalizer.features.get(key, None) is not None
+                and self._normalizer.features[key].type is FeatureType.VISUAL
+                else value.float()
+                if value.is_floating_point()
+                else value
+            )
             for key, value in observation.features.items()
         }
         normalized = self._normalizer._normalize_observation(prepared, inverse=False)
@@ -409,9 +397,7 @@ class CheckpointAdapter:
         """
 
         if not isinstance(observation, ObservationBatch):
-            raise ValueError(
-                f"observation must be an ObservationBatch, got {type(observation).__name__}"
-            )
+            raise ValueError(f"observation must be an ObservationBatch, got {type(observation).__name__}")
         prepared = {
             key: value.float() if value.is_floating_point() else value
             for key, value in observation.features.items()

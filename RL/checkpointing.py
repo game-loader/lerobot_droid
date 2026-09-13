@@ -106,9 +106,7 @@ def _write_bytes(path: Path, payload: bytes) -> None:
 def _write_json(path: Path, payload: Any) -> None:
     _write_bytes(
         path,
-        (json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode(
-            "utf-8"
-        ),
+        (json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode("utf-8"),
     )
 
 
@@ -332,7 +330,11 @@ def _manifest(root: Path) -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
     for path in sorted(item for item in root.rglob("*") if item.is_file() and item.name != "manifest.json"):
         entries.append(
-            {"path": path.relative_to(root).as_posix(), "size": path.stat().st_size, "sha256": _sha256_file(path)}
+            {
+                "path": path.relative_to(root).as_posix(),
+                "size": path.stat().st_size,
+                "sha256": _sha256_file(path),
+            }
         )
     return {"format_version": _FORMAT_VERSION, "complete": True, "files": entries}
 
@@ -341,7 +343,11 @@ def _fsync_tree(root: Path) -> None:
     for path in sorted(item for item in root.rglob("*") if item.is_file()):
         with path.open("rb") as handle:
             os.fsync(handle.fileno())
-    for path in sorted([root, *[item for item in root.rglob("*") if item.is_dir()]], key=lambda item: len(item.parts), reverse=True):
+    for path in sorted(
+        [root, *[item for item in root.rglob("*") if item.is_dir()]],
+        key=lambda item: len(item.parts),
+        reverse=True,
+    ):
         flags = getattr(os, "O_DIRECTORY", 0)
         fd = os.open(path, os.O_RDONLY | flags)
         try:
@@ -357,9 +363,7 @@ def _rename_noreplace(source: Path, destination: Path) -> None:
         libc = ctypes.CDLL(None, use_errno=True)
         renameat2 = libc.renameat2
     except (AttributeError, OSError):
-        raise OSError(
-            errno.ENOTSUP, "atomic renameat2(RENAME_NOREPLACE) is required"
-        ) from None
+        raise OSError(errno.ENOTSUP, "atomic renameat2(RENAME_NOREPLACE) is required") from None
     renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
     renameat2.restype = ctypes.c_int
     result = renameat2(
@@ -398,7 +402,12 @@ def _load_manifest(root: Path) -> dict[str, Any]:
             raise ValueError("checkpoint manifest contains duplicate paths")
         declared.add(relative_name)
         path = root / Path(*relative.parts)
-        if path.is_symlink() or not path.is_file() or _sha256_file(path) != entry.get("sha256") or path.stat().st_size != entry.get("size"):
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or _sha256_file(path) != entry.get("sha256")
+            or path.stat().st_size != entry.get("size")
+        ):
             raise ValueError(f"checkpoint manifest mismatch for {entry['path']!r}")
     all_paths = list(root.rglob("*"))
     if any(path.is_symlink() for path in all_paths):
@@ -470,9 +479,7 @@ def _validate_optimizer_state(
             for state_name, value in entry.items():
                 if isinstance(value, Tensor):
                     if value.numel() != 1 and value.shape != parameter.shape:
-                        raise ValueError(
-                            f"{name} optimizer state {state_name!r} shape disagrees"
-                        )
+                        raise ValueError(f"{name} optimizer state {state_name!r} shape disagrees")
                     _validate_plain(value, path=f"{name}.{state_name}")
         saved_hyperparameters = set(saved_group) - {"params", "param_names"}
         current_hyperparameters = set(group) - {"params", "param_names"}
@@ -519,8 +526,7 @@ def save_rl_checkpoint(
         or provenance.state_dim != state_feature.shape[0]
         or provenance.action_dim != action_feature.shape[0]
         or provenance.chunk_size != policy_config.n_action_steps
-        or tuple(provenance.active_action_mask)
-        != tuple(current_policy.active_action_mask.tolist())
+        or tuple(provenance.active_action_mask) != tuple(current_policy.active_action_mask.tolist())
     ):
         raise ValueError("provenance dimensions or active action mask disagree with the policy")
     destination = Path(destination)
@@ -559,8 +565,7 @@ def save_rl_checkpoint(
         _write_json(temp / "provenance.json", provenance.to_dict())
 
         optimizer_states = {
-            name: _cpu_state(optimizer.state_dict())
-            for name, optimizer in (optimizers or {}).items()
+            name: _cpu_state(optimizer.state_dict()) for name, optimizer in (optimizers or {}).items()
         }
         payload = {
             "format_version": _FORMAT_VERSION,
@@ -580,7 +585,9 @@ def save_rl_checkpoint(
                 "named": optimizer_states,
             },
             "schedulers": {name: _cpu_state(item.state_dict()) for name, item in (schedulers or {}).items()},
-            "amp_scalers": {name: _cpu_state(item.state_dict()) for name, item in (amp_scalers or {}).items()},
+            "amp_scalers": {
+                name: _cpu_state(item.state_dict()) for name, item in (amp_scalers or {}).items()
+            },
             "rng": _cpu_state(dict(rng_state) if rng_state is not None else _capture_rng()),
             "sampler": _cpu_state(dict(sampler_state)) if sampler_state is not None else None,
             "counters": asdict(counters),
@@ -629,7 +636,11 @@ def load_rl_checkpoint(
         raise ValueError("checkpoint provenance does not match expected provenance")
     payload = torch.load(root / "rl_state.pt", map_location="cpu", weights_only=True)
     _validate_plain(payload)
-    if not isinstance(payload, Mapping) or payload.get("kind") != _KIND or payload.get("format_version") != _FORMAT_VERSION:
+    if (
+        not isinstance(payload, Mapping)
+        or payload.get("kind") != _KIND
+        or payload.get("format_version") != _FORMAT_VERSION
+    ):
         raise ValueError("unsupported RL checkpoint state format")
     current_meta = payload.get("current_policy")
     current_storage = root / "pretrained_model" / "model.safetensors"
@@ -640,7 +651,9 @@ def load_rl_checkpoint(
         or _sha256_file(current_storage) != current_meta.get("sha256")
     ):
         raise ValueError("current policy storage hash is invalid")
-    adapter = CheckpointAdapter.load(root / "pretrained_model", device=device, action_range_tolerance=action_range_tolerance)
+    adapter = CheckpointAdapter.load(
+        root / "pretrained_model", device=device, action_range_tolerance=action_range_tolerance
+    )
     if adapter.processor_fingerprint() != provenance.processor_fingerprint:
         raise ValueError("checkpoint processor fingerprint disagrees with provenance")
     metric_rows = 0

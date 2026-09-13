@@ -87,9 +87,7 @@ def _vector(
             numeric = np.asarray(raw, dtype=np.float64)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{name} must contain boolean values") from exc
-        if not np.all(np.isfinite(numeric)) or not np.all(
-            (numeric == 0.0) | (numeric == 1.0)
-        ):
+        if not np.all(np.isfinite(numeric)) or not np.all((numeric == 0.0) | (numeric == 1.0)):
             raise ValueError(f"{name} must contain only boolean/0/1 values")
         return numeric.astype(np.bool_)
     try:
@@ -129,10 +127,7 @@ def _mask_from_info(info: Mapping[str, Any], *, num_envs: int) -> np.ndarray | N
     present = [key for key in _FINAL_INFO_KEYS if key in info]
     if not present:
         return None
-    masks = [
-        _vector(info[key], name=f"info[{key!r}]", num_envs=num_envs, allow_bool=True)
-        for key in present
-    ]
+    masks = [_vector(info[key], name=f"info[{key!r}]", num_envs=num_envs, allow_bool=True) for key in present]
     first = masks[0]
     if any(not np.array_equal(first, mask) for mask in masks[1:]):
         raise ValueError("final info mask aliases disagree")
@@ -224,9 +219,7 @@ def _final_component_vector(
                 if components is None:
                     item = 0.0
                 elif not isinstance(components, Mapping):
-                    raise ValueError(
-                        f"final_info[{int(index)}]['reward_components'] must be a mapping"
-                    )
+                    raise ValueError(f"final_info[{int(index)}]['reward_components'] must be a mapping")
                 elif component_key not in components:
                     item = 0.0
                 else:
@@ -428,9 +421,7 @@ class EpisodeBatch:
     def __init__(self, recording_mask_value: np.ndarray) -> None:
         mask = _array(recording_mask_value, name="recording_mask")
         if mask.ndim != 1 or mask.shape[0] == 0 or mask.dtype != np.bool_:
-            raise ValueError(
-                f"recording_mask must be a nonempty bool vector, got {mask.shape} {mask.dtype}"
-            )
+            raise ValueError(f"recording_mask must be a nonempty bool vector, got {mask.shape} {mask.dtype}")
         if not np.any(mask):
             raise ValueError("recording_mask must select at least one environment")
         self.recording_mask = mask.astype(np.bool_, copy=True)
@@ -471,9 +462,7 @@ class EpisodeBatch:
         if not np.all(np.isfinite(states)) or not np.all(np.isfinite(actions)):
             raise ValueError("states and actions must contain only finite values")
         if not isinstance(diagnostics, StepDiagnostics) or diagnostics.num_envs != self.num_envs:
-            raise ValueError(
-                f"diagnostics must describe {self.num_envs} environments"
-            )
+            raise ValueError(f"diagnostics must describe {self.num_envs} environments")
 
         active = self.recording_mask & ~self._finished
         if not np.any(active):
@@ -571,12 +560,8 @@ def extract_step_diagnostics(
     if not isinstance(info, Mapping):
         raise ValueError(f"info must be a mapping, got {type(info).__name__}")
     num_envs = _positive_int("num_envs", num_envs)
-    terminated_values = _vector(
-        terminated, name="terminated", num_envs=num_envs, allow_bool=True
-    )
-    truncated_values = _vector(
-        truncated, name="truncated", num_envs=num_envs, allow_bool=True
-    )
+    terminated_values = _vector(terminated, name="terminated", num_envs=num_envs, allow_bool=True)
+    truncated_values = _vector(truncated, name="truncated", num_envs=num_envs, allow_bool=True)
     native_done = np.logical_or(terminated_values, truncated_values)
 
     # Parse all ordinary values first.  They are required even on terminal
@@ -733,7 +718,9 @@ def _split_reset(result: Any) -> tuple[Any, Mapping[str, Any]]:
     return result, {}
 
 
-def _split_step(result: Any, *, num_envs: int) -> tuple[Any, np.ndarray, np.ndarray, np.ndarray, Mapping[str, Any]]:
+def _split_step(
+    result: Any, *, num_envs: int
+) -> tuple[Any, np.ndarray, np.ndarray, np.ndarray, Mapping[str, Any]]:
     if not isinstance(result, tuple) or len(result) != 5:
         raise ValueError("environment step must return (observation, reward, terminated, truncated, info)")
     observation, reward, terminated, truncated, info = result
@@ -771,9 +758,7 @@ def _policy_seed(seed: int) -> None:
 def _coerce_action(action: Any, *, num_envs: int) -> np.ndarray:
     array = _array(action, name="policy action")
     if array.shape != (num_envs, ACTION_DIM):
-        raise ValueError(
-            f"policy action must have shape {(num_envs, ACTION_DIM)}, got {array.shape}"
-        )
+        raise ValueError(f"policy action must have shape {(num_envs, ACTION_DIM)}, got {array.shape}")
     try:
         result = np.asarray(array, dtype=np.float32)
     except (TypeError, ValueError) as exc:
@@ -828,9 +813,7 @@ def collect_rollouts(
         steps = 0
         while not batch.complete() and steps < episode_length:
             pre_action_states = states.copy()
-            action = _coerce_action(
-                policy.select_action(pre_action_states), num_envs=num_envs
-            )
+            action = _coerce_action(policy.select_action(pre_action_states), num_envs=num_envs)
             executed_action = action.copy()
             next_observation, _native_reward, terminated, truncated, info = _split_step(
                 env.step(action), num_envs=num_envs
@@ -861,9 +844,7 @@ def collect_rollouts(
             states = extract_state_observation(next_observation, num_envs=num_envs)
 
         if not batch.complete():
-            raise RuntimeError(
-                "fused rollout did not finalize all recorded worlds within episode_length"
-            )
+            raise RuntimeError("fused rollout did not finalize all recorded worlds within episode_length")
         finalized = batch.finalized()
         if len(finalized) != int(mask.sum()):
             raise RuntimeError("fused rollout finalized an unexpected number of episodes")
@@ -937,7 +918,9 @@ def _write_json(path: Any, payload: Mapping[str, Any]) -> None:
         os.fsync(handle.fileno())
 
 
-def _validate_published_dataset(dataset_root: Any, *, repo_id: str, episodes: Sequence[CollectedEpisode], fps: int) -> None:
+def _validate_published_dataset(
+    dataset_root: Any, *, repo_id: str, episodes: Sequence[CollectedEpisode], fps: int
+) -> None:
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
     loaded = LeRobotDataset(repo_id, root=dataset_root, download_videos=False)
@@ -988,8 +971,7 @@ def _validate_published_dataset(dataset_root: Any, *, repo_id: str, episodes: Se
             raise ValueError(f"published raw column {key!r} is not indexable") from exc
         if column_length != loaded.num_frames:
             raise ValueError(
-                f"published raw column {key!r} has {column_length} rows, "
-                f"expected {loaded.num_frames}"
+                f"published raw column {key!r} has {column_length} rows, expected {loaded.num_frames}"
             )
         columns[key] = column
 
@@ -1012,9 +994,11 @@ def _validate_published_dataset(dataset_root: Any, *, repo_id: str, episodes: Se
                 action, episode.actions[row_index]
             ):
                 raise ValueError(f"episode {index} state/action changed during v3 reload")
-            if not np.array_equal(reward, episode.rewards[row_index]) or not np.array_equal(
-                done, episode.dones[row_index]
-            ) or not np.array_equal(trunc, episode.truncated[row_index]):
+            if (
+                not np.array_equal(reward, episode.rewards[row_index])
+                or not np.array_equal(done, episode.dones[row_index])
+                or not np.array_equal(trunc, episode.truncated[row_index])
+            ):
                 raise ValueError(f"episode {index} sparse fields changed during v3 reload")
         offset += frame_count
     if offset != loaded.num_frames:
@@ -1030,7 +1014,7 @@ def publish_collection(
     episodes: Sequence[CollectedEpisode],
     summary: Mapping[str, Any],
     fps: int = 60,
- ) -> Path:
+) -> Path:
     """Write a native v3 dataset through a sibling staging directory.
 
     The final path is created only after writer finalization, reload
@@ -1061,7 +1045,9 @@ def publish_collection(
             raise ValueError(f"episodes[{index}] must be a CollectedEpisode")
         metadata_index = episode.metadata.get("episode_index", index)
         if metadata_index != index:
-            raise ValueError(f"episode indices must be contiguous from zero, got {metadata_index!r} at {index}")
+            raise ValueError(
+                f"episode indices must be contiguous from zero, got {metadata_index!r} at {index}"
+            )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     staging = output_path.parent / f"{output_path.name}.incomplete-{uuid.uuid4().hex}"
@@ -1090,13 +1076,9 @@ def publish_collection(
         if not isinstance(recorded_success, (bool, np.bool_)):
             raise ValueError(f"episode {index} metadata.success must be a bool")
         if bool(recorded_success) != derived_success:
-            raise ValueError(
-                f"episode {index} success disagrees with the five acceptance conditions"
-            )
+            raise ValueError(f"episode {index} success disagrees with the five acceptance conditions")
         if derived_success != bool(episode.rewards[-1, 0] == 1.0):
-            raise ValueError(
-                f"episode {index} terminal reward disagrees with its summary conditions"
-            )
+            raise ValueError(f"episode {index} terminal reward disagrees with its summary conditions")
         records.append(record)
     initial_summary = dict(summary)
     initial_summary.update(

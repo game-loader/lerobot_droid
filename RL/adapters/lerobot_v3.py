@@ -94,14 +94,11 @@ def terminal_success(
         or min_final_lift_height_m < 0
     ):
         raise ValueError(
-            "min_final_lift_height_m must be finite and nonnegative, "
-            f"got {min_final_lift_height_m!r}"
+            f"min_final_lift_height_m must be finite and nonnegative, got {min_final_lift_height_m!r}"
         )
     # Normalize caller-supplied thresholds to the simulator's float32
     # precision as well as the default constant.
-    min_final_lift_height_m = float(
-        torch.tensor(float(min_final_lift_height_m), dtype=torch.float32).item()
-    )
+    min_final_lift_height_m = float(torch.tensor(float(min_final_lift_height_m), dtype=torch.float32).item())
     missing = sorted(_SUCCESS_FIELDS.difference(metadata))
     if missing:
         raise ValueError(f"episode metadata is missing {missing}")
@@ -129,14 +126,12 @@ def load_episode_labels(
 
     if isinstance(expected_episode_count, bool) or not isinstance(expected_episode_count, Integral):
         raise ValueError(
-            "expected_episode_count must be a nonnegative integer, "
-            f"got {expected_episode_count!r}"
+            f"expected_episode_count must be a nonnegative integer, got {expected_episode_count!r}"
         )
     expected_episode_count = int(expected_episode_count)
     if expected_episode_count < 0:
         raise ValueError(
-            "expected_episode_count must be a nonnegative integer, "
-            f"got {expected_episode_count!r}"
+            f"expected_episode_count must be a nonnegative integer, got {expected_episode_count!r}"
         )
     path = Path(summary_path)
     try:
@@ -234,9 +229,7 @@ def _validate_episode(
     if length == 0:
         raise ValueError(f"{state_key} must contain at least one frame, got shape {tuple(states.shape)}")
     if actions.shape[0] != length:
-        raise ValueError(
-            f"action length must match {state_key}: expected={length}, got={actions.shape[0]}"
-        )
+        raise ValueError(f"action length must match {state_key}: expected={length}, got={actions.shape[0]}")
 
     observation_keys = {state_key}
     observation_keys.update(key for key in episode if key.startswith("observation."))
@@ -246,8 +239,7 @@ def _validate_episode(
         _finite_tensor(key, tensor)
         if tensor.ndim == 0 or tensor.shape[0] != length:
             raise ValueError(
-                f"{key} leading dimension must equal episode length {length}, "
-                f"got shape {tuple(tensor.shape)}"
+                f"{key} leading dimension must equal episode length {length}, got shape {tuple(tensor.shape)}"
             )
         observation_tensors[key] = tensor
 
@@ -272,9 +264,7 @@ def _select_history(tensor: Tensor, indices: Sequence[int]) -> Tensor:
     return tensor.index_select(0, index).unsqueeze(0)
 
 
-def _validate_canonical_rl_rows(
-    episode: Mapping[str, Tensor], *, length: int
-) -> tuple[Tensor, Tensor, bool]:
+def _validate_canonical_rl_rows(episode: Mapping[str, Tensor], *, length: int) -> tuple[Tensor, Tensor, bool]:
     reward = episode["next.reward"]
     done = episode["next.done"]
     truncated = episode["next.truncated"]
@@ -358,16 +348,10 @@ def build_episode_decisions(
         next_anchor = min(stop, length - 1)
         next_indices = _history_indices(next_anchor, n_obs_steps=n_obs_steps)
         observation = ObservationBatch(
-            {
-                key: _select_history(tensor, current_indices)
-                for key, tensor in observation_tensors.items()
-            }
+            {key: _select_history(tensor, current_indices) for key, tensor in observation_tensors.items()}
         )
         next_observation = ObservationBatch(
-            {
-                key: _select_history(tensor, next_indices)
-                for key, tensor in observation_tensors.items()
-            }
+            {key: _select_history(tensor, next_indices) for key, tensor in observation_tensors.items()}
         )
 
         action_chunk = actions[start:stop]
@@ -391,9 +375,7 @@ def build_episode_decisions(
             action_valid=action_valid.unsqueeze(0),
             reward=decision_reward,
             done=decision_done,
-            discount=torch.tensor(
-                [[gamma**valid_steps]], dtype=torch.float32, device=actions.device
-            ),
+            discount=torch.tensor([[gamma**valid_steps]], dtype=torch.float32, device=actions.device),
         )
         decision.validate(
             state_dim=states.shape[1],
@@ -514,6 +496,18 @@ class _DecisionLocation:
     decision_start: int
 
 
+def _decision_history_indices(
+    location: _DecisionLocation, *, n_obs_steps: int, chunk_size: int
+) -> tuple[list[int], list[int]]:
+    current_local = _history_indices(location.decision_start, n_obs_steps=n_obs_steps)
+    next_anchor = min(location.decision_start + chunk_size, location.episode_length - 1)
+    next_local = _history_indices(next_anchor, n_obs_steps=n_obs_steps)
+    return (
+        [location.episode_start + item for item in current_local],
+        [location.episode_start + item for item in next_local],
+    )
+
+
 def _load_camera_histories(
     dataset: LeRobotDataset,
     *,
@@ -542,6 +536,30 @@ def _load_camera_histories(
     return stack(current_indices), stack(next_indices)
 
 
+def _load_cached_camera_histories(
+    cache: Mapping[int, Mapping[str, Tensor]],
+    *,
+    camera_keys: Sequence[str],
+    current_indices: Sequence[int],
+    next_indices: Sequence[int],
+) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
+    def stack(indices: Sequence[int]) -> dict[str, Tensor]:
+        features: dict[str, Tensor] = {}
+        for key in camera_keys:
+            values: list[Tensor] = []
+            for index in indices:
+                try:
+                    values.append(cache[index][key])
+                except KeyError as exc:
+                    raise RuntimeError(f"camera frame cache is missing index={index} key={key!r}") from exc
+            tensor = torch.stack(values).unsqueeze(0)
+            _finite_tensor(key, tensor)
+            features[key] = tensor
+        return features
+
+    return stack(current_indices), stack(next_indices)
+
+
 def collate_decision_batches(batch: Sequence[DecisionBatch]) -> DecisionBatch:
     """Concatenate already-batched decision records along their batch dimension."""
 
@@ -562,9 +580,7 @@ def collate_decision_batches(batch: Sequence[DecisionBatch]) -> DecisionBatch:
     )
     next_observation = ObservationBatch(
         {
-            key: torch.cat(
-                [decision.next_observation.features[key] for decision in batch], dim=0
-            )
+            key: torch.cat([decision.next_observation.features[key] for decision in batch], dim=0)
             for key in sorted(next_observation_keys)
         }
     )
@@ -592,6 +608,7 @@ class LeRobotV3DecisionDataset(Dataset[DecisionBatch]):
         locations: Sequence[_DecisionLocation] = (),
         n_obs_steps: int = 2,
         chunk_size: int = 32,
+        camera_frame_cache: Mapping[int, Mapping[str, Tensor]] | None = None,
     ) -> None:
         if not records:
             raise ValueError("decision dataset records must be nonempty")
@@ -602,6 +619,7 @@ class LeRobotV3DecisionDataset(Dataset[DecisionBatch]):
         self._locations = tuple(locations)
         self._n_obs_steps = n_obs_steps
         self._chunk_size = chunk_size
+        self._camera_frame_cache = camera_frame_cache
         if self._camera_keys:
             if self._source_dataset is None:
                 raise ValueError("source_dataset is required when camera_keys are present")
@@ -624,27 +642,40 @@ class LeRobotV3DecisionDataset(Dataset[DecisionBatch]):
         if not isinstance(config, RLConfig):
             raise ValueError(f"config must be an RLConfig, got {type(config).__name__}")
         root = Path(dataset_root)
-        dataset = LeRobotDataset(repo_id, root=root)
+        # PyAV creates an independent decoder per worker and is safe for the
+        # multiprocess DataLoader used by offline RL.  The auto-selected
+        # TorchCodec backend can inherit decoder state across forked workers
+        # and intermittently fail with "Invalid data found when processing
+        # input" on long video histories.
+        dataset = LeRobotDataset(repo_id, root=root, video_backend="pyav", return_uint8=True)
         canonical_fields = _canonical_rl_fields(dataset.features)
         if canonical_fields and any(".incomplete" in part for part in root.parts):
             raise ValueError(f"canonical dataset staging paths are not loadable: {root}")
         if canonical_fields:
             dataset_fps = getattr(dataset, "fps", None)
+            # RL-100's original Moya collector runs at 60 Hz, while the real
+            # Franka Duo recorder emits synchronized RGB/depth frames at 15 Hz.
+            # Both use the same canonical reward/transition fields; accept the
+            # recorder's native rate without weakening validation for unknown
+            # robot types.
+            robot_type = getattr(getattr(dataset, "meta", None), "robot_type", None)
+            allowed_fps = {60}
+            if robot_type == "franka_duo":
+                allowed_fps.add(15)
             if (
                 isinstance(dataset_fps, bool)
                 or not isinstance(dataset_fps, Integral)
-                or int(dataset_fps) != 60
+                or int(dataset_fps) not in allowed_fps
             ):
                 raise ValueError(
-                    "canonical Moya RL datasets must use the 60 Hz control rate, "
-                    f"got fps={dataset_fps!r}"
+                    "canonical RL dataset has unsupported fps for robot_type="
+                    f"{robot_type!r}; expected one of {sorted(allowed_fps)}, got "
+                    f"{dataset_fps!r}"
                 )
         state_shape = _feature_shape(dataset.features, config.state_key)
         action_shape = _feature_shape(dataset.features, "action")
         if state_shape != [config.state_dim]:
-            raise ValueError(
-                f"{config.state_key} shape must be {[config.state_dim]}, got {state_shape}"
-            )
+            raise ValueError(f"{config.state_key} shape must be {[config.state_dim]}, got {state_shape}")
         if action_shape != [config.action_dim]:
             raise ValueError(f"action shape must be {[config.action_dim]}, got {action_shape}")
         for key, expected_dtype in (
@@ -664,14 +695,10 @@ class LeRobotV3DecisionDataset(Dataset[DecisionBatch]):
         )
         camera_keys = _camera_keys(dataset)
         observation_keys: set[str] = {config.state_key}
-        observation_keys.update(
-            key for key in dataset.features if key.startswith("observation.")
-        )
+        observation_keys.update(key for key in dataset.features if key.startswith("observation."))
         observation_keys.update(camera_keys)
         sorted_observation_keys = sorted(observation_keys)
-        raw_observation_keys = [
-            key for key in sorted_observation_keys if key not in camera_keys
-        ]
+        raw_observation_keys = [key for key in sorted_observation_keys if key not in camera_keys]
         parsed_episode_rows: list[tuple[int, int, int, int, dict[str, Any]]] = []
         for raw_row in dataset.meta.episodes:
             if not isinstance(raw_row, Mapping):
@@ -696,9 +723,7 @@ class LeRobotV3DecisionDataset(Dataset[DecisionBatch]):
         records: list[DecisionBatch] = []
         locations: list[_DecisionLocation] = []
         frame_count = 0
-        for expected_episode_index, (episode_index, start, stop, length, _row) in enumerate(
-            episode_rows
-        ):
+        for expected_episode_index, (episode_index, start, stop, length, _row) in enumerate(episode_rows):
             if episode_index != expected_episode_index:
                 raise ValueError(
                     "episode metadata indices must be contiguous: "
@@ -717,9 +742,7 @@ class LeRobotV3DecisionDataset(Dataset[DecisionBatch]):
                 observation_keys=raw_observation_keys,
                 additional_keys=canonical_fields,
             )
-            observed_episode_index = _index_vector(
-                "episode_index", episode["episode_index"], length=length
-            )
+            observed_episode_index = _index_vector("episode_index", episode["episode_index"], length=length)
             if not torch.all(observed_episode_index == episode_index).item():
                 raise ValueError(
                     f"episode_index values do not match metadata {episode_index}: "
@@ -753,12 +776,8 @@ class LeRobotV3DecisionDataset(Dataset[DecisionBatch]):
             frame_count += length
 
         if frame_count != dataset.num_frames:
-            raise ValueError(
-                f"episode metadata frame count must be {dataset.num_frames}, got {frame_count}"
-            )
-        partial_chunk_count = sum(
-            not bool(decision.action_valid.all().item()) for decision in records
-        )
+            raise ValueError(f"episode metadata frame count must be {dataset.num_frames}, got {frame_count}")
+        partial_chunk_count = sum(not bool(decision.action_valid.all().item()) for decision in records)
         summary = {
             "dataset_path": str(root),
             "episodes": int(dataset.num_episodes),
@@ -781,6 +800,70 @@ class LeRobotV3DecisionDataset(Dataset[DecisionBatch]):
             chunk_size=config.chunk_size,
         )
 
+    def required_camera_frame_indices(self) -> tuple[int, ...]:
+        """Return unique source frame indices needed by this decision view."""
+
+        if not self._camera_keys:
+            return ()
+        indices: set[int] = set()
+        for location in self._locations:
+            current_indices, next_indices = _decision_history_indices(
+                location, n_obs_steps=self._n_obs_steps, chunk_size=self._chunk_size
+            )
+            indices.update(current_indices)
+            indices.update(next_indices)
+        return tuple(sorted(indices))
+
+    def preload_camera_frame_cache(self) -> dict[str, int | float]:
+        """Decode required camera frames once and keep raw RGB tensors in RAM.
+
+        This cache is deliberately below the model: it stores decoded wrist RGB
+        frames, not DP3 encoder latents.  The IQL critic can still update its
+        observation encoder exactly as before, while repeated PyAV seeks/decodes
+        on the fixed offline dataset are eliminated.
+        """
+
+        if not self._camera_keys:
+            return {"camera_cache_frames": 0, "camera_cache_bytes": 0.0}
+        if self._source_dataset is None:
+            raise RuntimeError("camera source dataset is unavailable")
+        if self._camera_frame_cache is not None:
+            total_bytes = sum(
+                value.numel() * value.element_size()
+                for frame in self._camera_frame_cache.values()
+                for value in frame.values()
+            )
+            return {
+                "camera_cache_frames": len(self._camera_frame_cache),
+                "camera_cache_bytes": float(total_bytes),
+            }
+
+        cache: dict[int, dict[str, Tensor]] = {}
+        total_bytes = 0
+        for frame_index in self.required_camera_frame_indices():
+            row = self._source_dataset[frame_index]
+            if not isinstance(row, Mapping):
+                raise ValueError(f"dataset row {frame_index} must be a mapping, got {type(row).__name__}")
+            frame: dict[str, Tensor] = {}
+            for key in self._camera_keys:
+                if key not in row:
+                    raise ValueError(f"dataset row {frame_index} is missing camera feature {key!r}")
+                value = row[key]
+                tensor = value if isinstance(value, Tensor) else torch.as_tensor(value)
+                tensor = tensor.detach().cpu().contiguous()
+                _finite_tensor(key, tensor)
+                frame[key] = tensor
+                total_bytes += tensor.numel() * tensor.element_size()
+            cache[frame_index] = frame
+
+        self._camera_frame_cache = cache
+        self._summary["camera_cache_frames"] = len(cache)
+        self._summary["camera_cache_bytes"] = float(total_bytes)
+        return {
+            "camera_cache_frames": len(cache),
+            "camera_cache_bytes": float(total_bytes),
+        }
+
     def __len__(self) -> int:
         return len(self._records)
 
@@ -789,23 +872,25 @@ class LeRobotV3DecisionDataset(Dataset[DecisionBatch]):
         if not self._camera_keys:
             return record
         location = self._locations[index]
-        current_local = _history_indices(
-            location.decision_start, n_obs_steps=self._n_obs_steps
+        current_indices, next_indices = _decision_history_indices(
+            location, n_obs_steps=self._n_obs_steps, chunk_size=self._chunk_size
         )
-        next_anchor = min(
-            location.decision_start + self._chunk_size, location.episode_length - 1
-        )
-        next_local = _history_indices(next_anchor, n_obs_steps=self._n_obs_steps)
-        current_indices = [location.episode_start + item for item in current_local]
-        next_indices = [location.episode_start + item for item in next_local]
         if self._source_dataset is None:
             raise RuntimeError("camera source dataset is unavailable")
-        current_camera, next_camera = _load_camera_histories(
-            self._source_dataset,
-            camera_keys=self._camera_keys,
-            current_indices=current_indices,
-            next_indices=next_indices,
-        )
+        if self._camera_frame_cache is not None:
+            current_camera, next_camera = _load_cached_camera_histories(
+                self._camera_frame_cache,
+                camera_keys=self._camera_keys,
+                current_indices=current_indices,
+                next_indices=next_indices,
+            )
+        else:
+            current_camera, next_camera = _load_camera_histories(
+                self._source_dataset,
+                camera_keys=self._camera_keys,
+                current_indices=current_indices,
+                next_indices=next_indices,
+            )
         observation_features = dict(record.observation.features)
         observation_features.update(current_camera)
         next_observation_features = dict(record.next_observation.features)
@@ -860,13 +945,10 @@ class LeRobotV3DecisionDataset(Dataset[DecisionBatch]):
             summary["decisions"] = len(records)
             starts = {location.episode_start for location in locations}
             length_by_start = {
-                location.episode_start: location.episode_length
-                for location in self._locations
+                location.episode_start: location.episode_length for location in self._locations
             }
             summary["episodes"] = len(starts)
-            summary["frames"] = sum(
-                length_by_start[start] for start in starts
-            )
+            summary["frames"] = sum(length_by_start[start] for start in starts)
             return type(self)(
                 records,
                 summary,
@@ -875,6 +957,7 @@ class LeRobotV3DecisionDataset(Dataset[DecisionBatch]):
                 locations=locations,
                 n_obs_steps=self._n_obs_steps,
                 chunk_size=self._chunk_size,
+                camera_frame_cache=self._camera_frame_cache,
             )
 
         return view(train_indices), view(validation_indices)

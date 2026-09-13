@@ -97,9 +97,7 @@ def _coerce_state_matrix(value: Any, *, name: str, num_envs: int) -> np.ndarray:
     if array.ndim == 1 and num_envs == 1 and array.shape == (STATE_DIM,):
         array = array.reshape(1, STATE_DIM)
     if array.shape != (num_envs, STATE_DIM):
-        raise ValueError(
-            f"{name} must have shape {(num_envs, STATE_DIM)}, got {array.shape}"
-        )
+        raise ValueError(f"{name} must have shape {(num_envs, STATE_DIM)}, got {array.shape}")
     try:
         result = np.asarray(array, dtype=np.float32)
     except (TypeError, ValueError) as exc:
@@ -146,9 +144,7 @@ def _single_state_row(value: Any, *, name: str) -> tuple[np.ndarray | None, bool
     return row, True
 
 
-def _extract_state_rows(
-    value: Any, *, name: str, num_envs: int
-) -> tuple[np.ndarray, np.ndarray]:
+def _extract_state_rows(value: Any, *, name: str, num_envs: int) -> tuple[np.ndarray, np.ndarray]:
     """Extract rows and a presence mask from dense, object, or dict forms."""
 
     num_envs = _validate_num_envs(num_envs)
@@ -174,7 +170,9 @@ def _extract_state_rows(
     # per world.  A Python list/tuple of per-world dictionaries has the same
     # semantics, so normalize both through the row parser.
     if array.ndim != 1 or array.shape[0] != num_envs:
-        raise ValueError(f"{name} must have shape {(num_envs, STATE_DIM)} or {(num_envs,)}, got {array.shape}")
+        raise ValueError(
+            f"{name} must have shape {(num_envs, STATE_DIM)} or {(num_envs,)}, got {array.shape}"
+        )
     rows = np.zeros((num_envs, STATE_DIM), dtype=np.float32)
     present = np.zeros(num_envs, dtype=np.bool_)
     for index, item in enumerate(array.tolist()):
@@ -194,7 +192,9 @@ def _compare_alias_values(
     first: tuple[str, Any], second: tuple[str, Any], *, num_envs: int, name: str
 ) -> tuple[np.ndarray, np.ndarray]:
     first_rows, first_present = _extract_state_rows(first[1], name=f"{name}[{first[0]}]", num_envs=num_envs)
-    second_rows, second_present = _extract_state_rows(second[1], name=f"{name}[{second[0]}]", num_envs=num_envs)
+    second_rows, second_present = _extract_state_rows(
+        second[1], name=f"{name}[{second[0]}]", num_envs=num_envs
+    )
     if not np.array_equal(first_present, second_present) or not np.allclose(
         first_rows[first_present], second_rows[second_present], rtol=0.0, atol=0.0
     ):
@@ -234,9 +234,7 @@ def select_transition_next_state(
     num_envs = _validate_num_envs(num_envs)
     done_mask = _coerce_bool_vector(done_array, name="done", num_envs=num_envs)
 
-    base, base_present = _extract_state_rows(
-        next_observation, name="next_observation", num_envs=num_envs
-    )
+    base, base_present = _extract_state_rows(next_observation, name="next_observation", num_envs=num_envs)
     if not np.all(base_present):
         missing = np.flatnonzero(~base_present).tolist()
         raise ValueError(f"next_observation is missing state rows for environments {missing}")
@@ -272,8 +270,7 @@ def select_transition_next_state(
         final_mask = done_mask
     else:
         parsed_masks = [
-            _coerce_bool_vector(value, name=f"info[{key}]", num_envs=num_envs)
-            for key, value in mask_aliases
+            _coerce_bool_vector(value, name=f"info[{key}]", num_envs=num_envs) for key, value in mask_aliases
         ]
         final_mask = parsed_masks[0]
         if any(not np.array_equal(mask, final_mask) for mask in parsed_masks[1:]):
@@ -313,8 +310,7 @@ def extract_terminal_success(info: Mapping[str, Any], done: Any) -> np.ndarray:
         final_mask = done_mask
     else:
         parsed_masks = [
-            _coerce_bool_vector(value, name=f"info[{key}]", num_envs=num_envs)
-            for key, value in mask_aliases
+            _coerce_bool_vector(value, name=f"info[{key}]", num_envs=num_envs) for key, value in mask_aliases
         ]
         final_mask = parsed_masks[0]
         if any(not np.array_equal(mask, final_mask) for mask in parsed_masks[1:]):
@@ -344,9 +340,7 @@ def extract_terminal_success(info: Mapping[str, Any], done: Any) -> np.ndarray:
     else:
         array = _to_numpy(raw_final_info, name="info[final_info]")
         if array.shape != (num_envs,):
-            raise ValueError(
-                f"info[final_info] must have shape {(num_envs,)}, got {array.shape}"
-            )
+            raise ValueError(f"info[final_info] must have shape {(num_envs,)}, got {array.shape}")
         for index, item in enumerate(array.tolist()):
             if item is None:
                 continue
@@ -356,9 +350,7 @@ def extract_terminal_success(info: Mapping[str, Any], done: Any) -> np.ndarray:
                 raise ValueError(f"info[final_info][{index}] is missing is_success")
             value = item["is_success"]
             if not isinstance(value, (bool, np.bool_)):
-                raise ValueError(
-                    f"info[final_info][{index}][is_success] must be a bool, got {value!r}"
-                )
+                raise ValueError(f"info[final_info][{index}][is_success] must be a bool, got {value!r}")
             present[index] = True
             success[index] = bool(value)
 
@@ -417,9 +409,7 @@ def create_moya_env(
     if config is None:
         config = MoyaNewtonEnvConfig()
     elif not isinstance(config, MoyaNewtonEnvConfig):
-        raise TypeError(
-            f"config must be a MoyaNewtonEnvConfig, got {type(config).__name__}"
-        )
+        raise TypeError(f"config must be a MoyaNewtonEnvConfig, got {type(config).__name__}")
 
     updates: dict[str, Any] = {}
     for name, value in (
@@ -433,13 +423,9 @@ def create_moya_env(
             updates[name] = value
     if updates:
         config = dataclasses.replace(config, **updates)
-    success_threshold = float(
-        getattr(config, "success_min_final_lift_height", SUCCESS_MIN_FINAL_LIFT_HEIGHT)
-    )
+    success_threshold = float(getattr(config, "success_min_final_lift_height", SUCCESS_MIN_FINAL_LIFT_HEIGHT))
     if not np.isfinite(success_threshold) or success_threshold != SUCCESS_MIN_FINAL_LIFT_HEIGHT:
-        raise ValueError(
-            "Moya RL success_min_final_lift_height must remain fixed at 0.015 meters"
-        )
+        raise ValueError("Moya RL success_min_final_lift_height must remain fixed at 0.015 meters")
 
     environments = make_env(config, n_envs=num_envs, use_async_envs=False)
     if not isinstance(environments, Mapping) or not environments:
@@ -447,9 +433,7 @@ def create_moya_env(
     suite = environments.get(config.type)
     if suite is None:
         if len(environments) != 1:
-            raise RuntimeError(
-                f"Moya make_env returned unexpected suites: {sorted(environments)}"
-            )
+            raise RuntimeError(f"Moya make_env returned unexpected suites: {sorted(environments)}")
         suite = next(iter(environments.values()))
     if not isinstance(suite, Mapping) or not suite:
         raise RuntimeError("Moya make_env suite must contain one vector environment")

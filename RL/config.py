@@ -38,8 +38,7 @@ def _parse_json_object(payload: str | bytes | bytearray, config_name: str) -> di
         raise ValueError(f"Invalid {config_name} JSON: {exc}; actual={payload!r}") from exc
     if not isinstance(data, dict):
         raise ValueError(
-            f"{config_name} JSON must contain an object, got {type(data).__name__}: "
-            f"actual={data!r}"
+            f"{config_name} JSON must contain an object, got {type(data).__name__}: actual={data!r}"
         )
     return data
 
@@ -71,9 +70,7 @@ class TraceConfig:
         eta = _finite_float("eta", self.eta)
         sigma_min = _finite_float("sigma_min", self.sigma_min)
         sigma_max = _finite_float("sigma_max", self.sigma_max)
-        probability_sigma_min = _finite_float(
-            "probability_sigma_min", self.probability_sigma_min
-        )
+        probability_sigma_min = _finite_float("probability_sigma_min", self.probability_sigma_min)
         if eta < 0:
             raise ValueError(f"eta must be nonnegative, got {self.eta!r}")
         if sigma_min <= 0:
@@ -81,10 +78,7 @@ class TraceConfig:
         if sigma_max < sigma_min:
             raise ValueError(f"sigma_max must be at least sigma_min ({sigma_min}), got {self.sigma_max!r}")
         if probability_sigma_min <= 0:
-            raise ValueError(
-                "probability_sigma_min must be positive, "
-                f"got {self.probability_sigma_min!r}"
-            )
+            raise ValueError(f"probability_sigma_min must be positive, got {self.probability_sigma_min!r}")
         object.__setattr__(self, "eta", eta)
         object.__setattr__(self, "sigma_min", sigma_min)
         object.__setattr__(self, "sigma_max", sigma_max)
@@ -163,13 +157,10 @@ class RLConfig:
 
     def __post_init__(self) -> None:
         if not isinstance(self.amq, AMQConfig):
-            raise ValueError(
-                f"amq must be an AMQConfig, got {type(self.amq).__name__}: actual={self.amq!r}"
-            )
+            raise ValueError(f"amq must be an AMQConfig, got {type(self.amq).__name__}: actual={self.amq!r}")
         if not isinstance(self.trace, TraceConfig):
             raise ValueError(
-                f"trace must be a TraceConfig, got {type(self.trace).__name__}: "
-                f"actual={self.trace!r}"
+                f"trace must be a TraceConfig, got {type(self.trace).__name__}: actual={self.trace!r}"
             )
         if not isinstance(self.state_key, str) or not self.state_key:
             raise ValueError(f"state_key must be a nonempty string, got {self.state_key!r}")
@@ -193,8 +184,7 @@ class RLConfig:
         if trace_data is not None:
             if not isinstance(trace_data, dict):
                 raise ValueError(
-                    f"trace must be a JSON object, got {type(trace_data).__name__}: "
-                    f"actual={trace_data!r}"
+                    f"trace must be a JSON object, got {type(trace_data).__name__}: actual={trace_data!r}"
                 )
             _reject_unknown_fields(trace_data, TraceConfig)
             data["trace"] = TraceConfig(**trace_data)
@@ -202,8 +192,7 @@ class RLConfig:
         if amq_data is not None:
             if not isinstance(amq_data, dict):
                 raise ValueError(
-                    f"amq must be a JSON object, got {type(amq_data).__name__}: "
-                    f"actual={amq_data!r}"
+                    f"amq must be a JSON object, got {type(amq_data).__name__}: actual={amq_data!r}"
                 )
             _reject_unknown_fields(amq_data, AMQConfig)
             data["amq"] = AMQConfig(**amq_data)

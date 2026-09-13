@@ -13,16 +13,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
+from copy import deepcopy
 from pprint import pformat
 
 import datasets
 import numpy as np
 from PIL import Image as PILImage
 
-from lerobot.configs import VIDEO_ENCODER_INFO_KEYS
+from lerobot.configs import VIDEO_ENCODER_INFO_KEYS, is_depth_map
 from lerobot.utils.constants import DEFAULT_FEATURES
 from lerobot.utils.utils import is_valid_numpy_dtype_string
 
+from .language import (
+    LANGUAGE_PERSISTENT,
+    is_language_column,
+    language_events_column_feature,
+    language_persistent_column_feature,
+)
 from .utils import (
     DEFAULT_CHUNK_SIZE,
     DEFAULT_DATA_FILE_SIZE_IN_MB,
@@ -47,7 +55,13 @@ def get_hf_features_from_features(features: dict) -> datasets.Features:
     """
     hf_features = {}
     for key, ft in features.items():
-        if ft["dtype"] == "video":
+        if is_language_column(key):
+            hf_features[key] = (
+                language_persistent_column_feature()
+                if key == LANGUAGE_PERSISTENT
+                else language_events_column_feature()
+            )
+        elif ft["dtype"] == "video":
             continue
         elif ft["dtype"] == "image":
             hf_features[key] = datasets.Image()
@@ -109,23 +123,44 @@ def create_empty_dataset_info(
     )
 
 
+def canonicalize_depth_marker(feature: dict) -> None:
+    """Fold a feature's legacy depth marker into the canonical ``info['is_depth_map']``.
+
+    Depth maps can be flagged in three ways across dataset versions: the canonical
+    ``feature['info']['is_depth_map']``, the legacy ``feature['info']['video.is_depth_map']``,
+    or a legacy ``feature['video_info']['video.is_depth_map']`` in a separate dict. This mutates
+    ``feature`` in place, dropping the legacy keys.
+    """
+    info = feature.get("info") or {}
+    feature["info"] = info
+    video_info = feature.get("video_info")
+    depth = is_depth_map(feature)
+    info.pop("video.is_depth_map", None)
+    if isinstance(video_info, dict):
+        video_info.pop("video.is_depth_map", None)
+    if not video_info:
+        feature.pop("video_info", None)
+    info["is_depth_map"] = depth
+
+
 def features_equal_for_merge(features_a: dict[str, dict], features_b: dict[str, dict]) -> bool:
     """Return whether two LeRobotDatasetMetadata ``features`` dicts are compatible for aggregation.
 
     For video features, keys under ``info`` related to video encoding parameters are ignored during
-    comparison as they do not prevent aggregation.
+    comparison as they do not prevent aggregation. The legacy depth marker (``video.is_depth_map``,
+    in ``info`` or a separate ``video_info`` dict) is canonicalized so datasets that only differ in
+    how they flag depth remain mergeable.
     """
 
-    def _without_encoder_info_keys(feature: dict) -> dict:
-        filtered = dict(feature)
-        filtered_info = filtered.get("info")
-        if isinstance(filtered_info, dict):
-            filtered["info"] = {
-                info_key: info_value
-                for info_key, info_value in filtered_info.items()
-                if info_key not in VIDEO_ENCODER_INFO_KEYS
-            }
-        return filtered
+    def _normalized(feature: dict) -> dict:
+        normalized = deepcopy(feature)
+        canonicalize_depth_marker(normalized)
+        normalized["info"] = {
+            info_key: info_value
+            for info_key, info_value in normalized["info"].items()
+            if info_key not in VIDEO_ENCODER_INFO_KEYS
+        }
+        return normalized
 
     if set(features_a) != set(features_b):
         return False
@@ -134,12 +169,7 @@ def features_equal_for_merge(features_a: dict[str, dict], features_b: dict[str, 
         fb_key = features_b[key]
         if fa_key.get("dtype") != fb_key.get("dtype"):
             return False
-        if fa_key.get("dtype") != "video":
-            if fa_key != fb_key:
-                return False
-            continue
-
-        if _without_encoder_info_keys(fa_key) != _without_encoder_info_keys(fb_key):
+        if _normalized(fa_key) != _normalized(fb_key):
             return False
     return True
 
@@ -278,6 +308,8 @@ def validate_feature_dtype_and_shape(
         return validate_feature_image_or_video(name, expected_shape, value)
     elif expected_dtype == "string":
         return validate_feature_string(name, value)
+    elif expected_dtype == "language":
+        return validate_feature_language(name, value)
     else:
         raise NotImplementedError(f"The feature dtype '{expected_dtype}' is not implemented yet.")
 
@@ -321,7 +353,7 @@ def validate_feature_image_or_video(
 
     Args:
         name (str): The name of the feature.
-        expected_shape (list[str]): The expected shape (C, H, W).
+        expected_shape (list[str]): The expected shape, e.g. (C, H, W) or (H, W, C).
         value: The image data to validate.
 
     Returns:
@@ -354,6 +386,30 @@ def validate_feature_string(name: str, value: str) -> str:
     """
     if not isinstance(value, str):
         return f"The feature '{name}' is expected to be of type 'str', but type '{type(value)}' provided instead.\n"
+    return ""
+
+
+def validate_feature_language(name: str, value) -> str:
+    """Validate a feature that is expected to hold language annotations.
+
+    Language columns (``language_persistent`` / ``language_events``) are
+    populated after recording by the annotation pipeline, not at record time.
+    Any value supplied here is dropped before the frame is written, so a
+    non-empty value almost certainly signals a mistake. We warn rather than
+    fail to keep recording resilient.
+
+    Args:
+        name (str): The name of the feature.
+        value: The value to validate.
+
+    Returns:
+        str: Always an empty string — language values are non-fatal.
+    """
+    if value is not None:
+        logging.warning(
+            f"The feature '{name}' is a 'language' column populated by the annotation pipeline, "
+            f"not at record time. The provided value will be dropped."
+        )
     return ""
 
 

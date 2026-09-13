@@ -31,11 +31,9 @@ class DiffusionConfig(PreTrainedConfig):
     Those are: `input_features` and `output_features`.
 
     Notes on the inputs and outputs:
-        - ``observation.state`` is the required conditioning input. Image and
-          ``observation.environment_state`` features are optional additional
-          conditioning inputs.
+        - "observation.state" is required; image and environment-state inputs are optional.
         - If there are multiple keys beginning with "observation.image" they are treated as multiple camera
-          views. Right now we only support all images having the same shape.
+          views. Images must have the same shape unless `resize_shape` is configured.
         - "action" is required as an output key.
 
     Args:
@@ -77,6 +75,8 @@ class DiffusionConfig(PreTrainedConfig):
         use_film_scale_modulation: FiLM (https://huggingface.co/papers/1709.07871) is used for the Unet conditioning.
             Bias modulation is used be default, while this parameter indicates whether to also use scale
             modulation.
+        gradient_checkpointing: Whether to checkpoint the Unet residual blocks during training. This reduces
+            activation memory at the cost of recomputing those blocks during the backward pass.
         noise_scheduler_type: Name of the noise scheduler to use. Supported options: ["DDPM", "DDIM"].
         num_train_timesteps: Number of diffusion steps for the forward diffusion schedule.
         beta_schedule: Name of the diffusion beta schedule as per DDPMScheduler from Hugging Face diffusers.
@@ -130,6 +130,7 @@ class DiffusionConfig(PreTrainedConfig):
     n_groups: int = 8
     diffusion_step_embed_dim: int = 128
     use_film_scale_modulation: bool = True
+    gradient_checkpointing: bool = False
     # Noise scheduler.
     noise_scheduler_type: str = "DDPM"
     num_train_timesteps: int = 100
@@ -233,11 +234,16 @@ class DiffusionConfig(PreTrainedConfig):
                         f"for `crop_shape` and {image_ft.shape} for `{key}`."
                     )
 
-        # Check that all input images have the same shape.
+        # Native camera resolutions may differ when resized before stacking.
         if len(self.image_features) > 0:
             first_image_key, first_image_ft = next(iter(self.image_features.items()))
             for key, image_ft in self.image_features.items():
-                if image_ft.shape != first_image_ft.shape:
+                if image_ft.shape[0] != first_image_ft.shape[0]:
+                    raise ValueError(
+                        f"`{key}` does not match `{first_image_key}` in channel count, "
+                        f"but got {image_ft.shape} and {first_image_ft.shape}."
+                    )
+                if self.resize_shape is None and image_ft.shape != first_image_ft.shape:
                     raise ValueError(
                         f"`{key}` does not match `{first_image_key}`, but we expect all image shapes to match."
                     )

@@ -20,10 +20,14 @@ import pytest
 import torch
 from safetensors.torch import load_file, save_file
 
+pytest.importorskip("diffusers", exc_type=ModuleNotFoundError)
+
 from lerobot.configs import NormalizationMode
 from lerobot.configs.types import FeatureType, PolicyFeature
 from lerobot.policies.diffusion.configuration_diffusion import DiffusionConfig
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
+from lerobot.policies.dp3.configuration_dp3 import DP3Config
+from lerobot.policies.dp3.modeling_dp3 import DP3Policy
 from lerobot.policies.factory import make_pre_post_processors
 from lerobot.processor.normalize_processor import NormalizerProcessorStep
 from RL.adapters import checkpoint as checkpoint_module
@@ -33,6 +37,8 @@ from RL.adapters.checkpoint import (
     _processor_artifact_fingerprint,
     _validate_normalizer_features,
 )
+from RL.config import TraceConfig
+from RL.policy.diffusion_adapter import DiffusionRLAdapter
 from RL.types import ObservationBatch
 
 REAL_CHECKPOINT = Path(
@@ -86,6 +92,62 @@ def checkpoint_adapter(tiny_checkpoint: Path) -> CheckpointAdapter:
 
 
 @pytest.fixture(scope="module")
+def tiny_dp3_checkpoint(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    root = tmp_path_factory.mktemp("tiny_dp3_checkpoint")
+    config = DP3Config(
+        n_obs_steps=2,
+        horizon=4,
+        n_action_steps=2,
+        point_cloud_num_points=8,
+        input_features={
+            "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(34,)),
+            "observation.point_cloud": PolicyFeature(type=FeatureType.POINT_CLOUD, shape=(8, 3)),
+            "observation.images.wrist_left": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 64, 64)),
+            "observation.images.wrist_right": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 64, 64)),
+        },
+        output_features={"action": PolicyFeature(type=FeatureType.ACTION, shape=(20,))},
+        device="cpu",
+        pretrained_backbone_weights=None,
+        down_dims=(8,),
+        kernel_size=3,
+        n_groups=2,
+        diffusion_step_embed_dim=8,
+        num_train_timesteps=4,
+        num_inference_steps=2,
+    )
+    policy = DP3Policy(config)
+    policy.save_pretrained(root)
+    stats = {
+        "observation.state": {
+            "min": torch.full((34,), -1.0),
+            "max": torch.full((34,), 1.0),
+        },
+        "observation.point_cloud": {},
+        "observation.images.wrist_left": {
+            "mean": torch.zeros(3, 1, 1),
+            "std": torch.ones(3, 1, 1),
+        },
+        "observation.images.wrist_right": {
+            "mean": torch.zeros(3, 1, 1),
+            "std": torch.ones(3, 1, 1),
+        },
+        "action": {
+            "min": torch.full((20,), -1.0),
+            "max": torch.full((20,), 1.0),
+        },
+    }
+    preprocessor, postprocessor = make_pre_post_processors(config, dataset_stats=stats)
+    preprocessor.save_pretrained(root)
+    postprocessor.save_pretrained(root)
+    return root
+
+
+@pytest.fixture(scope="module")
+def dp3_checkpoint_adapter(tiny_dp3_checkpoint: Path) -> CheckpointAdapter:
+    return CheckpointAdapter.load(tiny_dp3_checkpoint, device="cpu")
+
+
+@pytest.fixture(scope="module")
 def real_checkpoint_adapter() -> CheckpointAdapter:
     if not REAL_CHECKPOINT.is_dir():
         pytest.skip(f"real checkpoint is unavailable: {REAL_CHECKPOINT}")
@@ -99,6 +161,29 @@ def test_checkpoint_adapter_loads_policy_and_processors(
     assert not checkpoint_adapter.policy.training
     assert checkpoint_adapter.active_action_mask.dtype == torch.bool
     assert checkpoint_adapter.active_action_mask.tolist() == [True, False]
+
+
+def test_checkpoint_adapter_dispatches_and_replays_dp3(
+    dp3_checkpoint_adapter: CheckpointAdapter,
+) -> None:
+    assert isinstance(dp3_checkpoint_adapter.policy, DP3Policy)
+    adapter = DiffusionRLAdapter(
+        dp3_checkpoint_adapter,
+        TraceConfig(num_inference_steps=2),
+    )
+    observation = ObservationBatch(
+        {
+            "observation.state": torch.zeros(1, 2, 34),
+            "observation.point_cloud": torch.zeros(1, 2, 8, 3),
+            "observation.images.wrist_left": torch.zeros(1, 2, 3, 64, 64, dtype=torch.uint8),
+            "observation.images.wrist_right": torch.zeros(1, 2, 3, 64, 64, dtype=torch.uint8),
+        }
+    )
+
+    trace = adapter.sample_trace(observation, generator=adapter.make_generator(7))
+
+    assert trace.final_actions.shape == (1, 4, 20)
+    assert torch.isfinite(trace.final_actions).all()
 
 
 def test_checkpoint_adapter_normalization_round_trip(
@@ -115,9 +200,7 @@ def test_checkpoint_adapter_normalization_round_trip(
 def test_checkpoint_adapter_promotes_half_actions_to_finite_float32(
     checkpoint_adapter: CheckpointAdapter,
 ) -> None:
-    normalized = checkpoint_adapter.normalize_action(
-        torch.tensor([[-1.0, 0.0]], dtype=torch.float16)
-    )
+    normalized = checkpoint_adapter.normalize_action(torch.tensor([[-1.0, 0.0]], dtype=torch.float16))
 
     assert normalized.dtype == torch.float32
     assert torch.isfinite(normalized).all()
@@ -174,9 +257,7 @@ def test_processor_fingerprint_tracks_referenced_state_file(tmp_path: Path) -> N
         json.dumps({"steps": [{"state_file": state_file.name}]}),
         encoding="utf-8",
     )
-    (tmp_path / "policy_postprocessor.json").write_text(
-        json.dumps({"steps": []}), encoding="utf-8"
-    )
+    (tmp_path / "policy_postprocessor.json").write_text(json.dumps({"steps": []}), encoding="utf-8")
     before = _processor_artifact_fingerprint(tmp_path)
 
     state_file.write_bytes(b"second")
@@ -189,12 +270,8 @@ def test_processor_fingerprint_accepts_relative_checkpoint_path(
 ) -> None:
     checkpoint = tmp_path / "checkpoint"
     checkpoint.mkdir()
-    (checkpoint / "policy_preprocessor.json").write_text(
-        json.dumps({"steps": []}), encoding="utf-8"
-    )
-    (checkpoint / "policy_postprocessor.json").write_text(
-        json.dumps({"steps": []}), encoding="utf-8"
-    )
+    (checkpoint / "policy_preprocessor.json").write_text(json.dumps({"steps": []}), encoding="utf-8")
+    (checkpoint / "policy_postprocessor.json").write_text(json.dumps({"steps": []}), encoding="utf-8")
     monkeypatch.chdir(tmp_path)
 
     fingerprint = _processor_artifact_fingerprint(Path("checkpoint"))
@@ -202,9 +279,7 @@ def test_processor_fingerprint_accepts_relative_checkpoint_path(
     assert len(fingerprint) == 64
 
 
-def test_checkpoint_load_is_strict_about_missing_weights(
-    tiny_checkpoint: Path, tmp_path: Path
-) -> None:
+def test_checkpoint_load_is_strict_about_missing_weights(tiny_checkpoint: Path, tmp_path: Path) -> None:
     damaged = tmp_path / "damaged"
     shutil.copytree(tiny_checkpoint, damaged)
     weights_path = damaged / "model.safetensors"
@@ -216,9 +291,7 @@ def test_checkpoint_load_is_strict_about_missing_weights(
         CheckpointAdapter.load(damaged, device="cpu")
 
 
-def test_checkpoint_rejects_mismatched_processor_stats(
-    tiny_checkpoint: Path, tmp_path: Path
-) -> None:
+def test_checkpoint_rejects_mismatched_processor_stats(tiny_checkpoint: Path, tmp_path: Path) -> None:
     damaged = tmp_path / "processor_mismatch"
     shutil.copytree(tiny_checkpoint, damaged)
     config = json.loads((damaged / "policy_postprocessor.json").read_text(encoding="utf-8"))
@@ -232,24 +305,14 @@ def test_checkpoint_rejects_mismatched_processor_stats(
         CheckpointAdapter.load(damaged, device="cpu")
 
 
-def test_checkpoint_ignores_auxiliary_stat_shape_mismatch(
-    tiny_checkpoint: Path, tmp_path: Path
-) -> None:
+def test_checkpoint_ignores_auxiliary_stat_shape_mismatch(tiny_checkpoint: Path, tmp_path: Path) -> None:
     checkpoint = tmp_path / "auxiliary_stat_shape"
     shutil.copytree(tiny_checkpoint, checkpoint)
-    pre_config = json.loads(
-        (checkpoint / "policy_preprocessor.json").read_text(encoding="utf-8")
-    )
-    post_config = json.loads(
-        (checkpoint / "policy_postprocessor.json").read_text(encoding="utf-8")
-    )
-    pre_step = next(
-        step for step in pre_config["steps"] if step["registry_name"] == "normalizer_processor"
-    )
+    pre_config = json.loads((checkpoint / "policy_preprocessor.json").read_text(encoding="utf-8"))
+    post_config = json.loads((checkpoint / "policy_postprocessor.json").read_text(encoding="utf-8"))
+    pre_step = next(step for step in pre_config["steps"] if step["registry_name"] == "normalizer_processor")
     post_step = next(
-        step
-        for step in post_config["steps"]
-        if step["registry_name"] == "unnormalizer_processor"
+        step for step in post_config["steps"] if step["registry_name"] == "unnormalizer_processor"
     )
     pre_path = checkpoint / pre_step["state_file"]
     post_path = checkpoint / post_step["state_file"]
@@ -272,9 +335,7 @@ def test_checkpoint_rejects_mismatched_state_feature_descriptor(
     shutil.copytree(tiny_checkpoint, damaged)
     config_path = damaged / "policy_preprocessor.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
-    normalizer = next(
-        step for step in config["steps"] if step["registry_name"] == "normalizer_processor"
-    )
+    normalizer = next(step for step in config["steps"] if step["registry_name"] == "normalizer_processor")
     normalizer["config"]["features"]["observation.state"]["shape"] = [4]
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
@@ -289,9 +350,7 @@ def test_checkpoint_rejects_mismatched_state_normalization_mode(
     shutil.copytree(tiny_checkpoint, damaged)
     config_path = damaged / "policy_preprocessor.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
-    normalizer = next(
-        step for step in config["steps"] if step["registry_name"] == "normalizer_processor"
-    )
+    normalizer = next(step for step in config["steps"] if step["registry_name"] == "normalizer_processor")
     normalizer["config"]["norm_map"]["STATE"] = "MEAN_STD"
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
@@ -299,15 +358,11 @@ def test_checkpoint_rejects_mismatched_state_normalization_mode(
         CheckpointAdapter.load(damaged, device="cpu")
 
 
-def test_checkpoint_rejects_missing_state_normalization_stats(
-    tiny_checkpoint: Path, tmp_path: Path
-) -> None:
+def test_checkpoint_rejects_missing_state_normalization_stats(tiny_checkpoint: Path, tmp_path: Path) -> None:
     damaged = tmp_path / "missing_state_stats"
     shutil.copytree(tiny_checkpoint, damaged)
     config = json.loads((damaged / "policy_preprocessor.json").read_text(encoding="utf-8"))
-    normalizer = next(
-        step for step in config["steps"] if step["registry_name"] == "normalizer_processor"
-    )
+    normalizer = next(step for step in config["steps"] if step["registry_name"] == "normalizer_processor")
     state_path = damaged / normalizer["state_file"]
     stats = load_file(state_path)
     for key in tuple(stats):
@@ -326,9 +381,7 @@ def test_checkpoint_rejects_mismatched_postprocessor_action_type(
     shutil.copytree(tiny_checkpoint, damaged)
     config_path = damaged / "policy_postprocessor.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
-    unnormalizer = next(
-        step for step in config["steps"] if step["registry_name"] == "unnormalizer_processor"
-    )
+    unnormalizer = next(step for step in config["steps"] if step["registry_name"] == "unnormalizer_processor")
     unnormalizer["config"]["features"]["action"]["type"] = "STATE"
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
@@ -336,16 +389,12 @@ def test_checkpoint_rejects_mismatched_postprocessor_action_type(
         CheckpointAdapter.load(damaged, device="cpu")
 
 
-def test_checkpoint_rejects_extra_postprocessor_feature(
-    tiny_checkpoint: Path, tmp_path: Path
-) -> None:
+def test_checkpoint_rejects_extra_postprocessor_feature(tiny_checkpoint: Path, tmp_path: Path) -> None:
     damaged = tmp_path / "postprocessor_extra_feature"
     shutil.copytree(tiny_checkpoint, damaged)
     config_path = damaged / "policy_postprocessor.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
-    unnormalizer = next(
-        step for step in config["steps"] if step["registry_name"] == "unnormalizer_processor"
-    )
+    unnormalizer = next(step for step in config["steps"] if step["registry_name"] == "unnormalizer_processor")
     unnormalizer["config"]["features"]["extra"] = {"type": "STATE", "shape": [1]}
     config_path.write_text(json.dumps(config), encoding="utf-8")
 
@@ -360,9 +409,7 @@ def test_visual_stats_broadcast_for_observation_image_dot_key() -> None:
         n_action_steps=2,
         input_features={
             "observation.state": PolicyFeature(type=FeatureType.STATE, shape=(3,)),
-            "observation.image.front": PolicyFeature(
-                type=FeatureType.VISUAL, shape=(3, 8, 8)
-            ),
+            "observation.image.front": PolicyFeature(type=FeatureType.VISUAL, shape=(3, 8, 8)),
         },
         output_features={"action": PolicyFeature(type=FeatureType.ACTION, shape=(2,))},
         pretrained_backbone_weights=None,
@@ -404,9 +451,7 @@ def test_checkpoint_rejects_external_processor_state_before_loading(
     outside.write_bytes(b"must not be opened")
     config_path = damaged / "policy_preprocessor.json"
     config = json.loads(config_path.read_text(encoding="utf-8"))
-    normalizer = next(
-        step for step in config["steps"] if step["registry_name"] == "normalizer_processor"
-    )
+    normalizer = next(step for step in config["steps"] if step["registry_name"] == "normalizer_processor")
     normalizer["state_file"] = f"../{outside.name}"
     config_path.write_text(json.dumps(config), encoding="utf-8")
     processor_loaded = False
@@ -416,9 +461,7 @@ def test_checkpoint_rejects_external_processor_state_before_loading(
         processor_loaded = True
         raise AssertionError("processor loader must not run for an external state_file")
 
-    monkeypatch.setattr(
-        checkpoint_module, "make_pre_post_processors", unexpected_processor_load
-    )
+    monkeypatch.setattr(checkpoint_module, "make_pre_post_processors", unexpected_processor_load)
 
     with pytest.raises(ValueError, match="inside the checkpoint"):
         CheckpointAdapter.load(damaged, device="cpu")

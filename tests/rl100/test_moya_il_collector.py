@@ -14,6 +14,8 @@ from typing import Any
 import numpy as np
 import pytest
 
+pytest.importorskip("datasets", exc_type=ModuleNotFoundError)
+
 from RL.adapters.lerobot_v3 import (
     SUCCESS_MIN_FINAL_LIFT_HEIGHT as ADAPTER_LIFT_THRESHOLD,
     LeRobotV3DecisionDataset,
@@ -37,9 +39,7 @@ def states(*values: float, num_envs: int | None = None) -> np.ndarray:
         num_envs = len(values)
     if not values:
         values = (0.0,) * num_envs
-    return np.stack(
-        [np.full(39, value, dtype=np.float32) for value in values], axis=0
-    ).astype(np.float32)
+    return np.stack([np.full(39, value, dtype=np.float32) for value in values], axis=0).astype(np.float32)
 
 
 def actions(*values: float, num_envs: int | None = None) -> np.ndarray:
@@ -47,9 +47,7 @@ def actions(*values: float, num_envs: int | None = None) -> np.ndarray:
         num_envs = len(values)
     if not values:
         values = (0.0,) * num_envs
-    return np.stack(
-        [np.full(14, value, dtype=np.float32) for value in values], axis=0
-    ).astype(np.float32)
+    return np.stack([np.full(14, value, dtype=np.float32) for value in values], axis=0).astype(np.float32)
 
 
 def diagnostics(
@@ -138,9 +136,7 @@ def test_exact_fifteen_millimetres_is_success() -> None:
     assert episode.rewards[-1, 0] == 1.0
     assert not episode.truncated[-1, 0]
     assert terminal_success(episode.metadata)
-    assert pytest.approx(
-        float(np.float32(0.015)), abs=0.0
-    ) == ADAPTER_LIFT_THRESHOLD
+    assert pytest.approx(float(np.float32(0.015)), abs=0.0) == ADAPTER_LIFT_THRESHOLD
 
 
 def test_horizon_success_takes_precedence_over_truncation() -> None:
@@ -186,9 +182,7 @@ def test_recording_mask_is_a_low_index_tail_mask() -> None:
         recording_mask(4, 16),
         np.array([True, True, True, True] + [False] * 12, dtype=np.bool_),
     )
-    np.testing.assert_array_equal(
-        recording_mask(20, 16), np.ones(16, dtype=np.bool_)
-    )
+    np.testing.assert_array_equal(recording_mask(20, 16), np.ones(16, dtype=np.bool_))
     with pytest.raises(ValueError):
         recording_mask(0, 16)
     with pytest.raises(ValueError):
@@ -550,9 +544,7 @@ def test_publish_collection_round_trips_canonical_v3_without_video(tmp_path: Pat
     assert not (output / "dataset" / "images").exists()
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-    loaded = LeRobotDataset(
-        "local/moya-il-test", root=output / "dataset", download_videos=False
-    )
+    loaded = LeRobotDataset("local/moya-il-test", root=output / "dataset", download_videos=False)
     assert loaded.meta.info.codebase_version == "v3.0"
     assert loaded.num_episodes == 2
     assert tuple(loaded.features["observation.state"]["shape"]) == (39,)

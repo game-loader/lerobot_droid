@@ -214,7 +214,7 @@ def build_train_command(args: argparse.Namespace) -> list[str]:
         f"--num_workers={args.num_workers}",
         f"--save_freq={args.save_freq}",
         f"--log_freq={args.log_freq}",
-        f"--eval_freq={eval_every_steps}",
+        f"--env_eval_freq={eval_every_steps}",
         f"--eval.n_episodes={eval_episodes}",
         f"--eval.batch_size={eval_batch_size}",
         "--eval.use_async_envs=false",

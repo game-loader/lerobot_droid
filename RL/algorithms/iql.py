@@ -45,9 +45,7 @@ def _finite_float(name: str, value: float) -> float:
 class ActionPacker(nn.Module):
     """Pack active action dimensions and append the valid-step mask."""
 
-    def __init__(
-        self, *, action_dim: int, chunk_size: int, active_action_mask: Tensor
-    ) -> None:
+    def __init__(self, *, action_dim: int, chunk_size: int, active_action_mask: Tensor) -> None:
         super().__init__()
         _positive_int("action_dim", action_dim)
         _positive_int("chunk_size", chunk_size)
@@ -55,8 +53,7 @@ class ActionPacker(nn.Module):
             raise ValueError("active_action_mask must be a boolean torch.Tensor")
         if active_action_mask.shape != (action_dim,):
             raise ValueError(
-                f"active_action_mask must have shape {(action_dim,)}, "
-                f"got {tuple(active_action_mask.shape)}"
+                f"active_action_mask must have shape {(action_dim,)}, got {tuple(active_action_mask.shape)}"
             )
         if not active_action_mask.any().item():
             raise ValueError("active_action_mask must select at least one dimension")
@@ -86,8 +83,7 @@ class ActionPacker(nn.Module):
             raise ValueError("action_valid must be a boolean torch.Tensor")
         if action_valid.shape != action.shape[:2]:
             raise ValueError(
-                f"action_valid must have shape {tuple(action.shape[:2])}, "
-                f"got {tuple(action_valid.shape)}"
+                f"action_valid must have shape {tuple(action.shape[:2])}, got {tuple(action_valid.shape)}"
             )
         if not action_valid.any(dim=1).all().item():
             raise ValueError("action_valid must select at least one action step per batch item")
@@ -97,9 +93,7 @@ class ActionPacker(nn.Module):
 
         active = action.float().index_select(-1, self.active_indices.to(action.device))
         active = torch.where(action_valid.to(action.device).unsqueeze(-1), active, 0.0)
-        packed = torch.cat(
-            (active.flatten(start_dim=1), action_valid.to(action.device).float()), dim=-1
-        )
+        packed = torch.cat((active.flatten(start_dim=1), action_valid.to(action.device).float()), dim=-1)
         if not torch.isfinite(packed).all().item():
             raise ValueError("packed action contains non-finite values")
         return packed
@@ -121,9 +115,7 @@ class _MLP(nn.Module):
         return self.network(value)
 
 
-def expectile_loss(
-    residual: Tensor, *, expectile: float, reduction: str = "mean"
-) -> Tensor:
+def expectile_loss(residual: Tensor, *, expectile: float, reduction: str = "mean") -> Tensor:
     if not isinstance(residual, Tensor) or not residual.is_floating_point():
         raise ValueError("residual must be a floating-point torch.Tensor")
     if not torch.isfinite(residual).all().item():
@@ -142,17 +134,13 @@ def expectile_loss(
     raise ValueError(f"unsupported reduction={reduction!r}")
 
 
-def compute_td_target(
-    *, reward: Tensor, discount: Tensor, done: Tensor, next_value: Tensor
-) -> Tensor:
+def compute_td_target(*, reward: Tensor, discount: Tensor, done: Tensor, next_value: Tensor) -> Tensor:
     expected_shape = reward.shape
     for name, value in (("reward", reward), ("discount", discount), ("next_value", next_value)):
         if not isinstance(value, Tensor) or not value.is_floating_point():
             raise ValueError(f"{name} must be a floating-point torch.Tensor")
         if value.ndim != 2 or value.shape[-1] != 1 or value.shape != expected_shape:
-            raise ValueError(
-                f"{name} must have matching shape [batch,1], got {tuple(value.shape)}"
-            )
+            raise ValueError(f"{name} must have matching shape [batch,1], got {tuple(value.shape)}")
         if not torch.isfinite(value).all().item():
             raise ValueError(f"{name} must contain only finite values")
     if not isinstance(done, Tensor) or done.dtype != torch.bool or done.shape != expected_shape:
@@ -178,13 +166,9 @@ def _float_observation(observation: ObservationBatch, device: torch.device) -> O
 
 def _polyak_update(target: nn.Module, source: nn.Module, tau: float) -> None:
     with torch.no_grad():
-        for target_parameter, source_parameter in zip(
-            target.parameters(), source.parameters(), strict=True
-        ):
+        for target_parameter, source_parameter in zip(target.parameters(), source.parameters(), strict=True):
             target_parameter.lerp_(source_parameter, tau)
-        for target_buffer, source_buffer in zip(
-            target.buffers(), source.buffers(), strict=True
-        ):
+        for target_buffer, source_buffer in zip(target.buffers(), source.buffers(), strict=True):
             target_buffer.copy_(source_buffer)
 
 
@@ -195,9 +179,7 @@ def _require_finite_loss(name: str, loss: Tensor) -> None:
         raise ValueError(f"{name} must be finite before backward and optimizer step")
 
 
-def _clip_finite_gradients(
-    name: str, parameters: Sequence[nn.Parameter], max_norm: float
-) -> None:
+def _clip_finite_gradients(name: str, parameters: Sequence[nn.Parameter], max_norm: float) -> None:
     total_norm = torch.nn.utils.clip_grad_norm_(parameters, max_norm)
     if not torch.isfinite(total_norm).item():
         raise ValueError(f"{name} gradients must be finite before optimizer step")
@@ -219,10 +201,13 @@ class IQL(nn.Module):
         q_lr: float,
         v_lr: float,
         gradient_clip_norm: float = 10.0,
+        freeze_encoder: bool = False,
     ) -> None:
         super().__init__()
         if not isinstance(feature_encoder, ObservationFeatureEncoder):
             raise ValueError("feature_encoder must implement ObservationFeatureEncoder")
+        if not isinstance(freeze_encoder, bool):
+            raise ValueError("freeze_encoder must be a bool")
         self.expectile = _finite_float("expectile", expectile)
         if not 0 < self.expectile < 1:
             raise ValueError(f"expectile must be in (0, 1), got {self.expectile}")
@@ -236,6 +221,11 @@ class IQL(nn.Module):
         self.gradient_clip_norm = _finite_float("gradient_clip_norm", gradient_clip_norm)
         if self.gradient_clip_norm <= 0:
             raise ValueError("gradient_clip_norm must be positive")
+        self.freeze_encoder = freeze_encoder
+        if freeze_encoder:
+            feature_encoder.eval()
+            for parameter in feature_encoder.parameters():
+                parameter.requires_grad_(False)
 
         self.feature_encoder = feature_encoder
         self.target_encoder = copy.deepcopy(feature_encoder)
@@ -260,10 +250,10 @@ class IQL(nn.Module):
             *self.q1.parameters(),
             *self.q2.parameters(),
         ]
+        if self.freeze_encoder:
+            q_parameters = [*self.q1.parameters(), *self.q2.parameters()]
         v_parameters = list(self.value.parameters())
-        if {id(parameter) for parameter in q_parameters} & {
-            id(parameter) for parameter in v_parameters
-        }:
+        if {id(parameter) for parameter in q_parameters} & {id(parameter) for parameter in v_parameters}:
             raise ValueError("q_optimizer and v_optimizer parameters must be disjoint")
         self.q_optimizer = torch.optim.Adam(q_parameters, lr=q_lr)
         self.v_optimizer = torch.optim.Adam(v_parameters, lr=v_lr)
@@ -277,6 +267,8 @@ class IQL(nn.Module):
         self.target_encoder.eval()
         self.target_q1.eval()
         self.target_q2.eval()
+        if self.freeze_encoder:
+            self.feature_encoder.eval()
         return self
 
     def _q_input(self, features: Tensor, packed_action: Tensor) -> Tensor:
@@ -293,9 +285,7 @@ class IQL(nn.Module):
         with torch.no_grad():
             target_features = self.target_encoder(observation)
             target_q_input = self._q_input(target_features, packed_action)
-            q_bar = torch.minimum(
-                self.target_q1(target_q_input), self.target_q2(target_q_input)
-            )
+            q_bar = torch.minimum(self.target_q1(target_q_input), self.target_q2(target_q_input))
         value_prediction = self.value(target_features.detach())
         value_residual = q_bar - value_prediction
         value_loss = expectile_loss(value_residual, expectile=self.expectile)
@@ -313,14 +303,14 @@ class IQL(nn.Module):
         online_q_input = self._q_input(online_features, packed_action)
         q1_prediction = self.q1(online_q_input)
         q2_prediction = self.q2(online_q_input)
-        q_loss = functional.mse_loss(q1_prediction, td_target) + functional.mse_loss(
-            q2_prediction, td_target
-        )
+        q_loss = functional.mse_loss(q1_prediction, td_target) + functional.mse_loss(q2_prediction, td_target)
         q_parameters = [
             *self.feature_encoder.parameters(),
             *self.q1.parameters(),
             *self.q2.parameters(),
         ]
+        if self.freeze_encoder:
+            q_parameters = [*self.q1.parameters(), *self.q2.parameters()]
         value_parameters = list(self.value.parameters())
         _require_finite_loss("value_loss", value_loss)
         _require_finite_loss("q_loss", q_loss)
@@ -330,9 +320,7 @@ class IQL(nn.Module):
         try:
             value_loss.backward()
             q_loss.backward()
-            _clip_finite_gradients(
-                "value_loss", value_parameters, self.gradient_clip_norm
-            )
+            _clip_finite_gradients("value_loss", value_parameters, self.gradient_clip_norm)
             _clip_finite_gradients("q_loss", q_parameters, self.gradient_clip_norm)
         except Exception:
             self.v_optimizer.zero_grad(set_to_none=True)
@@ -371,9 +359,7 @@ class IQL(nn.Module):
         """
 
         prepared = _float_observation(observation, self.device)
-        packed_action = self.action_packer(
-            action.to(self.device), action_valid.to(self.device)
-        )
+        packed_action = self.action_packer(action.to(self.device), action_valid.to(self.device))
         features = self.feature_encoder(prepared)
         q_input = self._q_input(features, packed_action)
         result = torch.minimum(self.q1(q_input), self.q2(q_input))
@@ -393,6 +379,39 @@ class IQL(nn.Module):
         return self.q_value(observation, action, action_valid)
 
     @torch.no_grad()
+    def min_q_features(
+        self,
+        features: Tensor,
+        action: Tensor,
+        action_valid: Tensor,
+    ) -> Tensor:
+        """Evaluate min-Q from a precomputed observation feature latent.
+
+        RL-100's multimodal AM-Q rollout evolves encoded DP3 features rather
+        than raw point clouds/RGB.  This method keeps the IQL critic reusable
+        in that latent space while ``min_q`` continues to accept raw
+        :class:`ObservationBatch` inputs for ordinary training.
+        """
+
+        if not isinstance(features, Tensor) or features.ndim != 2:
+            raise ValueError(
+                f"features must have shape [batch,feature_dim], got {getattr(features, 'shape', None)}"
+            )
+        if features.shape[-1] != self.feature_encoder.output_dim:
+            raise ValueError(
+                "feature latent width disagrees with encoder: "
+                f"expected {self.feature_encoder.output_dim}, got {features.shape[-1]}"
+            )
+        if not features.is_floating_point() or not torch.isfinite(features).all().item():
+            raise ValueError("features must be finite floating-point values")
+        packed_action = self.action_packer(action.to(self.device), action_valid.to(self.device))
+        q_input = self._q_input(features.to(self.device), packed_action)
+        result = torch.minimum(self.q1(q_input), self.q2(q_input))
+        if result.ndim != 2 or result.shape[-1] != 1 or not torch.isfinite(result).all().item():
+            raise ValueError("IQL min_q_features must be finite with shape [batch,1]")
+        return result
+
+    @torch.no_grad()
     def advantage(
         self,
         observation: ObservationBatch,
@@ -408,9 +427,7 @@ class IQL(nn.Module):
         if eps <= 0:
             raise ValueError(f"eps must be positive, got {eps}")
         prepared = _float_observation(observation, self.device)
-        packed_action = self.action_packer(
-            action.to(self.device), action_valid.to(self.device)
-        )
+        packed_action = self.action_packer(action.to(self.device), action_valid.to(self.device))
         features = self.feature_encoder(prepared)
         q_input = self._q_input(features, packed_action)
         raw = torch.minimum(self.q1(q_input), self.q2(q_input)) - self.value(features)
