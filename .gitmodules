@@ -1,3 +1,7 @@
 [submodule "third_party/moya_newton_sim"]
 	path = third_party/moya_newton_sim
 	url = git@gitlab.com:game-loader/moya_newton.git
+[submodule "ara"]
+	path = ara
+	url = https://github.com/game-loader/lerobot_ara.git
+	branch = main
