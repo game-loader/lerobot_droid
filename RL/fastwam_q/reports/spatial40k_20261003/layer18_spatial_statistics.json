@@ -1,0 +1,1298 @@
+[
+  {
+    "sample_index": 0,
+    "task_index": 0,
+    "episode": 96,
+    "frame": 96,
+    "mode": "cls",
+    "layer": 18,
+    "camera": "head",
+    "view_attention_mass": 0.15335553884506226,
+    "top_patches": [
+      {
+        "row": 8,
+        "column": 6,
+        "attention_weight": 0.001565085374750197
+      },
+      {
+        "row": 8,
+        "column": 4,
+        "attention_weight": 0.0013319684658199549
+      },
+      {
+        "row": 9,
+        "column": 4,
+        "attention_weight": 0.0013309115311130881
+      }
+    ]
+  },
+  {
+    "sample_index": 0,
+    "task_index": 0,
+    "episode": 96,
+    "frame": 96,
+    "mode": "cls",
+    "layer": 18,
+    "camera": "wrist_left",
+    "view_attention_mass": 0.10229615122079849,
+    "top_patches": [
+      {
+        "row": 12,
+        "column": 4,
+        "attention_weight": 0.002925018547102809
+      },
+      {
+        "row": 11,
+        "column": 4,
+        "attention_weight": 0.0013652064371854067
+      },
+      {
+        "row": 2,
+        "column": 7,
+        "attention_weight": 0.001332135172560811
+      }
+    ]
+  },
+  {
+    "sample_index": 0,
+    "task_index": 0,
+    "episode": 96,
+    "frame": 96,
+    "mode": "cls",
+    "layer": 18,
+    "camera": "wrist_right",
+    "view_attention_mass": 0.17894530296325684,
+    "top_patches": [
+      {
+        "row": 13,
+        "column": 0,
+        "attention_weight": 0.003546780673786998
+      },
+      {
+        "row": 13,
+        "column": 1,
+        "attention_weight": 0.002382927108556032
+      },
+      {
+        "row": 9,
+        "column": 9,
+        "attention_weight": 0.002148405648767948
+      }
+    ]
+  },
+  {
+    "sample_index": 2,
+    "task_index": 1,
+    "episode": 207,
+    "frame": 442,
+    "mode": "cls",
+    "layer": 18,
+    "camera": "head",
+    "view_attention_mass": 0.09341493248939514,
+    "top_patches": [
+      {
+        "row": 4,
+        "column": 8,
+        "attention_weight": 0.0027381647378206253
+      },
+      {
+        "row": 6,
+        "column": 8,
+        "attention_weight": 0.0014511968474835157
+      },
+      {
+        "row": 11,
+        "column": 6,
+        "attention_weight": 0.001291066873818636
+      }
+    ]
+  },
+  {
+    "sample_index": 2,
+    "task_index": 1,
+    "episode": 207,
+    "frame": 442,
+    "mode": "cls",
+    "layer": 18,
+    "camera": "wrist_left",
+    "view_attention_mass": 0.30695903301239014,
+    "top_patches": [
+      {
+        "row": 6,
+        "column": 8,
+        "attention_weight": 0.009805710054934025
+      },
+      {
+        "row": 9,
+        "column": 12,
+        "attention_weight": 0.006660570856183767
+      },
+      {
+        "row": 1,
+        "column": 10,
+        "attention_weight": 0.005401212256401777
+      }
+    ]
+  },
+  {
+    "sample_index": 2,
+    "task_index": 1,
+    "episode": 207,
+    "frame": 442,
+    "mode": "cls",
+    "layer": 18,
+    "camera": "wrist_right",
+    "view_attention_mass": 0.07470820844173431,
+    "top_patches": [
+      {
+        "row": 4,
+        "column": 4,
+        "attention_weight": 0.0009811563650146127
+      },
+      {
+        "row": 0,
+        "column": 11,
+        "attention_weight": 0.0009109900565817952
+      },
+      {
+        "row": 1,
+        "column": 11,
+        "attention_weight": 0.0008422990213148296
+      }
+    ]
+  },
+  {
+    "sample_index": 4,
+    "task_index": 2,
+    "episode": 219,
+    "frame": 1303,
+    "mode": "cls",
+    "layer": 18,
+    "camera": "head",
+    "view_attention_mass": 0.14673472940921783,
+    "top_patches": [
+      {
+        "row": 6,
+        "column": 8,
+        "attention_weight": 0.022516237571835518
+      },
+      {
+        "row": 7,
+        "column": 8,
+        "attention_weight": 0.022098219022154808
+      },
+      {
+        "row": 5,
+        "column": 8,
+        "attention_weight": 0.005933841224759817
+      }
+    ]
+  },
+  {
+    "sample_index": 4,
+    "task_index": 2,
+    "episode": 219,
+    "frame": 1303,
+    "mode": "cls",
+    "layer": 18,
+    "camera": "wrist_left",
+    "view_attention_mass": 0.0508863627910614,
+    "top_patches": [
+      {
+        "row": 5,
+        "column": 13,
+        "attention_weight": 0.0006652965676039457
+      },
+      {
+        "row": 4,
+        "column": 13,
+        "attention_weight": 0.0005646178615279496
+      },
+      {
+        "row": 4,
+        "column": 12,
+        "attention_weight": 0.00055230304133147
+      }
+    ]
+  },
+  {
+    "sample_index": 4,
+    "task_index": 2,
+    "episode": 219,
+    "frame": 1303,
+    "mode": "cls",
+    "layer": 18,
+    "camera": "wrist_right",
+    "view_attention_mass": 0.32360321283340454,
+    "top_patches": [
+      {
+        "row": 8,
+        "column": 12,
+        "attention_weight": 0.003978502005338669
+      },
+      {
+        "row": 6,
+        "column": 10,
+        "attention_weight": 0.0035344273783266544
+      },
+      {
+        "row": 9,
+        "column": 12,
+        "attention_weight": 0.0034616754855960608
+      }
+    ]
+  },
+  {
+    "sample_index": 6,
+    "task_index": 3,
+    "episode": 412,
+    "frame": 341,
+    "mode": "cls",
+    "layer": 18,
+    "camera": "head",
+    "view_attention_mass": 0.10244685411453247,
+    "top_patches": [
+      {
+        "row": 5,
+        "column": 7,
+        "attention_weight": 0.0009737833752296865
+      },
+      {
+        "row": 5,
+        "column": 6,
+        "attention_weight": 0.0008619100553914905
+      },
+      {
+        "row": 1,
+        "column": 2,
+        "attention_weight": 0.0008039507083594799
+      }
+    ]
+  },
+  {
+    "sample_index": 6,
+    "task_index": 3,
+    "episode": 412,
+    "frame": 341,
+    "mode": "cls",
+    "layer": 18,
+    "camera": "wrist_left",
+    "view_attention_mass": 0.2372172772884369,
+    "top_patches": [
+      {
+        "row": 8,
+        "column": 3,
+        "attention_weight": 0.00344407232478261
+      },
+      {
+        "row": 6,
+        "column": 4,
+        "attention_weight": 0.0029740214813500643
+      },
+      {
+        "row": 7,
+        "column": 4,
+        "attention_weight": 0.002669090870767832
+      }
+    ]
+  },
+  {
+    "sample_index": 6,
+    "task_index": 3,
+    "episode": 412,
+    "frame": 341,
+    "mode": "cls",
+    "layer": 18,
+    "camera": "wrist_right",
+    "view_attention_mass": 0.06759541481733322,
+    "top_patches": [
+      {
+        "row": 2,
+        "column": 5,
+        "attention_weight": 0.001282260287553072
+      },
+      {
+        "row": 0,
+        "column": 7,
+        "attention_weight": 0.0010217232629656792
+      },
+      {
+        "row": 3,
+        "column": 2,
+        "attention_weight": 0.0009712595492601395
+      }
+    ]
+  },
+  {
+    "sample_index": 0,
+    "task_index": 0,
+    "episode": 96,
+    "frame": 96,
+    "mode": "valid_query_mean",
+    "layer": 18,
+    "camera": "head",
+    "view_attention_mass": 0.13031145930290222,
+    "top_patches": [
+      {
+        "row": 8,
+        "column": 6,
+        "attention_weight": 0.0013940944336354733
+      },
+      {
+        "row": 8,
+        "column": 4,
+        "attention_weight": 0.0011993716470897198
+      },
+      {
+        "row": 9,
+        "column": 4,
+        "attention_weight": 0.001160691026598215
+      }
+    ]
+  },
+  {
+    "sample_index": 0,
+    "task_index": 0,
+    "episode": 96,
+    "frame": 96,
+    "mode": "valid_query_mean",
+    "layer": 18,
+    "camera": "wrist_left",
+    "view_attention_mass": 0.10142278671264648,
+    "top_patches": [
+      {
+        "row": 12,
+        "column": 4,
+        "attention_weight": 0.003092861967161298
+      },
+      {
+        "row": 11,
+        "column": 4,
+        "attention_weight": 0.0012573733692988753
+      },
+      {
+        "row": 2,
+        "column": 7,
+        "attention_weight": 0.001217250362969935
+      }
+    ]
+  },
+  {
+    "sample_index": 0,
+    "task_index": 0,
+    "episode": 96,
+    "frame": 96,
+    "mode": "valid_query_mean",
+    "layer": 18,
+    "camera": "wrist_right",
+    "view_attention_mass": 0.19087442755699158,
+    "top_patches": [
+      {
+        "row": 13,
+        "column": 0,
+        "attention_weight": 0.003436299739405513
+      },
+      {
+        "row": 13,
+        "column": 1,
+        "attention_weight": 0.0024923149030655622
+      },
+      {
+        "row": 9,
+        "column": 9,
+        "attention_weight": 0.002191248582676053
+      }
+    ]
+  },
+  {
+    "sample_index": 2,
+    "task_index": 1,
+    "episode": 207,
+    "frame": 442,
+    "mode": "valid_query_mean",
+    "layer": 18,
+    "camera": "head",
+    "view_attention_mass": 0.14106525480747223,
+    "top_patches": [
+      {
+        "row": 4,
+        "column": 8,
+        "attention_weight": 0.030647778883576393
+      },
+      {
+        "row": 11,
+        "column": 6,
+        "attention_weight": 0.002623586682602763
+      },
+      {
+        "row": 6,
+        "column": 8,
+        "attention_weight": 0.002284768270328641
+      }
+    ]
+  },
+  {
+    "sample_index": 2,
+    "task_index": 1,
+    "episode": 207,
+    "frame": 442,
+    "mode": "valid_query_mean",
+    "layer": 18,
+    "camera": "wrist_left",
+    "view_attention_mass": 0.3079766035079956,
+    "top_patches": [
+      {
+        "row": 6,
+        "column": 8,
+        "attention_weight": 0.012760638259351254
+      },
+      {
+        "row": 8,
+        "column": 10,
+        "attention_weight": 0.007445393595844507
+      },
+      {
+        "row": 9,
+        "column": 7,
+        "attention_weight": 0.005059670191258192
+      }
+    ]
+  },
+  {
+    "sample_index": 2,
+    "task_index": 1,
+    "episode": 207,
+    "frame": 442,
+    "mode": "valid_query_mean",
+    "layer": 18,
+    "camera": "wrist_right",
+    "view_attention_mass": 0.10682810842990875,
+    "top_patches": [
+      {
+        "row": 5,
+        "column": 10,
+        "attention_weight": 0.0011921030236408114
+      },
+      {
+        "row": 6,
+        "column": 10,
+        "attention_weight": 0.0011637236457318068
+      },
+      {
+        "row": 8,
+        "column": 11,
+        "attention_weight": 0.0011613033711910248
+      }
+    ]
+  },
+  {
+    "sample_index": 4,
+    "task_index": 2,
+    "episode": 219,
+    "frame": 1303,
+    "mode": "valid_query_mean",
+    "layer": 18,
+    "camera": "head",
+    "view_attention_mass": 0.12268437445163727,
+    "top_patches": [
+      {
+        "row": 6,
+        "column": 8,
+        "attention_weight": 0.021876929327845573
+      },
+      {
+        "row": 7,
+        "column": 8,
+        "attention_weight": 0.021550992503762245
+      },
+      {
+        "row": 5,
+        "column": 8,
+        "attention_weight": 0.005419416818767786
+      }
+    ]
+  },
+  {
+    "sample_index": 4,
+    "task_index": 2,
+    "episode": 219,
+    "frame": 1303,
+    "mode": "valid_query_mean",
+    "layer": 18,
+    "camera": "wrist_left",
+    "view_attention_mass": 0.10368333011865616,
+    "top_patches": [
+      {
+        "row": 5,
+        "column": 0,
+        "attention_weight": 0.000924756343010813
+      },
+      {
+        "row": 5,
+        "column": 13,
+        "attention_weight": 0.0009131922852247953
+      },
+      {
+        "row": 4,
+        "column": 12,
+        "attention_weight": 0.0008738071192055941
+      }
+    ]
+  },
+  {
+    "sample_index": 4,
+    "task_index": 2,
+    "episode": 219,
+    "frame": 1303,
+    "mode": "valid_query_mean",
+    "layer": 18,
+    "camera": "wrist_right",
+    "view_attention_mass": 0.28937333822250366,
+    "top_patches": [
+      {
+        "row": 8,
+        "column": 12,
+        "attention_weight": 0.0038259776774793863
+      },
+      {
+        "row": 6,
+        "column": 10,
+        "attention_weight": 0.003317616181448102
+      },
+      {
+        "row": 9,
+        "column": 12,
+        "attention_weight": 0.0032914518378674984
+      }
+    ]
+  },
+  {
+    "sample_index": 6,
+    "task_index": 3,
+    "episode": 412,
+    "frame": 341,
+    "mode": "valid_query_mean",
+    "layer": 18,
+    "camera": "head",
+    "view_attention_mass": 0.09775985777378082,
+    "top_patches": [
+      {
+        "row": 1,
+        "column": 2,
+        "attention_weight": 0.000720309792086482
+      },
+      {
+        "row": 5,
+        "column": 1,
+        "attention_weight": 0.0007061684154905379
+      },
+      {
+        "row": 5,
+        "column": 7,
+        "attention_weight": 0.0007002849597483873
+      }
+    ]
+  },
+  {
+    "sample_index": 6,
+    "task_index": 3,
+    "episode": 412,
+    "frame": 341,
+    "mode": "valid_query_mean",
+    "layer": 18,
+    "camera": "wrist_left",
+    "view_attention_mass": 0.2922515273094177,
+    "top_patches": [
+      {
+        "row": 8,
+        "column": 3,
+        "attention_weight": 0.003550705499947071
+      },
+      {
+        "row": 6,
+        "column": 4,
+        "attention_weight": 0.0031202896498143673
+      },
+      {
+        "row": 10,
+        "column": 2,
+        "attention_weight": 0.002828306285664439
+      }
+    ]
+  },
+  {
+    "sample_index": 6,
+    "task_index": 3,
+    "episode": 412,
+    "frame": 341,
+    "mode": "valid_query_mean",
+    "layer": 18,
+    "camera": "wrist_right",
+    "view_attention_mass": 0.04946301877498627,
+    "top_patches": [
+      {
+        "row": 2,
+        "column": 5,
+        "attention_weight": 0.0004527292330749333
+      },
+      {
+        "row": 13,
+        "column": 0,
+        "attention_weight": 0.0004205414152238518
+      },
+      {
+        "row": 0,
+        "column": 7,
+        "attention_weight": 0.0004123870749026537
+      }
+    ]
+  },
+  {
+    "sample_index": 1,
+    "task_index": 0,
+    "episode": 40,
+    "frame": 65,
+    "mode": "cls",
+    "layer": 18,
+    "camera": "head",
+    "view_attention_mass": 0.1002754420042038,
+    "top_patches": [
+      {
+        "row": 4,
+        "column": 0,
+        "attention_weight": 0.0008245944045484066
+      },
+      {
+        "row": 5,
+        "column": 0,
+        "attention_weight": 0.0008050415199249983
+      },
+      {
+        "row": 6,
+        "column": 1,
+        "attention_weight": 0.0007410051766782999
+      }
+    ]
+  },
+  {
+    "sample_index": 1,
+    "task_index": 0,
+    "episode": 40,
+    "frame": 65,
+    "mode": "cls",
+    "layer": 18,
+    "camera": "wrist_left",
+    "view_attention_mass": 0.13871344923973083,
+    "top_patches": [
+      {
+        "row": 13,
+        "column": 2,
+        "attention_weight": 0.002247435739263892
+      },
+      {
+        "row": 12,
+        "column": 13,
+        "attention_weight": 0.0020404942333698273
+      },
+      {
+        "row": 12,
+        "column": 12,
+        "attention_weight": 0.0017394826281815767
+      }
+    ]
+  },
+  {
+    "sample_index": 1,
+    "task_index": 0,
+    "episode": 40,
+    "frame": 65,
+    "mode": "cls",
+    "layer": 18,
+    "camera": "wrist_right",
+    "view_attention_mass": 0.22522686421871185,
+    "top_patches": [
+      {
+        "row": 4,
+        "column": 8,
+        "attention_weight": 0.00586545467376709
+      },
+      {
+        "row": 2,
+        "column": 9,
+        "attention_weight": 0.004084642045199871
+      },
+      {
+        "row": 3,
+        "column": 8,
+        "attention_weight": 0.003869311884045601
+      }
+    ]
+  },
+  {
+    "sample_index": 3,
+    "task_index": 1,
+    "episode": 115,
+    "frame": 195,
+    "mode": "cls",
+    "layer": 18,
+    "camera": "head",
+    "view_attention_mass": 0.19662031531333923,
+    "top_patches": [
+      {
+        "row": 6,
+        "column": 8,
+        "attention_weight": 0.023066407069563866
+      },
+      {
+        "row": 7,
+        "column": 8,
+        "attention_weight": 0.02289021760225296
+      },
+      {
+        "row": 7,
+        "column": 7,
+        "attention_weight": 0.012158028781414032
+      }
+    ]
+  },
+  {
+    "sample_index": 3,
+    "task_index": 1,
+    "episode": 115,
+    "frame": 195,
+    "mode": "cls",
+    "layer": 18,
+    "camera": "wrist_left",
+    "view_attention_mass": 0.33907395601272583,
+    "top_patches": [
+      {
+        "row": 11,
+        "column": 9,
+        "attention_weight": 0.01214089896529913
+      },
+      {
+        "row": 10,
+        "column": 9,
+        "attention_weight": 0.010920044034719467
+      },
+      {
+        "row": 9,
+        "column": 9,
+        "attention_weight": 0.01028817892074585
+      }
+    ]
+  },
+  {
+    "sample_index": 3,
+    "task_index": 1,
+    "episode": 115,
+    "frame": 195,
+    "mode": "cls",
+    "layer": 18,
+    "camera": "wrist_right",
+    "view_attention_mass": 0.18541103601455688,
+    "top_patches": [
+      {
+        "row": 11,
+        "column": 5,
+        "attention_weight": 0.0034341784194111824
+      },
+      {
+        "row": 8,
+        "column": 7,
+        "attention_weight": 0.0024047712795436382
+      },
+      {
+        "row": 8,
+        "column": 10,
+        "attention_weight": 0.002247507916763425
+      }
+    ]
+  },
+  {
+    "sample_index": 5,
+    "task_index": 2,
+    "episode": 250,
+    "frame": 647,
+    "mode": "cls",
+    "layer": 18,
+    "camera": "head",
+    "view_attention_mass": 0.19321541488170624,
+    "top_patches": [
+      {
+        "row": 6,
+        "column": 8,
+        "attention_weight": 0.03498907759785652
+      },
+      {
+        "row": 6,
+        "column": 9,
+        "attention_weight": 0.013314994052052498
+      },
+      {
+        "row": 7,
+        "column": 8,
+        "attention_weight": 0.012156287208199501
+      }
+    ]
+  },
+  {
+    "sample_index": 5,
+    "task_index": 2,
+    "episode": 250,
+    "frame": 647,
+    "mode": "cls",
+    "layer": 18,
+    "camera": "wrist_left",
+    "view_attention_mass": 0.08903220295906067,
+    "top_patches": [
+      {
+        "row": 4,
+        "column": 0,
+        "attention_weight": 0.002226044423878193
+      },
+      {
+        "row": 3,
+        "column": 0,
+        "attention_weight": 0.0018970321398228407
+      },
+      {
+        "row": 5,
+        "column": 0,
+        "attention_weight": 0.001848667161539197
+      }
+    ]
+  },
+  {
+    "sample_index": 5,
+    "task_index": 2,
+    "episode": 250,
+    "frame": 647,
+    "mode": "cls",
+    "layer": 18,
+    "camera": "wrist_right",
+    "view_attention_mass": 0.2071915566921234,
+    "top_patches": [
+      {
+        "row": 0,
+        "column": 1,
+        "attention_weight": 0.007823295891284943
+      },
+      {
+        "row": 0,
+        "column": 0,
+        "attention_weight": 0.004603961948305368
+      },
+      {
+        "row": 1,
+        "column": 8,
+        "attention_weight": 0.0043345424346625805
+      }
+    ]
+  },
+  {
+    "sample_index": 7,
+    "task_index": 3,
+    "episode": 335,
+    "frame": 367,
+    "mode": "cls",
+    "layer": 18,
+    "camera": "head",
+    "view_attention_mass": 0.024230804294347763,
+    "top_patches": [
+      {
+        "row": 6,
+        "column": 3,
+        "attention_weight": 0.005888671614229679
+      },
+      {
+        "row": 7,
+        "column": 3,
+        "attention_weight": 0.005069570150226355
+      },
+      {
+        "row": 8,
+        "column": 3,
+        "attention_weight": 0.004684833809733391
+      }
+    ]
+  },
+  {
+    "sample_index": 7,
+    "task_index": 3,
+    "episode": 335,
+    "frame": 367,
+    "mode": "cls",
+    "layer": 18,
+    "camera": "wrist_left",
+    "view_attention_mass": 0.23147697746753693,
+    "top_patches": [
+      {
+        "row": 7,
+        "column": 8,
+        "attention_weight": 0.0019176745554432273
+      },
+      {
+        "row": 6,
+        "column": 8,
+        "attention_weight": 0.0018704512622207403
+      },
+      {
+        "row": 1,
+        "column": 9,
+        "attention_weight": 0.001745203509926796
+      }
+    ]
+  },
+  {
+    "sample_index": 7,
+    "task_index": 3,
+    "episode": 335,
+    "frame": 367,
+    "mode": "cls",
+    "layer": 18,
+    "camera": "wrist_right",
+    "view_attention_mass": 0.07432829588651657,
+    "top_patches": [
+      {
+        "row": 10,
+        "column": 1,
+        "attention_weight": 0.005323507357388735
+      },
+      {
+        "row": 11,
+        "column": 1,
+        "attention_weight": 0.004262828733772039
+      },
+      {
+        "row": 11,
+        "column": 2,
+        "attention_weight": 0.003824728773906827
+      }
+    ]
+  },
+  {
+    "sample_index": 1,
+    "task_index": 0,
+    "episode": 40,
+    "frame": 65,
+    "mode": "valid_query_mean",
+    "layer": 18,
+    "camera": "head",
+    "view_attention_mass": 0.09037484228610992,
+    "top_patches": [
+      {
+        "row": 4,
+        "column": 0,
+        "attention_weight": 0.0007830588147044182
+      },
+      {
+        "row": 5,
+        "column": 0,
+        "attention_weight": 0.0007445333758369088
+      },
+      {
+        "row": 5,
+        "column": 1,
+        "attention_weight": 0.0006960438331589103
+      }
+    ]
+  },
+  {
+    "sample_index": 1,
+    "task_index": 0,
+    "episode": 40,
+    "frame": 65,
+    "mode": "valid_query_mean",
+    "layer": 18,
+    "camera": "wrist_left",
+    "view_attention_mass": 0.15521197021007538,
+    "top_patches": [
+      {
+        "row": 13,
+        "column": 2,
+        "attention_weight": 0.0021414579823613167
+      },
+      {
+        "row": 12,
+        "column": 13,
+        "attention_weight": 0.0020244959741830826
+      },
+      {
+        "row": 12,
+        "column": 12,
+        "attention_weight": 0.001739129307679832
+      }
+    ]
+  },
+  {
+    "sample_index": 1,
+    "task_index": 0,
+    "episode": 40,
+    "frame": 65,
+    "mode": "valid_query_mean",
+    "layer": 18,
+    "camera": "wrist_right",
+    "view_attention_mass": 0.21694833040237427,
+    "top_patches": [
+      {
+        "row": 4,
+        "column": 8,
+        "attention_weight": 0.005871050991117954
+      },
+      {
+        "row": 2,
+        "column": 9,
+        "attention_weight": 0.004126309882849455
+      },
+      {
+        "row": 3,
+        "column": 8,
+        "attention_weight": 0.003974285442382097
+      }
+    ]
+  },
+  {
+    "sample_index": 3,
+    "task_index": 1,
+    "episode": 115,
+    "frame": 195,
+    "mode": "valid_query_mean",
+    "layer": 18,
+    "camera": "head",
+    "view_attention_mass": 0.22119338810443878,
+    "top_patches": [
+      {
+        "row": 7,
+        "column": 8,
+        "attention_weight": 0.023748347535729408
+      },
+      {
+        "row": 6,
+        "column": 8,
+        "attention_weight": 0.021772855892777443
+      },
+      {
+        "row": 7,
+        "column": 7,
+        "attention_weight": 0.012517391704022884
+      }
+    ]
+  },
+  {
+    "sample_index": 3,
+    "task_index": 1,
+    "episode": 115,
+    "frame": 195,
+    "mode": "valid_query_mean",
+    "layer": 18,
+    "camera": "wrist_left",
+    "view_attention_mass": 0.3723782002925873,
+    "top_patches": [
+      {
+        "row": 11,
+        "column": 9,
+        "attention_weight": 0.01067691296339035
+      },
+      {
+        "row": 10,
+        "column": 9,
+        "attention_weight": 0.009921696968376637
+      },
+      {
+        "row": 9,
+        "column": 9,
+        "attention_weight": 0.009614700451493263
+      }
+    ]
+  },
+  {
+    "sample_index": 3,
+    "task_index": 1,
+    "episode": 115,
+    "frame": 195,
+    "mode": "valid_query_mean",
+    "layer": 18,
+    "camera": "wrist_right",
+    "view_attention_mass": 0.1562037169933319,
+    "top_patches": [
+      {
+        "row": 11,
+        "column": 5,
+        "attention_weight": 0.002300602151080966
+      },
+      {
+        "row": 8,
+        "column": 10,
+        "attention_weight": 0.002086260123178363
+      },
+      {
+        "row": 8,
+        "column": 12,
+        "attention_weight": 0.00205945479683578
+      }
+    ]
+  },
+  {
+    "sample_index": 5,
+    "task_index": 2,
+    "episode": 250,
+    "frame": 647,
+    "mode": "valid_query_mean",
+    "layer": 18,
+    "camera": "head",
+    "view_attention_mass": 0.1723444163799286,
+    "top_patches": [
+      {
+        "row": 6,
+        "column": 8,
+        "attention_weight": 0.025702305138111115
+      },
+      {
+        "row": 7,
+        "column": 8,
+        "attention_weight": 0.010079964995384216
+      },
+      {
+        "row": 6,
+        "column": 9,
+        "attention_weight": 0.009788709692656994
+      }
+    ]
+  },
+  {
+    "sample_index": 5,
+    "task_index": 2,
+    "episode": 250,
+    "frame": 647,
+    "mode": "valid_query_mean",
+    "layer": 18,
+    "camera": "wrist_left",
+    "view_attention_mass": 0.11788398027420044,
+    "top_patches": [
+      {
+        "row": 4,
+        "column": 0,
+        "attention_weight": 0.0025354279205203056
+      },
+      {
+        "row": 5,
+        "column": 0,
+        "attention_weight": 0.002155604772269726
+      },
+      {
+        "row": 3,
+        "column": 0,
+        "attention_weight": 0.002073136158287525
+      }
+    ]
+  },
+  {
+    "sample_index": 5,
+    "task_index": 2,
+    "episode": 250,
+    "frame": 647,
+    "mode": "valid_query_mean",
+    "layer": 18,
+    "camera": "wrist_right",
+    "view_attention_mass": 0.20379863679409027,
+    "top_patches": [
+      {
+        "row": 0,
+        "column": 1,
+        "attention_weight": 0.00808113906532526
+      },
+      {
+        "row": 0,
+        "column": 0,
+        "attention_weight": 0.004896300379186869
+      },
+      {
+        "row": 1,
+        "column": 2,
+        "attention_weight": 0.004471474792808294
+      }
+    ]
+  },
+  {
+    "sample_index": 7,
+    "task_index": 3,
+    "episode": 335,
+    "frame": 367,
+    "mode": "valid_query_mean",
+    "layer": 18,
+    "camera": "head",
+    "view_attention_mass": 0.04265403375029564,
+    "top_patches": [
+      {
+        "row": 7,
+        "column": 3,
+        "attention_weight": 0.01033820305019617
+      },
+      {
+        "row": 6,
+        "column": 3,
+        "attention_weight": 0.010124626569449902
+      },
+      {
+        "row": 8,
+        "column": 3,
+        "attention_weight": 0.008969124406576157
+      }
+    ]
+  },
+  {
+    "sample_index": 7,
+    "task_index": 3,
+    "episode": 335,
+    "frame": 367,
+    "mode": "valid_query_mean",
+    "layer": 18,
+    "camera": "wrist_left",
+    "view_attention_mass": 0.25544577836990356,
+    "top_patches": [
+      {
+        "row": 6,
+        "column": 8,
+        "attention_weight": 0.0022743521258234978
+      },
+      {
+        "row": 7,
+        "column": 8,
+        "attention_weight": 0.002112581627443433
+      },
+      {
+        "row": 8,
+        "column": 3,
+        "attention_weight": 0.002025826834142208
+      }
+    ]
+  },
+  {
+    "sample_index": 7,
+    "task_index": 3,
+    "episode": 335,
+    "frame": 367,
+    "mode": "valid_query_mean",
+    "layer": 18,
+    "camera": "wrist_right",
+    "view_attention_mass": 0.04063522070646286,
+    "top_patches": [
+      {
+        "row": 10,
+        "column": 13,
+        "attention_weight": 0.0019311303040012717
+      },
+      {
+        "row": 11,
+        "column": 13,
+        "attention_weight": 0.001453145407140255
+      },
+      {
+        "row": 10,
+        "column": 1,
+        "attention_weight": 0.0010014805011451244
+      }
+    ]
+  }
+]

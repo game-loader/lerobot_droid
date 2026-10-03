@@ -1,0 +1,229 @@
+{
+  "checkpoint": "/data/workspace/droid_fastwam_q_20260930/production_qknorm_40k_20261002_1455/run/step_040000",
+  "sampling_plan": "/data/workspace/droid_fastwam_q_20260930/stability_20260930/plan",
+  "sampling_update": 2030,
+  "mode": "eval, BF16 forward; FP32 pre-dropout attention recomputation; no optimizer/backward",
+  "selection": "first two distinct episodes per task in fixed plan batch, not chosen by attention pattern",
+  "layers": [
+    1,
+    6,
+    12,
+    17,
+    18
+  ],
+  "attention_calls": 36,
+  "text_slots": 34,
+  "patch_grid": [
+    14,
+    14
+  ],
+  "camera_keys": [
+    "observation.images.head",
+    "observation.images.wrist_left",
+    "observation.images.wrist_right"
+  ],
+  "examples": [
+    {
+      "task_index": 0,
+      "task": "Open the drawer, pick up the white charger and place it inside the drawer, then close the drawer.",
+      "example": 0,
+      "batch_index": 0,
+      "dataset_index": 90315,
+      "row": 90315,
+      "episode": 96,
+      "frame": 96,
+      "images": [
+        {
+          "camera": "observation.images.head",
+          "file": "sample_00_view0.png"
+        },
+        {
+          "camera": "observation.images.wrist_left",
+          "file": "sample_00_view1.png"
+        },
+        {
+          "camera": "observation.images.wrist_right",
+          "file": "sample_00_view2.png"
+        }
+      ],
+      "q_value": 0.001445229398086667
+    },
+    {
+      "task_index": 0,
+      "task": "Open the drawer, pick up the white charger and place it inside the drawer, then close the drawer.",
+      "example": 1,
+      "batch_index": 3,
+      "dataset_index": 43984,
+      "row": 43984,
+      "episode": 40,
+      "frame": 65,
+      "images": [
+        {
+          "camera": "observation.images.head",
+          "file": "sample_01_view0.png"
+        },
+        {
+          "camera": "observation.images.wrist_left",
+          "file": "sample_01_view1.png"
+        },
+        {
+          "camera": "observation.images.wrist_right",
+          "file": "sample_01_view2.png"
+        }
+      ],
+      "q_value": 0.0007998551009222865
+    },
+    {
+      "task_index": 1,
+      "task": "Stack the three bowls together.",
+      "example": 0,
+      "batch_index": 6,
+      "dataset_index": 144580,
+      "row": 144580,
+      "episode": 207,
+      "frame": 442,
+      "images": [
+        {
+          "camera": "observation.images.head",
+          "file": "sample_02_view0.png"
+        },
+        {
+          "camera": "observation.images.wrist_left",
+          "file": "sample_02_view1.png"
+        },
+        {
+          "camera": "observation.images.wrist_right",
+          "file": "sample_02_view2.png"
+        }
+      ],
+      "q_value": 0.4891517162322998
+    },
+    {
+      "task_index": 1,
+      "task": "Stack the three bowls together.",
+      "example": 1,
+      "batch_index": 31,
+      "dataset_index": 105076,
+      "row": 105076,
+      "episode": 115,
+      "frame": 195,
+      "images": [
+        {
+          "camera": "observation.images.head",
+          "file": "sample_03_view0.png"
+        },
+        {
+          "camera": "observation.images.wrist_left",
+          "file": "sample_03_view1.png"
+        },
+        {
+          "camera": "observation.images.wrist_right",
+          "file": "sample_03_view2.png"
+        }
+      ],
+      "q_value": 0.19620269536972046
+    },
+    {
+      "task_index": 2,
+      "task": "Fold the towel.",
+      "example": 0,
+      "batch_index": 2,
+      "dataset_index": 164430,
+      "row": 164430,
+      "episode": 219,
+      "frame": 1303,
+      "images": [
+        {
+          "camera": "observation.images.head",
+          "file": "sample_04_view0.png"
+        },
+        {
+          "camera": "observation.images.wrist_left",
+          "file": "sample_04_view1.png"
+        },
+        {
+          "camera": "observation.images.wrist_right",
+          "file": "sample_04_view2.png"
+        }
+      ],
+      "q_value": 0.0008086906746029854
+    },
+    {
+      "task_index": 2,
+      "task": "Fold the towel.",
+      "example": 1,
+      "batch_index": 4,
+      "dataset_index": 222731,
+      "row": 222731,
+      "episode": 250,
+      "frame": 647,
+      "images": [
+        {
+          "camera": "observation.images.head",
+          "file": "sample_05_view0.png"
+        },
+        {
+          "camera": "observation.images.wrist_left",
+          "file": "sample_05_view1.png"
+        },
+        {
+          "camera": "observation.images.wrist_right",
+          "file": "sample_05_view2.png"
+        }
+      ],
+      "q_value": 0.001290905405767262
+    },
+    {
+      "task_index": 3,
+      "task": "Use the left arm to place the square head into the yellow box on the left, and the right arm to place the screw into the green box on the right.",
+      "example": 0,
+      "batch_index": 1,
+      "dataset_index": 341244,
+      "row": 341244,
+      "episode": 412,
+      "frame": 341,
+      "images": [
+        {
+          "camera": "observation.images.head",
+          "file": "sample_06_view0.png"
+        },
+        {
+          "camera": "observation.images.wrist_left",
+          "file": "sample_06_view1.png"
+        },
+        {
+          "camera": "observation.images.wrist_right",
+          "file": "sample_06_view2.png"
+        }
+      ],
+      "q_value": 0.33941590785980225
+    },
+    {
+      "task_index": 3,
+      "task": "Use the left arm to place the square head into the yellow box on the left, and the right arm to place the screw into the green box on the right.",
+      "example": 1,
+      "batch_index": 5,
+      "dataset_index": 310095,
+      "row": 310095,
+      "episode": 335,
+      "frame": 367,
+      "images": [
+        {
+          "camera": "observation.images.head",
+          "file": "sample_07_view0.png"
+        },
+        {
+          "camera": "observation.images.wrist_left",
+          "file": "sample_07_view1.png"
+        },
+        {
+          "camera": "observation.images.wrist_right",
+          "file": "sample_07_view2.png"
+        }
+      ],
+      "q_value": 0.5661836266517639
+    }
+  ],
+  "coordinate_mapping": "image resized without crop to 224x224; 14x14 patch cell stretched back to native RGB",
+  "limitations": "attention probability, not causal Q attribution; examples from training pool; CLS differs from all-query mean"
+}

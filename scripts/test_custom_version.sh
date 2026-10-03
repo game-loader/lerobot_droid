@@ -8,6 +8,8 @@ exec uv run --no-sync pytest \
   tests/rl100 \
   tests/policies/test_dp3.py tests/policies/test_diffusion_state_only.py \
   tests/policies/imf_attnres tests/processor/test_imf_attnres_processor.py \
+  tests/policies/lpwm_imf tests/policies/lpwm_fm tests/scripts/test_lpwm_ab_data.py \
+  tests/scripts/test_lpwm_ab_eval.py tests/scripts/test_lpwm_ab_watch_eval.py \
   tests/envs/test_moya_newton.py \
   tests/scripts/test_lerobot_eval_rendering.py \
   tests/scripts/test_custom_train_integration.py \

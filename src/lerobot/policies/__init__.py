@@ -25,6 +25,8 @@ from .gaussian_actor.configuration_gaussian_actor import GaussianActorConfig as 
 from .groot.configuration_groot import GrootConfig as GrootConfig
 from .imf_attnres.configuration_imf_attnres import IMFAttnResConfig as IMFAttnResConfig
 from .lingbot_va.configuration_lingbot_va import LingBotVAConfig as LingBotVAConfig
+from .lpwm_fm.configuration_lpwm_fm import LPWMFMConfig as LPWMFMConfig
+from .lpwm_imf.configuration_lpwm_imf import LPWMIMFConfig as LPWMIMFConfig
 from .molmoact2.configuration_molmoact2 import MolmoAct2Config as MolmoAct2Config
 from .multi_task_dit.configuration_multi_task_dit import MultiTaskDiTConfig as MultiTaskDiTConfig
 from .pi0.configuration_pi0 import PI0Config as PI0Config
@@ -55,6 +57,8 @@ __all__ = [
     "GrootConfig",
     "IMFAttnResConfig",
     "LingBotVAConfig",
+    "LPWMFMConfig",
+    "LPWMIMFConfig",
     "MolmoAct2Config",
     "MultiTaskDiTConfig",
     "PI0Config",

@@ -16,6 +16,14 @@ through that same frozen VLM for AM-Q. See
 checkpoint/resume semantics, and limitations. The historical
 `RL.cli.train_offline` command below remains Diffusion/DP3-only.
 
+## FastWAM Q-Planning
+
+`RL/fastwam_q` provides a separate DINOv3 action-chunk critic and Q-guided planner
+for **frozen FastWAM**. Train with `uv run python -m RL.cli.train_fastwam_q`;
+it does not update the BC actor or use the historical PPO/AM-Q trainer. See
+[`fastwam_q/README.md`](fastwam_q/README.md) for replay, checkpoints, deployment,
+and measured Q-only memory usage.
+
 ## Scope
 
 - State-only critics and dynamics use `observation.state`; DP3 instead uses a

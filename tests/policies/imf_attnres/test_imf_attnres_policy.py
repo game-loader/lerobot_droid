@@ -619,6 +619,7 @@ def test_imf_attnres_jvp_fallback_keeps_primal_output_differentiable(monkeypatch
     import lerobot.policies.imf_attnres.modeling_imf_attnres as modeling_imf_attnres
 
     config = make_tiny_imf_attnres_config()
+    config.jvp_backend = "auto"
     model = IMFAttnResModel(config)
     batch = make_libero_like_batch()
     batch[OBS_IMAGES] = torch.stack([batch.pop(key) for key in IMAGE_KEYS], dim=2)
@@ -635,6 +636,29 @@ def test_imf_attnres_jvp_fallback_keeps_primal_output_differentiable(monkeypatch
     assert any(parameter.grad is not None for parameter in model.head.parameters())
 
 
+def test_imf_attnres_strict_torch_func_jvp_reports_original_error(monkeypatch):
+    """Strict runs must surface the torch.func.jvp failure instead of silently falling back."""
+    import lerobot.policies.imf_attnres.modeling_imf_attnres as modeling_imf_attnres
+
+    config = make_tiny_imf_attnres_config()
+    config.jvp_backend = "torch_func"
+    model = IMFAttnResModel(config)
+    batch = make_libero_like_batch()
+    batch[OBS_IMAGES] = torch.stack([batch.pop(key) for key in IMAGE_KEYS], dim=2)
+
+    def failing_jvp(*args, **kwargs):
+        raise RuntimeError("simulate strict torch.func.jvp failure")
+
+    monkeypatch.setattr(modeling_imf_attnres, "torch_func_jvp", failing_jvp)
+    with pytest.raises(RuntimeError, match="simulate strict torch.func.jvp failure") as exc_info:
+        model.compute_loss(batch)
+    assert "fallback is disabled" in " ".join(getattr(exc_info.value, "__notes__", []))
+    report = model.jvp_backend_report()
+    assert report["requested"] == "torch_func"
+    assert report["successful_calls"] == {"torch.func.jvp": 0, "torch.autograd.functional.jvp": 0}
+    assert report["last_error"]["message"] == "simulate strict torch.func.jvp failure"
+
+
 def test_flat_conditioning_preserves_but_freezes_layerwise_checkpoint_keys():
     policy = get_policy_class(POLICY_NAME)(make_tiny_imf_attnres_config())
     dormant = {name: parameter for name, parameter in policy.named_parameters() if ".layerwise_" in name}
@@ -649,7 +673,8 @@ def test_parent_policy_load_initializes_missing_legacy_semigroup_teacher():
     config.enable_semigroup_consistency = True
     policy = get_policy_class(POLICY_NAME)(config)
     source = {
-        key: value.clone() for key, value in policy.state_dict().items()
+        key: value.clone()
+        for key, value in policy.state_dict().items()
         if not key.startswith("model.semigroup_teacher_head.")
     }
     source["model.head.head.weight"].fill_(0.125)

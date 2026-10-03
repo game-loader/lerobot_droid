@@ -100,6 +100,8 @@ class IMFAttnResConfig(PreTrainedConfig):
     attn_res_rope_theta: float = 10000.0
 
     # Inference / loss computation / optimization.
+    # auto preserves legacy fallback; torch_func fails rather than switching algorithms.
+    jvp_backend: str = "auto"
     num_inference_steps: int = 1
     do_mask_loss_for_padding: bool = True
     p_mean: float = -0.4
@@ -162,6 +164,8 @@ class IMFAttnResConfig(PreTrainedConfig):
                 "n_action_steps must satisfy 1 <= n_action_steps <= horizon - n_obs_steps + 1. "
                 f"Got {self.n_action_steps=}, {self.horizon=}, {self.n_obs_steps=}."
             )
+        if self.jvp_backend not in {"auto", "torch_func"}:
+            raise ValueError(f"jvp_backend must be auto or torch_func, got {self.jvp_backend!r}.")
         if self.num_inference_steps < 1:
             raise ValueError(f"num_inference_steps must be >= 1, got {self.num_inference_steps}.")
         if self.p_std <= 0:

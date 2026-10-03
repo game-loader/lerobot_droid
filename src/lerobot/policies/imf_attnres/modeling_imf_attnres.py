@@ -698,6 +698,9 @@ class IMFAttnResModel(nn.Module):
     def __init__(self, config: IMFAttnResConfig):
         super().__init__()
         self.config = config
+        self._last_jvp_backend = None
+        self._last_jvp_error = None
+        self._jvp_successful_calls = {"torch.func.jvp": 0, "torch.autograd.functional.jvp": 0}
 
         state_dim = config.robot_state_feature.shape[0]
         cond_dim_per_step = state_dim
@@ -896,6 +899,15 @@ class IMFAttnResModel(nn.Module):
             raise RuntimeError("Semigroup teacher head is not initialized.")
         return self.semigroup_teacher_head(z, r, t, cond=cond)
 
+    def jvp_backend_report(self) -> dict:
+        """Runtime counters, not model parameters; expose fallback rather than guessing from imports."""
+        return {
+            "requested": self.config.jvp_backend,
+            "last_backend": self._last_jvp_backend,
+            "successful_calls": dict(self._jvp_successful_calls),
+            "last_error": self._last_jvp_error,
+        }
+
     def _compute_u_and_du_dt(
         self,
         z_t: Tensor,
@@ -912,19 +924,42 @@ class IMFAttnResModel(nn.Module):
             conditioned_z = self._apply_conditioning(z, condition_data, condition_mask)
             return self.fn(conditioned_z, r_value, t_value, cond=cond)
 
+        strict = self.config.jvp_backend == "torch_func"
         with self._jvp_math_sdp_context(z_t):
             if torch_func_jvp is not None:
                 try:
-                    return torch_func_jvp(g, (z_t, r, t), tangents)
-                except (RuntimeError, TypeError, NotImplementedError):
-                    pass
-            return torch.autograd.functional.jvp(
+                    result = torch_func_jvp(g, (z_t, r, t), tangents)
+                except Exception as error:
+                    self._last_jvp_error = {"type": type(error).__name__, "message": str(error)}
+                    if strict:
+                        error.add_note(
+                            "IMF jvp_backend=torch_func: fallback is disabled. "
+                            f"Input shape={tuple(z_t.shape)}, dtype={z_t.dtype}, device={z_t.device}. "
+                            "Original exception and traceback are preserved."
+                        )
+                        raise
+                    if not isinstance(error, (RuntimeError, TypeError, NotImplementedError)):
+                        raise
+                else:
+                    self._last_jvp_backend = "torch.func.jvp"
+                    self._jvp_successful_calls[self._last_jvp_backend] += 1
+                    return result
+            elif strict:
+                message = (
+                    f"torch.func.jvp is unavailable in PyTorch {torch.__version__}; fallback is disabled."
+                )
+                self._last_jvp_error = {"type": "RuntimeError", "message": message}
+                raise RuntimeError(message)
+            result = torch.autograd.functional.jvp(
                 g,
                 (z_t, r, t),
                 tangents,
                 create_graph=True,
                 strict=False,
             )
+            self._last_jvp_backend = "torch.autograd.functional.jvp"
+            self._jvp_successful_calls[self._last_jvp_backend] += 1
+            return result
 
     def _compound_velocity(self, u: Tensor, du_dt: Tensor, r: Tensor, t: Tensor) -> Tensor:
         delta = self._broadcast_batch_time(t - r, u)

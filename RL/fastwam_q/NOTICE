@@ -1,0 +1,21 @@
+FastWAM Q-Planning / DINOv3 adaptation
+
+Algorithm and reference implementation:
+  Beyond Imitation: Self-Improving Robot Policies via Off-Policy Q-Planning
+  Varun Giridhar, Anant Khandelwal, Jeremy A. Collins, Ignat Georgiev, Animesh Garg
+  arXiv:2608.21204v1
+  https://github.com/varungiridhar/qplanning-code
+  inspected commit: 4b955b42308e42bc0187b0a3c529c15b10f98447
+  model source: varungiridhar/lerobot, tag qplanning-release-v1
+  src/lerobot/policies/q_function/modeling_q_function.py
+  Reference repository license: Apache-2.0.
+
+This is a repository-native adaptation, not a bit-for-bit reproduction of the
+paper: DINOv3 replaces DINOv2; PyTorch SDPA and activation checkpointing reduce
+memory; padded action/text tokens are masked; the existing LeRobot FastWAM
+video-cache path is reused for batched proposal generation. No upstream gate,
+general environment launcher, actor-training method, or vendored model is added.
+
+DINOv3 and T5 are loaded through Transformers. DINOv3 weights remain subject to
+Meta's DINOv3 license; no weights or Meta source code are included here.
+The existing repository's Apache-2.0 license applies to this integration.
